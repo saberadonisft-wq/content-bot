@@ -1,0 +1,44 @@
+/* Hallmark · genre: modern-minimal · macrostructure: Workbench · tone: technical · theme: Cobalt · pre-emit critique: P5 H5 E5 S5 R5 V4 · contrast: pass (40–41) · nav: N13 · footer: Ft2 · slop: pass (42–45) · honest: pass (46) · chrome: pass (47) · tokens: pass (48) · responsive: pass (49) · mobile: pass (34, 49, 50–57) */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+:root {
+  --ink-strong: #102033;
+  --ink: #2e4054;
+  --ink-muted: #607084;
+  --surface: #f5f8fb;
+  --surface-raised: #ffffff;
+  --surface-tint: #eaf2fa;
+  --surface-sunken: #eaf2fa;
+  --surface-hover: #f8fbfe;
+  --line: #cad7e4;
+  --line-strong: #9eb3c7;
+  --cobalt: #0f5ea8;
+  --cobalt-deep: #0a4176;
+  --cobalt-soft: #d9eafb;
+  --accent: #0f5ea8;
+  --signal: #157a5d;
+  --signal-soft: #effaf5;
+  --signal-line: #8bcab5;
+  --warning: #a55a00;
+  --warning-soft: #fff8ea;
+  --warning-line: #f0cb8e;
+  --danger: #b42318;
+  --danger-soft: #fff4f3;
+  --danger-line: #ebb0ac;
+  --shadow-1: 0 1px 2px rgb(16 32 51 / 8%), 0 3px 8px rgb(16 32 51 / 6%);
+  --shadow-modal: 0 20px 60px rgb(16 32 51 / 30%);
+  --radius-1: 4px;
+  --radius-2: 7px;
+  --control-height: 36px;
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --font-ui: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+}
