@@ -1,3 +1,4 @@
+import "./canva-home.css";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   Activity,
@@ -5,6 +6,7 @@ import {
   Command,
   Database,
   Download,
+  Film,
   LoaderCircle,
   LogIn,
   Play,
@@ -13,6 +15,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  Video,
   Waypoints,
   X,
 } from "lucide-react";
@@ -31,7 +34,10 @@ import {
   runEventsUrl,
 } from "./api";
 
-type View = "workbench" | "sources" | "settings";
+import { SubtitleStudio } from "./SubtitleStudio";
+import { VideoLibrary } from "./VideoLibrary";
+
+type View = "workbench" | "sources" | "settings" | "subtitles" | "videos";
 const splitTerms = (value: string) =>
   value
     .split(",")
@@ -58,22 +64,33 @@ const metric = (item: Item) =>
 
 const phaseLabel = (run: SourceRun) => {
   const labels: Record<string, string> = {
-    queued: "Queued",
-    checking_source: "Checking source",
-    starting: "Starting scan",
-    searching: "Scanning public items",
-    opening_browser: "Opening Cốc Cốc",
-    waiting_login: "Waiting for login",
-    authenticated: "Login confirmed",
-    scanning: "Scanning after login",
-    completed: "Completed",
-    skipped: "Skipped",
-    cancelled: "Cancelled",
-    recovering_browser: "Reopening Cốc Cốc",
-    browser_closed: "Cốc Cốc was closed",
-    failed: "Failed",
+    queued: "Đang chờ",
+    checking_source: "Kiểm tra nguồn",
+    starting: "Khởi động quét",
+    searching: "Đang tìm kiếm",
+    opening_browser: "Mở trình duyệt Cốc Cốc",
+    waiting_login: "Chờ đăng nhập",
+    authenticated: "Đã xác thực",
+    scanning: "Đang quét sau đăng nhập",
+    completed: "Hoàn thành",
+    skipped: "Bỏ qua",
+    cancelled: "Đã hủy",
+    recovering_browser: "Mở lại Cốc Cốc",
+    browser_closed: "Cốc Cốc đã đóng",
+    failed: "Thất bại",
   };
   return labels[run.phase] ?? run.phase.replaceAll("_", " ");
+};
+
+const stateLabel = (state: string) => {
+  const labels: Record<string, string> = {
+    queued: "Đang chờ",
+    running: "Đang chạy",
+    succeeded: "Hoàn thành",
+    failed: "Thất bại",
+    cancelled: "Đã hủy",
+  };
+  return labels[state] ?? state;
 };
 
 const progressPercent = (run: SourceRun) => {
@@ -117,6 +134,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [keywordDialogOpen, setKeywordDialogOpen] = useState(false);
   const [keywordDraft, setKeywordDraft] = useState<Keyword | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [sourceFilter, setSourceFilter] = useState("");
   const [languageFilter, setLanguageFilter] = useState("");
   const [sentimentFilter, setSentimentFilter] = useState("");
@@ -518,50 +536,66 @@ export default function App() {
     : "#";
 
   return (
-    <div className="shell">
-      <a className="skip-link" href="#main">
-        Skip to workspace
-      </a>
-      <header className="masthead">
-        <div className="brand">
-          <span className="brand-mark">
-            <Radar size={15} />
-          </span>{" "}
-          Content Bot
+    <div className={`canva-home-app ${view === "subtitles" ? "editor-mode" : "home-mode"}`}>
+      <aside className="canva-home-sidebar">
+        <div className="canva-home-sidebar-header">
+          <Radar size={24} color="#7c3aed" /> Content Bot
         </div>
-        <button
-          className="command"
-          type="button"
-          onClick={() => setPaletteOpen(true)}
-          aria-label="Open command palette"
-        >
-          <Command size={15} /> Jump to a command <kbd>Ctrl K</kbd>
-        </button>
-        <div className="status-line">
-          LOCAL / SQLITE / {readySources.length} READY
+          
+          <button 
+            className="canva-home-create-btn"
+            onClick={() => {
+              setView("workbench");
+              setKeywordDraft(null);
+              setKeywordDialogOpen(true);
+            }}
+          >
+            <Plus size={18} /> Tạo dự án mới
+          </button>
+
+          <nav className="canva-home-nav">
+            <button
+              className={`canva-home-nav-item ${view === "workbench" ? "active" : ""}`}
+              onClick={() => setView("workbench")}
+            >
+              <Activity size={20} /> Trang chủ
+            </button>
+            <button
+              className={`canva-home-nav-item ${view === "sources" ? "active" : ""}`}
+              onClick={() => setView("sources")}
+            >
+              <Database size={20} /> Nguồn dữ liệu
+            </button>
+            <button
+              className={`canva-home-nav-item ${view === "subtitles" ? "active" : ""}`}
+              onClick={() => setView("subtitles")}
+            >
+              <Film size={20} /> Phụ đề Video
+            </button>
+            <button
+              className={`canva-home-nav-item ${view === "videos" ? "active" : ""}`}
+              onClick={() => setView("videos")}
+            >
+              <Video size={20} /> Quản lý Video
+            </button>
+            <button
+              className={`canva-home-nav-item ${view === "settings" ? "active" : ""}`}
+              onClick={() => setView("settings")}
+            >
+              <Settings2 size={20} /> Cấu hình
+            </button>
+          </nav>
+
+        <div className="canva-home-sidebar-footer">
+          <div className="canva-home-profile">V</div>
+          <div style={{flex: 1}}>
+            <div style={{fontSize: 13, fontWeight: 600}}>VHC Team</div>
+            <div style={{fontSize: 11, color: '#6b7280'}}>Gói Pro</div>
+          </div>
         </div>
-      </header>
-      <main id="main" className="main">
-        <nav className="toolbar" aria-label="Workspace navigation">
-          <button
-            className={`button secondary ${view === "workbench" ? "active" : ""}`}
-            onClick={() => setView("workbench")}
-          >
-            <Activity size={15} /> Workbench
-          </button>
-          <button
-            className={`button secondary ${view === "sources" ? "active" : ""}`}
-            onClick={() => setView("sources")}
-          >
-            <Database size={15} /> Sources
-          </button>
-          <button
-            className={`button secondary ${view === "settings" ? "active" : ""}`}
-            onClick={() => setView("settings")}
-          >
-            <Settings2 size={15} /> Settings
-          </button>
-        </nav>
+      </aside>
+      
+      <main className="canva-home-main">
         {view === "workbench" && (
           <Workbench
             selected={selected}
@@ -620,26 +654,17 @@ export default function App() {
               setKeywordDraft(selected);
               setKeywordDialogOpen(true);
             }}
-            onDelete={async () => {
-              if (
-                selected &&
-                confirm(`Delete tracked game “${selected.name}”?`)
-              ) {
-                await api.deleteKeyword(selected.id);
-                await load();
+            onDelete={() => {
+              if (selected) {
+                setDeleteConfirmOpen(true);
               }
             }}
           />
         )}
+        {view === "subtitles" && <SubtitleStudio />}
+        {view === "videos" && <VideoLibrary />}
       </main>
-      <footer className="footer">
-        <span>Public metadata only · 90-day retention · no CAPTCHA bypass</span>
-        <span>
-          {batch
-            ? `RUN ${batch.id.slice(0, 8)} / ${batch.state.toUpperCase()}`
-            : "IDLE"}
-        </span>
-      </footer>
+
       {keywordDialogOpen && (
         <KeywordDialog
           open
@@ -649,6 +674,19 @@ export default function App() {
           onSaved={async () => {
             setKeywordDialogOpen(false);
             await load();
+          }}
+        />
+      )}
+      {deleteConfirmOpen && selected && (
+        <DeleteConfirmDialog
+          open
+          name={selected.name}
+          onClose={() => setDeleteConfirmOpen(false)}
+          onConfirm={async () => {
+            await api.deleteKeyword(selected.id);
+            setDeleteConfirmOpen(false);
+            await load();
+            setToast(`Đã xóa game theo dõi “${selected.name}”.`);
           }}
         />
       )}
@@ -739,74 +777,54 @@ function Workbench({
 }) {
   return (
     <>
-      <section className="page-head">
-        <div>
-          <p className="eyebrow">Game social listening</p>
-          <h1>Signal workbench</h1>
-          <p className="subtle">
-            Rank public game discussion by relevance, engagement and recency.
-          </p>
-        </div>
-        <div className="toolbar">
-          <button className="button secondary" onClick={onRefresh}>
-            <RefreshCw size={15} /> Refresh
-          </button>
-          <a
-            className="button secondary"
-            href={onExport}
-            aria-disabled={!selected}
+      <div className="canva-home-header">
+        <h1>Các dự án dành cho bạn</h1>
+      </div>
+      
+      <div className="canva-section-title">
+        <span>Thiết kế gần đây</span>
+        <span className="canva-see-all" onClick={onNew}>+ Thêm dự án mới</span>
+      </div>
+
+      <div className="canva-design-grid">
+        {keywords.map((keyword) => (
+          <div 
+            key={keyword.id}
+            className={`canva-design-card ${selected?.id === keyword.id ? "active" : ""}`}
+            onClick={() => onSelect(keyword.id)}
           >
-            <Download size={15} /> CSV
-          </a>
-          <button className="button" onClick={onRun} disabled={running}>
-            {running ? (
-              <LoaderCircle className="spin" size={15} />
-            ) : (
-              <Search size={15} />
-            )}
-            {running ? "Queuing" : "Run now"}
-          </button>
-        </div>
-      </section>
-      <section className="workspace">
-        <aside className="panel">
-          <div className="panel-head">
-            <h2>Tracked games</h2>
-            <button
-              className="button secondary"
-              onClick={onNew}
-              aria-label="Add tracked game"
-            >
-              <Plus size={15} />
-            </button>
+            <div className="canva-design-thumbnail">
+              <Activity />
+            </div>
+            <div className="canva-design-info">
+              <h3 className="canva-design-title">{keyword.name}</h3>
+              <div className="canva-design-meta">
+                <Radar /> {keyword.source_ids.length} nguồn · {keyword.enabled ? `${keyword.interval_minutes} phút` : "thủ công"}
+              </div>
+            </div>
           </div>
-          <div className="panel-body">
-            <ul className="keyword-list">
-              {keywords.map((keyword) => (
-                <li key={keyword.id}>
-                  <button
-                    className={selected?.id === keyword.id ? "active" : ""}
-                    onClick={() => onSelect(keyword.id)}
-                  >
-                    <span className="keyword-name">{keyword.name}</span>
-                    <span className="keyword-meta">
-                      {keyword.enabled
-                        ? `${keyword.interval_minutes} min`
-                        : "manual"}{" "}
-                      · {keyword.source_ids.length} sources
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-            {!keywords.length && !loading && (
-              <p className="subtle">No tracked games yet.</p>
-            )}
-          </div>
-        </aside>
-        <section className="panel">
-          <div className="panel-head">
-            <h2>{selected ? selected.name : "No selection"}</h2>
+        ))}
+      </div>
+
+      {!keywords.length && !loading && (
+        <p style={{color: '#6b7280', marginTop: 16}}>Chưa có dự án nào. Hãy tạo một dự án mới.</p>
+      )}
+
+      {selected && (
+        <section className="panel" style={{marginTop: 40}}>
+          <div className="panel-head" style={{display: 'flex', justifyContent: 'space-between'}}>
+            <h2>Chi tiết dự án: {selected.name}</h2>
+            <div className="toolbar" style={{display: 'flex', gap: 8}}>
+              <button className="button secondary" onClick={onRefresh}>
+                <RefreshCw size={15} />
+              </button>
+              <a className="button secondary" href={onExport} aria-disabled={!selected}>
+                <Download size={15} />
+              </a>
+              <button className="button" onClick={onRun} disabled={running}>
+                {running ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}
+              </button>
+            </div>
           </div>
           {selected && (
             <div className="analysis-filters" aria-label="Result filters">
@@ -816,7 +834,7 @@ function Workbench({
                 onChange={(event) => setSourceFilter(event.target.value)}
                 aria-label="Filter by source"
               >
-                <option value="">All sources</option>
+                <option value="">Tất cả nguồn</option>
                 {sources.map((source) => (
                   <option key={source.id} value={source.id}>
                     {source.label}
@@ -827,192 +845,199 @@ function Workbench({
                 className="filter"
                 value={languageFilter}
                 onChange={(event) => setLanguageFilter(event.target.value)}
-                aria-label="Filter by language"
+                aria-label="Lọc theo ngôn ngữ"
               >
-                <option value="">All languages</option>
-                <option value="vi">Vietnamese</option>
-                <option value="en">English</option>
-                <option value="zh">Chinese</option>
-                <option value="ja">Japanese</option>
-                <option value="ko">Korean</option>
-                <option value="und">Unknown</option>
+                <option value="">Tất cả ngôn ngữ</option>
+                <option value="vi">Tiếng Việt</option>
+                <option value="en">Tiếng Anh</option>
+                <option value="zh">Tiếng Trung</option>
+                <option value="ja">Tiếng Nhật</option>
+                <option value="ko">Tiếng Hàn</option>
+                <option value="und">Không xác định</option>
               </select>
               <select
                 className="filter"
                 value={sentimentFilter}
                 onChange={(event) => setSentimentFilter(event.target.value)}
-                aria-label="Filter by sentiment"
+                aria-label="Lọc theo cảm xúc"
               >
-                <option value="">All sentiments</option>
-                <option value="positive">Positive</option>
-                <option value="negative">Negative</option>
-                <option value="mixed">Mixed</option>
-                <option value="neutral">Neutral</option>
+                <option value="">Tất cả cảm xúc</option>
+                <option value="positive">Tích cực</option>
+                <option value="negative">Tiêu cực</option>
+                <option value="mixed">Hỗn hợp</option>
+                <option value="neutral">Trung lập</option>
               </select>
               <select
                 className="filter"
                 value={topicFilter}
                 onChange={(event) => setTopicFilter(event.target.value)}
-                aria-label="Filter by game topic"
+                aria-label="Lọc theo chủ đề game"
               >
-                <option value="">All topics</option>
-                <option value="bugs">Bugs &amp; crashes</option>
-                <option value="performance">Performance</option>
+                <option value="">Tất cả chủ đề</option>
+                <option value="bugs">Lỗi &amp; sự cố</option>
+                <option value="performance">Hiệu năng</option>
                 <option value="gameplay">Gameplay</option>
-                <option value="updates">Updates &amp; content</option>
-                <option value="monetization">Monetization</option>
-                <option value="story">Story &amp; lore</option>
-                <option value="community">Community</option>
+                <option value="updates">Cập nhật &amp; nội dung</option>
+                <option value="monetization">Kiếm tiền hóa</option>
+                <option value="story">Cốt truyện &amp; lịch sử</option>
+                <option value="community">Cộng đồng</option>
               </select>
             </div>
           )}
           {selected && (
-            <InsightOverview
-              summary={summary}
-              loading={summaryLoading}
-              sources={sources}
-            />
-          )}
-          {selected && (
-            <StoryClusters
-              data={clusters}
-              loading={clustersLoading}
-              error={clustersError}
-              sources={sources}
-              onRetry={onRefresh}
-            />
-          )}
-          {!selected ? (
-            <Empty onNew={onNew} />
-          ) : (
-            <div className="table-wrap">
+            <>
+              {/* ── Zone 1: Trạng thái quét ── */}
               {batch && (
-                <div className="notice">
-                  <span>
-                    Latest run: <strong>{batch.state}</strong> ·{" "}
-                    {
-                      batch.source_runs.filter(
-                        (run) => run.state === "succeeded",
-                      ).length
-                    }
-                    /{batch.source_runs.length} source jobs completed.
-                  </span>
-                  {["queued", "running"].includes(batch.state) && (
-                    <button
-                      className="button danger compact-button"
-                      onClick={onCancel}
-                      disabled={canceling}
-                    >
-                      {canceling ? (
-                        <LoaderCircle className="spin" size={15} />
-                      ) : (
-                        <CircleStop size={15} />
-                      )}
-                      {canceling ? "Canceling" : "Cancel run"}
-                    </button>
-                  )}
-                </div>
-              )}
-              {!!runs.length && (
-                <ol className="run-list" aria-label="Recent scan history">
-                  {runs.slice(0, 3).map((run) => {
-                    const ingested = run.source_runs.reduce(
-                      (total, sourceRun) => total + sourceRun.ingested_count,
-                      0,
-                    );
-                    const failure = run.source_runs.find(
-                      (sourceRun) => sourceRun.error_message,
-                    );
-                    return (
-                      <li key={run.id}>
-                        <span className={`badge ${run.state}`}>{run.state}</span>
-                        <span className="mono">{fmt(run.started_at)}</span>
-                        <span className="run-summary">
-                          {ingested.toLocaleString("vi-VN")} items · {run.source_runs.length} sources
-                        </span>
-                        {failure && (
-                          <span className="run-error" role="alert">
-                            {failure.source_id}: {failure.error_message}
-                          </span>
+                <section className={`zone zone-scan ${batch.state}`} aria-label="Trạng thái quét">
+                  <h3 className="zone-title">🔄 Trạng thái quét</h3>
+                  <div className="notice">
+                    <span>
+                      Lần quét gần nhất: <strong>{stateLabel(batch.state)}</strong> ·{" "}
+                      {
+                        batch.source_runs.filter(
+                          (run) => run.state === "succeeded",
+                        ).length
+                      }
+                      /{batch.source_runs.length} nguồn hoàn thành.
+                    </span>
+                    {["queued", "running"].includes(batch.state) && (
+                      <button
+                        className="button danger compact-button"
+                        onClick={onCancel}
+                        disabled={canceling}
+                      >
+                        {canceling ? (
+                          <LoaderCircle className="spin" size={15} />
+                        ) : (
+                          <CircleStop size={15} />
                         )}
-                      </li>
-                    );
-                  })}
-                </ol>
-              )}
-              <table>
-                <thead>
-                  <tr>
-                    <th>Public item</th>
-                    <th>Source</th>
-                    <th>Metrics</th>
-                    <th>Trend</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((item) => (
-                    <tr key={item.id}>
-                      <td>
-                        <a
-                          className="item-title"
-                          href={item.canonical_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {item.title}
-                        </a>
-                        <div className="mono">
-                          {item.author || "Unknown author"} ·{" "}
-                          {fmt(item.published_at)}
-                        </div>
-                        <div
-                          className="insight-line"
-                          aria-label={`Rule-based analysis: ${item.insights.language.label}, ${item.insights.sentiment.label} sentiment${item.insights.topics.length ? `, topics ${item.insights.topics.map((topic) => topic.label).join(", ")}` : ""}`}
-                        >
-                          <span className="insight-chip language">
-                            {item.insights.language.code.toUpperCase()} ·{" "}
-                            {Math.round(
-                              item.insights.language.confidence * 100,
-                            )}
-                            %
-                          </span>
-                          <span
-                            className={`insight-chip sentiment ${item.insights.sentiment.label}`}
-                          >
-                            {item.insights.sentiment.label}
-                          </span>
-                          {item.insights.topics.slice(0, 3).map((topic) => (
-                            <span className="insight-chip" key={topic.id}>
-                              {topic.label}
+                        {canceling ? "Đang hủy" : "Hủy quét"}
+                      </button>
+                    )}
+                  </div>
+                  {!!runs.length && (
+                    <ol className="run-list" aria-label="Lịch sử quét gần đây">
+                      {runs.slice(0, 3).map((run) => {
+                        const ingested = run.source_runs.reduce(
+                          (total, sourceRun) => total + sourceRun.ingested_count,
+                          0,
+                        );
+                        const failure = run.source_runs.find(
+                          (sourceRun) => sourceRun.error_message,
+                        );
+                        return (
+                          <li key={run.id}>
+                            <span className={`badge ${run.state}`}>{stateLabel(run.state)}</span>
+                            <span className="mono">{fmt(run.started_at)}</span>
+                            <span className="run-summary">
+                              {ingested.toLocaleString("vi-VN")} bài viết · {run.source_runs.length} nguồn
                             </span>
-                          ))}
-                        </div>
-                        {!!insightEvidence(item).length && (
-                          <div className="insight-evidence">
-                            Signals: {insightEvidence(item).join(", ")}
-                          </div>
-                        )}
-                      </td>
-                      <td>
-                        <span className="badge">{item.source_id}</span>
-                      </td>
-                      <td className="metrics">{metric(item)}</td>
-                      <td>
-                        <span className="score">
-                          {item.trend_score.toFixed(1)}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {!items.length && !loading && (
-                <Empty onNew={onRun} action="Run a scan" compact />
+                            {failure && (
+                              <span className="run-error" role="alert">
+                                {failure.source_id}: {failure.error_message}
+                              </span>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  )}
+                </section>
               )}
-            </div>
+
+              {/* ── Zone 2: Tổng quan phân tích ── */}
+              <section className="zone zone-analytics" aria-label="Tổng quan phân tích">
+                <InsightOverview
+                  summary={summary}
+                  loading={summaryLoading}
+                  sources={sources}
+                />
+                <StoryClusters
+                  data={clusters}
+                  loading={clustersLoading}
+                  error={clustersError}
+                  sources={sources}
+                  onRetry={onRefresh}
+                />
+              </section>
+
+              {/* ── Zone 3: Danh sách bài viết ── */}
+              <section className="zone zone-content" aria-label="Danh sách bài viết">
+                <h3 className="zone-title">📋 Danh sách bài viết</h3>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Bài viết</th>
+                      <th>Nguồn</th>
+                      <th>Tương tác</th>
+                      <th>Xu hướng</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((item) => (
+                      <tr key={item.id}>
+                        <td>
+                          <a
+                            className="item-title"
+                            href={item.canonical_url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {item.title}
+                          </a>
+                          <div className="mono">
+                            {item.author || "Không rõ tác giả"} ·{" "}
+                            {fmt(item.published_at)}
+                          </div>
+                          <div
+                            className="insight-line"
+                            aria-label={`Phân tích: ${item.insights.language.label}, cảm xúc ${item.insights.sentiment.label}${item.insights.topics.length ? `, chủ đề ${item.insights.topics.map((topic) => topic.label).join(", ")}` : ""}`}
+                          >
+                            <span className="insight-chip language">
+                              {item.insights.language.code.toUpperCase()} ·{" "}
+                              {Math.round(
+                                item.insights.language.confidence * 100,
+                              )}
+                              %
+                            </span>
+                            <span
+                              className={`insight-chip sentiment ${item.insights.sentiment.label}`}
+                            >
+                              {item.insights.sentiment.label}
+                            </span>
+                            {item.insights.topics.slice(0, 3).map((topic) => (
+                              <span className="insight-chip" key={topic.id}>
+                                {topic.label}
+                              </span>
+                            ))}
+                          </div>
+                          {!!insightEvidence(item).length && (
+                            <div className="insight-evidence">
+                              Tín hiệu: {insightEvidence(item).join(", ")}
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          <span className="badge">{item.source_id}</span>
+                        </td>
+                        <td className="metrics">{metric(item)}</td>
+                        <td>
+                          <span className="score">
+                            {item.trend_score.toFixed(1)}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!items.length && !loading && (
+                  <Empty onNew={onRun} action="Quét ngay" compact />
+                )}
+              </section>
+            </>
           )}
         </section>
-      </section>
+      )}
     </>
   );
 }
@@ -1042,10 +1067,10 @@ function StoryClusters({
       <div className="story-clusters-head">
         <div>
           <h3 id="story-clusters-title">
-            <Waypoints size={15} aria-hidden="true" /> Story clusters
+            <Waypoints size={15} aria-hidden="true" /> 📰 Nhóm tin tức liên quan
           </h3>
           <p>
-            Shared links or strong title overlap across distinct origins.
+            Liên kết chung hoặc tiêu đề tương tự giữa các nguồn khác nhau.
           </p>
         </div>
         {data && (
@@ -1065,9 +1090,9 @@ function StoryClusters({
       )}
       {error && (
         <div className="story-error" role="alert">
-          <span>Story clusters failed to load. {error}</span>
+          <span>Không tải được nhóm tin. {error}</span>
           <button className="button secondary compact-button" onClick={onRetry}>
-            <RefreshCw size={14} aria-hidden="true" /> Try again
+            <RefreshCw size={14} aria-hidden="true" /> Thử lại
           </button>
         </div>
       )}
@@ -1080,19 +1105,19 @@ function StoryClusters({
                   {cluster.label}
                 </span>
                 <span className="story-cluster-meta">
-                  {cluster.item_count.toLocaleString("vi-VN")} items ·{" "}
-                  {cluster.origin_count.toLocaleString("vi-VN")} origins · peak{" "}
+                  {cluster.item_count.toLocaleString("vi-VN")} bài ·{" "}
+                  {cluster.origin_count.toLocaleString("vi-VN")} nguồn · đỉnh{" "}
                   {cluster.max_trend_score.toFixed(1)}
                 </span>
               </summary>
               <div className="story-cluster-body">
                 <dl>
                   <div>
-                    <dt>Item hosts</dt>
+                    <dt>Nguồn gốc</dt>
                     <dd>{cluster.item_hosts.join(", ")}</dd>
                   </div>
                   <div>
-                    <dt>Sources</dt>
+                    <dt>Nguồn dữ liệu</dt>
                     <dd>
                       {cluster.source_ids
                         .map((id) => sourceLabels.get(id) ?? id)
@@ -1100,7 +1125,7 @@ function StoryClusters({
                     </dd>
                   </div>
                   <div>
-                    <dt>Why grouped</dt>
+                    <dt>Lý do nhóm</dt>
                     <dd>{cluster.match_reasons.join(" · ")}</dd>
                   </div>
                 </dl>
@@ -1123,8 +1148,7 @@ function StoryClusters({
                 </ol>
                 {cluster.items.length > 6 && (
                   <p className="story-more">
-                    {cluster.items.length - 6} more members are available from
-                    the API.
+                    {cluster.items.length - 6} thành viên khác có sẵn từ API.
                   </p>
                 )}
               </div>
@@ -1135,13 +1159,13 @@ function StoryClusters({
       {data && !data.clusters.length && !error && (
         <p className="story-empty">
           {data.total_items > 0
-            ? `No repeated story passed the conservative evidence threshold across ${data.total_items.toLocaleString("vi-VN")} filtered items.`
-            : "No filtered items are available yet. Scan at least two public origins to look for repeated stories."}
+            ? `Không có nhóm tin lặp lại vượt ngưỡng từ ${data.total_items.toLocaleString("vi-VN")} bài viết đã lọc.`
+            : "Chưa có bài viết nào. Quét ít nhất hai nguồn công khai để tìm nhóm tin."}
         </p>
       )}
       {data && (
         <p className="story-caveat">
-          Review every member before treating a cluster as one story. Method:{" "}
+          Kiểm tra từng thành viên trước khi coi nhóm này là một câu chuyện. Phương pháp:{" "}
           {data.method}.
         </p>
       )}
@@ -1169,16 +1193,16 @@ function InsightOverview({
     >
       <div className="insight-overview-head">
         <div>
-          <h3 id="insight-overview-title">Filtered overview</h3>
+          <h3 id="insight-overview-title">📈 Tổng quan phân tích</h3>
           <p>
             {loading && !summary
-              ? "Updating the filtered sample…"
-              : `${summary?.total_items.toLocaleString("vi-VN") ?? 0} public items in this view`}
+              ? "Đang cập nhật dữ liệu…"
+              : `${summary?.total_items.toLocaleString("vi-VN") ?? 0} bài viết công khai`}
           </p>
         </div>
         {summary && (
           <span className="summary-coverage">
-            {summary.topic_coverage_count.toLocaleString("vi-VN")} topic-tagged ·{" "}
+            {summary.topic_coverage_count.toLocaleString("vi-VN")} đã gắn chủ đề ·{" "}
             {summary.topic_coverage_percentage.toLocaleString("vi-VN")}%
           </span>
         )}
@@ -1187,22 +1211,22 @@ function InsightOverview({
         <>
           <div className="insight-overview-grid">
             <div className="insight-group">
-              <h4>Sentiment</h4>
+              <h4>Cảm xúc</h4>
               <SummaryBuckets rows={summary.sentiments} />
             </div>
             <div className="insight-group">
-              <h4>Game topics</h4>
+              <h4>Chủ đề game</h4>
               <SummaryBuckets rows={summary.topics.slice(0, 5)} />
             </div>
             <div className="insight-group">
-              <h4>Sources</h4>
+              <h4>Nguồn</h4>
               <SummaryBuckets
                 rows={summary.sources.slice(0, 5)}
                 labelFor={(row) => sourceLabels.get(row.id) ?? row.label}
               />
             </div>
             <div className="insight-group">
-              <h4>Top signals</h4>
+              <h4>Từ khóa nổi bật</h4>
               {summary.top_signals.length ? (
                 <ul className="signal-list">
                   {summary.top_signals.slice(0, 6).map((signal) => (
@@ -1213,13 +1237,13 @@ function InsightOverview({
                   ))}
                 </ul>
               ) : (
-                <p className="summary-empty">No rule signals detected.</p>
+                <p className="summary-empty">Không phát hiện tín hiệu nào.</p>
               )}
             </div>
           </div>
           {!!summary.top_items.length && (
             <div className="rising-strip">
-              <h4>Highest trend scores</h4>
+              <h4>🔥 Bài viết xu hướng cao nhất</h4>
               <ol>
                 {summary.top_items.slice(0, 5).map((item) => (
                   <li key={item.id}>
@@ -1243,13 +1267,13 @@ function InsightOverview({
       ) : (
         !loading && (
           <p className="summary-empty">
-            No public items match the current filter combination.
+            Không có bài viết nào phù hợp với bộ lọc hiện tại.
           </p>
         )
       )}
       {summary && (
         <p className="summary-caveat">
-          {summary.caveat} Method: {summary.method}.
+          {summary.caveat} Phương pháp: {summary.method}.
         </p>
       )}
     </section>
@@ -1264,7 +1288,7 @@ function SummaryBuckets({
   labelFor?: (row: InsightBucket) => string;
 }) {
   if (!rows.length) {
-    return <p className="summary-empty">No categories detected.</p>;
+    return <p className="summary-empty">Không phát hiện danh mục nào.</p>;
   }
   return (
     <ul className="summary-buckets">
@@ -1299,12 +1323,12 @@ function Empty({
     <div className={`empty ${compact ? "compact" : ""}`}>
       <Radar size={30} color="var(--cobalt)" />
       <h2>
-        {compact ? "No matching public items yet" : "Start with one game"}
+        {compact ? "Chưa có bài viết phù hợp" : "Bắt đầu với một game"}
       </h2>
       <p>
         {compact
-          ? "The result table stays empty until a configured source returns public content."
-          : "Create a keyword set, then run a local collection pass against your configured sources."}
+          ? "Bảng dữ liệu sẽ trống cho đến khi nguồn được cấu hình trả về nội dung công khai."
+          : "Tạo bộ từ khóa, sau đó chạy quét từ các nguồn đã cấu hình."}
       </p>
       <button className="button" onClick={onNew}>
         <Plus size={15} /> {action}
@@ -1350,10 +1374,9 @@ function Sources({
     <>
       <section className="page-head">
         <div>
-          <h1>Sources</h1>
+          <h1>Nguồn dữ liệu</h1>
           <p className="subtle">
-            Run public connectors directly, or open one supervised login
-            source at a time.
+            Chạy các nguồn công khai trực tiếp, hoặc mở từng nguồn cần đăng nhập.
           </p>
         </div>
       </section>
@@ -1361,13 +1384,13 @@ function Sources({
         <div>
           <strong>
             {selected
-              ? `Selected game: “${selected.name}”`
-              : "Select a game first"}
+              ? `Game đang chọn: "${selected.name}"`
+              : "Chọn game trước"}
           </strong>
           <p>
             {selected
-              ? "Login sources open a visible browser after a 20–30 second startup. Keep the batch running, then complete QR, phone or slider confirmation there; Content Bot never bypasses it."
-              : "Open Workbench and choose a tracked game. Source controls stay disabled until a game is selected."}
+              ? "Nguồn cần đăng nhập sẽ mở trình duyệt sau 20–30 giây. Giữ batch chạy, hoàn tất QR hoặc xác nhận điện thoại trong đó; Content Bot không bao giờ vượt qua bước này."
+              : "Mở Phân tích và chọn một game đang theo dõi. Các nút nguồn sẽ bị tắt cho đến khi chọn game."}
           </p>
         </div>
         {activeBatch && (
@@ -1381,7 +1404,7 @@ function Sources({
             ) : (
               <CircleStop size={15} />
             )}
-            {canceling ? "Canceling" : "Cancel run"}
+            {canceling ? "Đang hủy" : "Hủy quét"}
           </button>
         )}
       </section>
@@ -1392,7 +1415,7 @@ function Sources({
           aria-live="polite"
         >
           <div className="source-progress-head">
-            <strong>Batch {batch.id.slice(0, 8)}</strong>
+            <strong>Đợt quét #{batch.id.slice(0, 8)}</strong>
             <span className={`badge ${batch.state}`}>{batch.state}</span>
           </div>
           <ul>
@@ -1405,8 +1428,8 @@ function Sources({
                   <span>
                     <strong>{source?.label ?? sourceRun.source_id}</strong>
                     <span className="mono">
-                      {phaseLabel(sourceRun)} · fetched {sourceRun.fetched_count} ·
-                      stored {sourceRun.ingested_count}
+                      {phaseLabel(sourceRun)} · đã lấy {sourceRun.fetched_count} ·
+                      đã lưu {sourceRun.ingested_count}
                     </span>
                   </span>
                   <div
@@ -1440,12 +1463,12 @@ function Sources({
                     <span>
                       {sourceRun.message || phaseLabel(sourceRun)}
                       {sourceRun.browser_state === "waiting_login" &&
-                        " · QR/phone confirmation is shown in Cốc Cốc"}
+                        " · QR/xác nhận điện thoại đang hiển thị trong Cốc Cốc"}
                     </span>
                     <span className="mono">
                       {progressPercent(sourceRun) !== null
                         ? `${Math.round(progressPercent(sourceRun) ?? 0)}%`
-                        : "in progress"}
+                        : "đang xử lý"}
                     </span>
                   </span>
                   {sourceRun.error_message && (
@@ -1479,7 +1502,7 @@ function Sources({
               <div className="source-card-meta">
                 <span className="mono">{source.group}</span>
                 <span className="mono">
-                  {source.requires_login ? "VISIBLE LOGIN" : "PUBLIC"}
+                  {source.requires_login ? "CÔNG KHÔNG - CẦN ĐĂNG NHẬP" : "CÔNG KHAI"}
                 </span>
               </div>
               <button
@@ -1499,19 +1522,19 @@ function Sources({
                   <Play size={15} />
                 )}
                 {sourceIsActive
-                  ? "Running"
+                  ? "Đang chạy"
                   : pendingSourceId === source.id
-                    ? "Queuing"
+                    ? "Đang khởi động"
                   : unavailable
-                    ? "Needs setup"
+                    ? "Cần cấu hình"
                     : source.requires_login
-                      ? "Login & scan"
-                      : "Scan source"}
+                      ? "Đăng nhập & quét"
+                      : "Quét nguồn"}
               </button>
             </article>
           );
         })}
-        {loading && <p className="subtle">Checking local configuration…</p>}
+        {loading && <p className="subtle">Đang kiểm tra cấu hình…</p>}
       </div>
     </>
   );
@@ -1529,10 +1552,10 @@ function Settings({
     <>
       <section className="page-head">
         <div>
-          <p className="eyebrow">Tracking configuration</p>
-          <h1>Settings</h1>
+          <p className="eyebrow">Cấu hình theo dõi</p>
+          <h1>Cấu hình</h1>
           <p className="subtle">
-            The selected game controls scope, scheduling and source caps.
+            Game được chọn sẽ áp dụng giới hạn nguồn, từ khóa tìm kiếm và chu kỳ tự động.
           </p>
         </div>
       </section>
@@ -1542,24 +1565,24 @@ function Settings({
             <div>
               <strong>{selected.name}</strong>
               <p className="subtle">
-                Includes: {selected.include_terms.join(", ") || "keyword name"}
+                Từ khóa bao gồm: {selected.include_terms.join(", ") || "tên game"}
               </p>
               <p className="subtle">
-                Excludes: {selected.exclude_terms.join(", ") || "none"}
+                Từ khóa loại trừ: {selected.exclude_terms.join(", ") || "không có"}
               </p>
               <p className="subtle">
-                Per source cap: {selected.max_items_per_source} · cadence:{" "}
+                Giới hạn mỗi nguồn: {selected.max_items_per_source} bài · chu kỳ:{" "}
                 {selected.enabled
-                  ? `${selected.interval_minutes} min`
-                  : "manual"}
+                  ? `${selected.interval_minutes} phút`
+                  : "thủ công"}
               </p>
             </div>
             <div className="toolbar">
               <button className="button" onClick={onEdit}>
-                Edit tracking
+                Chỉnh sửa theo dõi
               </button>
               <button className="button danger" onClick={onDelete}>
-                Delete tracking
+                Xóa theo dõi
               </button>
             </div>
           </div>
@@ -1589,19 +1612,19 @@ function CommandPalette({
     else ref.current?.close();
   }, [open]);
   return (
-    <dialog ref={ref} onClose={onClose} aria-label="Command palette">
+    <dialog ref={ref} onClose={onClose} aria-label="Bảng lệnh nhanh">
       <div className="modal-head">
-        <strong>Command palette</strong>
+        <strong>Bảng lệnh nhanh</strong>
         <button className="button secondary" onClick={onClose}>
           <X size={15} />
         </button>
       </div>
       <div className="modal-body stack">
         <button className="command" onClick={onNew}>
-          <Plus size={15} /> Add tracked game
+          <Plus size={15} /> Thêm game theo dõi
         </button>
         <button className="command" onClick={onRun}>
-          <Search size={15} /> Run selected game
+          <Search size={15} /> Quét game đang chọn
         </button>
         <button
           className="command"
@@ -1610,7 +1633,7 @@ function CommandPalette({
             onClose();
           }}
         >
-          <Database size={15} /> Open sources
+          <Database size={15} /> Mở nguồn dữ liệu
         </button>
       </div>
     </dialog>
@@ -1659,32 +1682,32 @@ function KeywordDialog({
     }
   };
   return (
-    <dialog ref={ref} onClose={onClose} aria-label="Tracked game form">
+    <dialog ref={ref} onClose={onClose} aria-label="Biểu mẫu game theo dõi">
       <form onSubmit={(event) => void submit(event)}>
         <div className="modal-head">
-          <strong>{initial ? "Edit tracking" : "Add tracked game"}</strong>
+          <strong>{initial ? "Sửa thông tin theo dõi" : "Thêm game theo dõi"}</strong>
           <button
             className="button secondary"
             type="button"
             onClick={onClose}
-            aria-label="Close tracked game form"
+            aria-label="Đóng biểu mẫu"
           >
             <X size={15} />
           </button>
         </div>
         <div className="modal-body form-grid">
           <label className="field wide">
-            Game / tracked keyword
+            Tên game / Từ khóa chính
             <input
               required
               name="name"
               defaultValue={initial?.name}
-              placeholder="e.g. Hades II"
+              placeholder="ví dụ: Hades II"
               autoFocus
             />
           </label>
           <label className="field">
-            Include terms, comma-separated
+            Từ khóa phụ (phân cách bằng dấu phẩy)
             <input
               name="include_terms"
               defaultValue={initial?.include_terms.join(", ")}
@@ -1692,26 +1715,26 @@ function KeywordDialog({
             />
           </label>
           <label className="field">
-            Exclude terms, comma-separated
+            Từ khóa loại trừ (phân cách bằng dấu phẩy)
             <input
               name="exclude_terms"
               defaultValue={initial?.exclude_terms.join(", ")}
-              placeholder="giveaway, unrelated term"
+              placeholder="giveaway, spam"
             />
           </label>
           <label className="field">
-            Schedule
+            Chu kỳ tự động
             <select
               name="interval_minutes"
               defaultValue={initial?.interval_minutes ?? 360}
             >
-              <option value="60">Every hour</option>
-              <option value="360">Every 6 hours</option>
-              <option value="1440">Daily</option>
+              <option value="60">Mỗi 1 giờ</option>
+              <option value="360">Mỗi 6 giờ</option>
+              <option value="1440">Mỗi ngày</option>
             </select>
           </label>
           <label className="field">
-            Maximum items/source
+            Số bài tối đa / nguồn
             <input
               name="max_items_per_source"
               type="number"
@@ -1721,7 +1744,7 @@ function KeywordDialog({
             />
           </label>
           <fieldset className="field wide">
-            <legend>Sources</legend>
+            <legend>Nguồn áp dụng</legend>
             <div className="check-list">
               {sources.map((source) => (
                 <label
@@ -1742,7 +1765,7 @@ function KeywordDialog({
                   />{" "}
                   {source.label}{" "}
                   <span className="mono">
-                    {source.state === "ready" ? "READY" : "SETUP"}
+                    {source.state === "ready" ? "SẴN SÀNG" : "CẦN CẤU HÌNH"}
                   </span>
                 </label>
               ))}
@@ -1755,19 +1778,90 @@ function KeywordDialog({
                 name="enabled"
                 defaultChecked={initial?.enabled ?? true}
               />{" "}
-              Enable scheduled runs
+              Kích hoạt chạy tự động theo chu kỳ
             </span>
           </label>
         </div>
         <div className="modal-actions">
           <button type="button" className="button secondary" onClick={onClose}>
-            Cancel
+            Hủy
           </button>
           <button className="button" disabled={saving}>
-            {saving ? "Saving…" : "Save tracking"}
+            {saving ? "Đang lưu…" : "Lưu thay đổi"}
           </button>
         </div>
       </form>
+    </dialog>
+  );
+}
+
+function DeleteConfirmDialog({
+  open,
+  name,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  name: string;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    if (open) ref.current?.showModal();
+    else ref.current?.close();
+  }, [open]);
+
+  const handleConfirm = async () => {
+    setDeleting(true);
+    try {
+      await onConfirm();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <dialog ref={ref} onClose={onClose} aria-label="Xác nhận xóa game">
+      <div className="modal-head">
+        <strong>Xác nhận xóa game theo dõi</strong>
+        <button
+          className="button secondary"
+          type="button"
+          onClick={onClose}
+          aria-label="Đóng"
+        >
+          <X size={15} />
+        </button>
+      </div>
+      <div className="modal-body stack">
+        <p>
+          Bạn có chắc chắn muốn xóa game <strong>“{name}”</strong> khỏi danh sách theo dõi?
+        </p>
+        <p className="subtle">
+          Tất cả thiết lập từ khóa và dữ liệu phân tích liên quan đến game này sẽ bị loại bỏ khỏi danh sách hiển thị.
+        </p>
+      </div>
+      <div className="modal-actions">
+        <button
+          type="button"
+          className="button secondary"
+          onClick={onClose}
+          disabled={deleting}
+        >
+          Hủy
+        </button>
+        <button
+          type="button"
+          className="button danger"
+          onClick={() => void handleConfirm()}
+          disabled={deleting}
+        >
+          {deleting ? "Đang xóa…" : "Xóa game"}
+        </button>
+      </div>
     </dialog>
   );
 }

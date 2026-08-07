@@ -96,14 +96,25 @@ class MongoStore:
         if batch_ids:
             self.db.source_runs.delete_many({"batch_id": {"$in": batch_ids}})
             self.db.crawl_batches.delete_many({"_id": {"$in": batch_ids}})
-        content_ids = [
-            row["content_item_id"]
-            for row in self.db.item_keyword_matches.find({"keyword_id": keyword_id}, {"content_item_id": 1})
-        ]
+        content_ids = list(
+            {
+                row["content_item_id"]
+                for row in self.db.item_keyword_matches.find({"keyword_id": keyword_id}, {"content_item_id": 1})
+            }
+        )
         self.db.item_keyword_matches.delete_many({"keyword_id": keyword_id})
-        for content_id in set(content_ids):
-            if self.db.item_keyword_matches.find_one({"content_item_id": content_id}, {"_id": 1}) is None:
-                self.delete_item(content_id)
+        if content_ids:
+            still_matched = set(
+                row["content_item_id"]
+                for row in self.db.item_keyword_matches.find(
+                    {"content_item_id": {"$in": content_ids}},
+                    {"content_item_id": 1},
+                )
+            )
+            orphan_ids = [cid for cid in content_ids if cid not in still_matched]
+            if orphan_ids:
+                self.db.content_items.delete_many({"_id": {"$in": orphan_ids}})
+                self.db.metric_snapshots.delete_many({"content_item_id": {"$in": orphan_ids}})
         return True
 
     def create_batch(self, batch: dict[str, Any], source_runs: list[dict[str, Any]]) -> None:

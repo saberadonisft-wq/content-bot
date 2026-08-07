@@ -8,9 +8,14 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
+import uuid
+from pathlib import Path
+from datetime import datetime
+
+import imageio_ffmpeg
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from .config import settings
 from .mongo import store
@@ -24,9 +29,15 @@ from .schemas import (
     RunRequest,
     SourceOutput,
     SourceRunOutput,
+    SubtitleBurnRequest,
+    SubtitleBurnResponse,
+    SubtitleItem,
+    SubtitleParseRequest,
+    SubtitleParseResponse,
     TrendClustersOutput,
     TrendOutput,
     TrendPoint,
+    VideoLibraryItem,
 )
 from .services.clusters import cluster_items
 from .services.connectors import (
@@ -36,6 +47,11 @@ from .services.connectors import (
 )
 from .services.insights import summarize_items
 from .services.runs import EventBus, RunManager, utcnow
+from .services.subtitles import (
+    burn_subtitles_to_video,
+    parse_subtitles_text,
+    subtitles_to_srt,
+)
 from .services.text import content_insights, insights_match, normalized
 
 connectors = default_connectors()
@@ -301,8 +317,8 @@ def update_keyword(keyword_id: int, payload: KeywordInput):
 
 
 @app.delete("/api/v1/keywords/{keyword_id}", status_code=204)
-def delete_keyword(keyword_id: int):
-    if not store.delete_keyword(keyword_id):
+async def delete_keyword(keyword_id: int):
+    if not await asyncio.to_thread(store.delete_keyword, keyword_id):
         raise HTTPException(404, "Keyword not found")
 
 
@@ -604,3 +620,240 @@ async def run_event_stream(batch_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/api/v1/subtitles/upload")
+async def upload_subtitle_video(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file selected")
+    
+    ext = Path(file.filename).suffix.lower() or ".mp4"
+    video_id = uuid.uuid4().hex[:12]
+    upload_dir = settings.data_dir / "videos" / "upload"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    dest_path = upload_dir / f"{video_id}{ext}"
+    content = await file.read()
+    dest_path.write_bytes(content)
+
+    return {
+        "video_id": video_id,
+        "filename": file.filename,
+        "video_url": f"/api/v1/subtitles/video/{video_id}",
+    }
+
+
+@app.post("/api/v1/subtitles/parse", response_model=SubtitleParseResponse)
+def parse_subtitle_text_endpoint(req: SubtitleParseRequest):
+    sub_dicts = parse_subtitles_text(req.text)
+    items = [SubtitleItem(**sub) for sub in sub_dicts]
+    srt_str = subtitles_to_srt(sub_dicts)
+    return SubtitleParseResponse(subtitles=items, srt=srt_str, count=len(items))
+
+
+@app.post("/api/v1/subtitles/burn", response_model=SubtitleBurnResponse)
+def burn_subtitle_video_endpoint(req: SubtitleBurnRequest):
+    upload_dir = settings.data_dir / "videos" / "upload"
+    matching_videos = list(upload_dir.glob(f"{req.video_id}.*"))
+    if not matching_videos:
+        raise HTTPException(status_code=404, detail="Original video file not found")
+    
+    input_path = matching_videos[0]
+    output_dir = settings.data_dir / "videos" / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    out_filename = f"subtitled_{req.video_id}.mp4"
+    output_path = output_dir / out_filename
+
+    sub_dicts = [sub.model_dump() for sub in req.subtitles]
+    options_dict = req.options.model_dump()
+
+    try:
+        burn_subtitles_to_video(input_path, sub_dicts, options_dict, output_path)
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Failed to burn subtitles: {err}")
+
+    return SubtitleBurnResponse(
+        video_id=req.video_id,
+        output_filename=out_filename,
+        video_url=f"/api/v1/subtitles/video/{req.video_id}",
+        subtitled_video_url=f"/api/v1/subtitles/video/{req.video_id}?type=subtitled",
+    )
+
+
+@app.get("/api/v1/subtitles/video/{video_id}")
+def get_subtitle_video(video_id: str, type: str | None = None):
+    if type == "subtitled":
+        output_dir = settings.data_dir / "videos" / "output"
+        target_path = output_dir / f"subtitled_{video_id}.mp4"
+        if not target_path.exists():
+            raise HTTPException(status_code=404, detail="Subtitled video not ready")
+        return FileResponse(target_path, media_type="video/mp4", filename=target_path.name)
+    
+    upload_dir = settings.data_dir / "videos" / "upload"
+    matching = list(upload_dir.glob(f"{video_id}.*"))
+    if not matching:
+        raise HTTPException(status_code=404, detail="Video file not found")
+    
+    target_path = matching[0]
+    media_type = "video/mp4"
+    if target_path.suffix.lower() == ".webm":
+        media_type = "video/webm"
+    elif target_path.suffix.lower() == ".mkv":
+        media_type = "video/x-matroska"
+    
+    return FileResponse(target_path, media_type=media_type, filename=target_path.name)
+
+
+@app.get("/api/v1/videos", response_model=list[VideoLibraryItem])
+def list_videos():
+    upload_dir = settings.data_dir / "videos" / "upload"
+    output_dir = settings.data_dir / "videos" / "output"
+    
+    videos = []
+    
+    if upload_dir.exists():
+        for path in upload_dir.iterdir():
+            if path.is_file() and path.suffix.lower() in [".mp4", ".webm", ".mkv"]:
+                stat = path.stat()
+                video_id = path.stem
+                videos.append(VideoLibraryItem(
+                    id=video_id,
+                    filename=path.name,
+                    type="original",
+                    size_bytes=stat.st_size,
+                    created_at=datetime.fromtimestamp(stat.st_ctime),
+                    thumbnail_url=f"/api/v1/videos/{video_id}/thumbnail?type=original",
+                    video_url=f"/api/v1/subtitles/video/{video_id}"
+                ))
+
+    if output_dir.exists():
+        for path in output_dir.iterdir():
+            if path.is_file() and path.name.startswith("subtitled_") and path.suffix.lower() in [".mp4", ".webm", ".mkv"]:
+                stat = path.stat()
+                # Extract original video_id by stripping "subtitled_" prefix
+                video_id = path.stem.removeprefix("subtitled_")
+                videos.append(VideoLibraryItem(
+                    id=video_id,
+                    filename=path.name,
+                    type="subtitled",
+                    size_bytes=stat.st_size,
+                    created_at=datetime.fromtimestamp(stat.st_ctime),
+                    thumbnail_url=f"/api/v1/videos/{video_id}/thumbnail?type=subtitled",
+                    video_url=f"/api/v1/subtitles/video/{video_id}?type=subtitled"
+                ))
+    
+    # Add scraped videos from DB
+    from .mongo import store
+    try:
+        # We only look for known video sources
+        scraped = store.db.content_items.find(
+            {"source_id": {"$in": ["youtube", "dy", "xhs", "ks", "bili"]}}
+        ).sort("published_at", -1).limit(50)
+        
+        for item in scraped:
+            source = item.get("source_id")
+            ext_id = item.get("external_id")
+            
+            thumb_url = ""
+            if source == "youtube":
+                thumb_url = item.get("raw_payload", {}).get("snippet", {}).get("thumbnails", {}).get("medium", {}).get("url", "")
+                if not thumb_url:
+                    thumb_url = f"https://i.ytimg.com/vi/{ext_id}/hqdefault.jpg"
+            elif source == "bili":
+                thumb_url = item.get("raw_payload", {}).get("pic", "")
+            elif source == "dy" or source == "ks" or source == "xhs":
+                # MediaCrawler saves cover URLs in raw_payload
+                payload = item.get("raw_payload", {})
+                thumb_url = payload.get("cover") or payload.get("video", {}).get("cover", {}).get("url_list", [""])[0] or ""
+
+            videos.append(VideoLibraryItem(
+                id=str(item.get("_id")),
+                filename=item.get("title", f"Scraped from {source}")[:50],
+                type="scraped",
+                size_bytes=0,
+                created_at=(item.get("published_at") or item.get("first_seen_at") or datetime.now()).replace(tzinfo=None),
+                thumbnail_url=thumb_url,
+                video_url=item.get("canonical_url", ""),
+                metrics=item.get("metrics", {})
+            ))
+    except Exception as e:
+        # Ignore DB errors if not initialized properly
+        pass
+
+    # Sort by created_at descending
+    videos.sort(key=lambda x: x.created_at, reverse=True)
+    return videos
+
+
+@app.get("/api/v1/videos/{video_id}/thumbnail")
+def get_video_thumbnail(video_id: str, type: str = "original"):
+    if type == "subtitled":
+        video_dir = settings.data_dir / "videos" / "output"
+        video_path = video_dir / f"subtitled_{video_id}.mp4"
+    else:
+        video_dir = settings.data_dir / "videos" / "upload"
+        # Find the video file with any supported extension
+        matching = list(video_dir.glob(f"{video_id}.*"))
+        if not matching:
+            raise HTTPException(status_code=404, detail="Video file not found")
+        video_path = matching[0]
+
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    thumbnail_dir = settings.data_dir / "videos" / "thumbnails"
+    thumbnail_dir.mkdir(parents=True, exist_ok=True)
+    thumbnail_path = thumbnail_dir / f"{video_id}_{type}.jpg"
+
+    if not thumbnail_path.exists():
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-i", str(video_path.resolve()),
+            "-ss", "00:00:01",
+            "-vframes", "1",
+            "-q:v", "2",
+            str(thumbnail_path.resolve())
+        ]
+        import subprocess
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        except Exception as e:
+            # If thumbnail generation fails, return 404 or a fallback image
+            raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
+
+    return FileResponse(thumbnail_path, media_type="image/jpeg", filename=thumbnail_path.name)
+
+
+@app.delete("/api/v1/videos/{video_id}", status_code=204)
+def delete_video(video_id: str, type: str = Query(...)):
+    if type == "scraped":
+        from .mongo import store
+        try:
+            store.delete_item(int(video_id))
+        except ValueError:
+            pass # Invalid ID
+        return
+
+    if type == "subtitled":
+        video_dir = settings.data_dir / "videos" / "output"
+        video_path = video_dir / f"subtitled_{video_id}.mp4"
+    else:
+        video_dir = settings.data_dir / "videos" / "upload"
+        matching = list(video_dir.glob(f"{video_id}.*"))
+        if not matching:
+            return
+        video_path = matching[0]
+
+    if video_path.exists():
+        video_path.unlink()
+        
+    # Also attempt to delete thumbnail
+    thumbnail_dir = settings.data_dir / "videos" / "thumbnails"
+    thumbnail_path = thumbnail_dir / f"{video_id}_{type}.jpg"
+    if thumbnail_path.exists():
+        thumbnail_path.unlink()
+
+

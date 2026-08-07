@@ -14,6 +14,9 @@ dependencies = [
   "pymongo>=4.10,<5",
   "httpx>=0.27,<1",
   "pydantic-settings>=2.4,<3",
+  "imageio-ffmpeg>=0.5.1,<1",
+  "ffmpeg-python>=0.2.0,<1",
+  "python-multipart>=0.0.12,<1",
 ]
 
 [project.optional-dependencies]

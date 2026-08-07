@@ -579,7 +579,9 @@ class BlueskyConnector(SourceConnector):
             base_url="https://api.bsky.app",
             timeout=30,
             follow_redirects=True,
-            headers={"User-Agent": "ContentBot/0.1 (local non-commercial game research)"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
         ) as client:
             term_limits = allocate_limits(query.max_items, len(query.search_terms))
             for term_index, (search_term, term_limit) in enumerate(
@@ -593,12 +595,16 @@ class BlueskyConnector(SourceConnector):
                     params: dict[str, Any] = {
                         "q": search_term,
                         "sort": "latest",
-                        "limit": min(100, term_limit - term_yielded),
+                        "limit": min(50, term_limit - term_yielded),
                     }
                     if cursor:
                         params["cursor"] = cursor
-                    response = await get_with_retries(client, "/xrpc/app.bsky.feed.searchPosts", params=params)
-                    payload = response.json()
+                    try:
+                        response = await get_with_retries(client, "/xrpc/app.bsky.feed.searchPosts", params=params)
+                        payload = response.json()
+                    except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError):
+                        # Gracefully stop paginating on rate limits or 403 blocks instead of failing the job
+                        break
                     posts = payload.get("posts", [])
                     if not posts:
                         break
@@ -648,7 +654,7 @@ class BlueskyConnector(SourceConnector):
                     if not next_cursor or next_cursor == cursor:
                         break
                     cursor = next_cursor
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.5)
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
@@ -900,6 +906,178 @@ class XConnector(SourceConnector):
         return [word.rstrip(".,:;!?)]}") for word in text.split() if word.startswith("#")]
 
 
+# ---------------------------------------------------------------------------
+# Mastodon connector
+# ---------------------------------------------------------------------------
+# Queries public hashtag timelines across several game-focused Mastodon
+# instances.  No API key or account is required; the /api/v1/timelines/tag
+# endpoint is public on every instance that allows public preview.
+#
+# Strategy: each search term is normalised to a hashtag (spaces and hyphens
+# removed), then fetched from a fixed list of instances.  Results from all
+# instances are deduplicated by canonical URL before yielding.
+# ---------------------------------------------------------------------------
+
+_MASTODON_INSTANCES = [
+    "mastodon.social",        # largest general instance
+    "mastodon.gamedev.place", # game-dev focused
+    "dice.camp",              # tabletop / gaming community
+]
+
+
+class MastodonConnector(SourceConnector):
+    source_id = "mastodon"
+    label = "Mastodon"
+    group = "Public social API"
+    capabilities = ConnectorCapabilities(
+        True,
+        interaction_fields=("like_count", "comment_count", "share_count"),
+    )
+
+    async def healthcheck(self) -> ConnectorStatus:
+        return ConnectorStatus(
+            "ready",
+            "Public Mastodon hashtag search across multiple instances; no API key required.",
+        )
+
+    async def search(
+        self,
+        query: SearchQuery,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> AsyncIterator[RawContentItem]:
+        seen_urls: set[str] = set()
+        yielded = 0
+        term_limits = allocate_limits(query.max_items, len(query.search_terms))
+
+        async with httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=True,
+            headers={"User-Agent": "ContentBot/0.1 (local non-commercial game research)"},
+        ) as client:
+            for search_term, term_limit in zip(query.search_terms, term_limits, strict=True):
+                if term_limit == 0:
+                    continue
+                # Normalise the term to a valid Mastodon hashtag:
+                # lowercase, remove spaces/hyphens/special chars.
+                hashtag = search_term.lower()
+                for ch in " -_.:,'\"!?":
+                    hashtag = hashtag.replace(ch, "")
+                if not hashtag:
+                    continue
+
+                instance_limit = max(1, term_limit // len(_MASTODON_INSTANCES) + 1)
+                term_yielded = 0
+
+                for instance in _MASTODON_INSTANCES:
+                    if term_yielded >= term_limit:
+                        break
+                    try:
+                        response = await get_with_retries(
+                            client,
+                            f"https://{instance}/api/v1/timelines/tag/{quote_plus(hashtag)}",
+                            params={
+                                "limit": min(40, instance_limit),
+                                "remote": "true",
+                            },
+                        )
+                    except Exception:
+                        # Skip an unreachable instance rather than failing the whole run.
+                        continue
+
+                    posts = response.json()
+                    if not isinstance(posts, list):
+                        continue
+
+                    for post in posts:
+                        if term_yielded >= term_limit:
+                            break
+                        post_id = str(post.get("id") or "")
+                        url = str(post.get("url") or "")
+                        if not post_id or not url or url in seen_urls:
+                            continue
+                        seen_urls.add(url)
+
+                        raw_content = str(post.get("content") or "")
+                        # Strip HTML tags from Mastodon's HTML content field.
+                        plain_text = self._strip_html(raw_content)[:4000]
+                        account = post.get("account") or {}
+                        author = str(account.get("acct") or account.get("username") or "")
+                        created_at_str = post.get("created_at")
+                        created_at = self._parse_datetime(created_at_str)
+
+                        # Extract hashtags from the post's tags list.
+                        tags = [
+                            f"#{t['name']}"
+                            for t in (post.get("tags") or [])
+                            if t.get("name")
+                        ]
+
+                        # Infer locale from the declared language field (Mastodon 4.x+)
+                        locale = post.get("language") or None
+
+                        # Use first non-empty line as title (same pattern as Bluesky/X).
+                        title = next(
+                            (line.strip() for line in plain_text.splitlines() if line.strip()),
+                            plain_text,
+                        )[:180]
+
+                        yield RawContentItem(
+                            external_id=f"{instance}:{post_id}",
+                            canonical_url=url,
+                            title=title,
+                            body_snippet=plain_text,
+                            author=author,
+                            hashtags=tags,
+                            locale=locale,
+                            published_at=created_at,
+                            metrics={
+                                "like_count": int(post.get("favourites_count") or 0),
+                                "comment_count": int(post.get("replies_count") or 0),
+                                "share_count": int(post.get("reblogs_count") or 0),
+                            },
+                            raw_payload={
+                                "post_id": post_id,
+                                "instance": instance,
+                                "hashtag": hashtag,
+                                "search_term": search_term,
+                            },
+                        )
+                        yielded += 1
+                        term_yielded += 1
+
+                    await asyncio.sleep(0.3)
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        try:
+            return datetime.fromisoformat(str(value)) if value else None
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _strip_html(html: str) -> str:
+        """Remove HTML tags and decode common entities from Mastodon content."""
+        import re
+        # Replace block-level tags with newlines to preserve paragraph breaks.
+        text = re.sub(r"<br\s*/?>|</p>", "\n", html, flags=re.IGNORECASE)
+        # Strip all remaining tags.
+        text = re.sub(r"<[^>]+>", "", text)
+        # Decode common HTML entities.
+        for entity, char in (
+            ("&amp;", "&"),
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+            ("&quot;", '"'),
+            ("&#39;", "'"),
+            ("&apos;", "'"),
+            ("&nbsp;", " "),
+        ):
+            text = text.replace(entity, char)
+        # Collapse multiple blank lines.
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+
 def default_connectors() -> dict[str, SourceConnector]:
     connectors: list[SourceConnector] = [
         YouTubeConnector(),
@@ -911,6 +1089,7 @@ def default_connectors() -> dict[str, SourceConnector]:
         ),
         SteamReviewsConnector(),
         BlueskyConnector(),
+        MastodonConnector(),
         RedditConnector()
         if settings.reddit_client_id and settings.reddit_client_secret
         else UnconfiguredConnector(

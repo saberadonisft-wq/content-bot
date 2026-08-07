@@ -243,7 +243,7 @@ function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
 
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/health" -TimeoutSec 3
-        $ready = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/ready" -TimeoutSec 3
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/ready" -TimeoutSec 3
         Add-Check "API health" "pass" "Healthy and ready; $($health.sources) sources registered."
     } catch {
         Add-Check "API health" "fail" "API is not healthy or MongoDB is not ready; read data\logs\api-stderr.log." $true

@@ -1,0 +1,233 @@
+/* ── Canva Home Shell ── */
+.canva-home-app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  background-color: #f3f4f6;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #1f2937;
+  overflow: hidden;
+}
+
+/* Editor Mode (Subtitles) - no longer hides sidebar */
+.canva-home-app.editor-mode {
+}
+
+/* ── Canva Home Sidebar ── */
+.canva-home-sidebar {
+  width: 260px;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #e5e7eb;
+  padding: 16px;
+  z-index: 10;
+  flex-shrink: 0;
+}
+
+.canva-home-sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 24px;
+}
+
+.canva-home-create-btn {
+  background: linear-gradient(90deg, #8b5cf6 0%, #7c3aed 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  margin-bottom: 24px;
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
+}
+
+.canva-home-create-btn:hover {
+  opacity: 0.9;
+}
+
+.canva-home-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.canva-home-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  color: #4b5563;
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  text-align: left;
+  transition: all 0.2s;
+}
+
+.canva-home-nav-item:hover {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.canva-home-nav-item.active {
+  background: #f3f4f6;
+  color: #7c3aed;
+}
+
+.canva-home-sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.canva-home-profile {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #10b981;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+}
+
+/* ── Canva Home Main Content ── */
+.canva-home-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  position: relative;
+}
+
+/* Padding for main content when NOT in editor mode */
+.canva-home-app.home-mode .canva-home-main {
+  padding: 32px;
+}
+
+.canva-home-header {
+  margin-bottom: 32px;
+}
+
+.canva-home-header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0 0 8px 0;
+  color: #111827;
+}
+
+/* ── Canva Design Grid (Workbench Replacement) ── */
+.canva-design-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 24px;
+  margin-top: 24px;
+}
+
+.canva-design-card {
+  background: white;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  height: 220px;
+}
+
+.canva-design-card.active {
+  border: 2px solid #7c3aed;
+}
+
+.canva-design-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px rgba(0,0,0,0.08);
+}
+
+.canva-design-thumbnail {
+  flex: 1;
+  background: #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9ca3af;
+  position: relative;
+}
+
+/* Random linear gradients for design thumbnails */
+.canva-design-card:nth-child(1n) .canva-design-thumbnail { background: linear-gradient(135deg, #a78bfa, #fbcfe8); }
+.canva-design-card:nth-child(2n) .canva-design-thumbnail { background: linear-gradient(135deg, #93c5fd, #a7f3d0); }
+.canva-design-card:nth-child(3n) .canva-design-thumbnail { background: linear-gradient(135deg, #fcd34d, #fda4af); }
+.canva-design-card:nth-child(4n) .canva-design-thumbnail { background: linear-gradient(135deg, #fca5a5, #fde047); }
+
+.canva-design-thumbnail svg {
+  width: 48px;
+  height: 48px;
+  opacity: 0.5;
+  color: white;
+}
+
+.canva-design-info {
+  padding: 16px;
+  background: white;
+}
+
+.canva-design-title {
+  font-weight: 600;
+  font-size: 15px;
+  margin: 0 0 4px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.canva-design-meta {
+  font-size: 13px;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.canva-design-meta svg {
+  width: 14px;
+  height: 14px;
+  color: #7c3aed;
+}
+
+.canva-section-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+
+.canva-see-all {
+  font-size: 14px;
+  color: #4b5563;
+  font-weight: 600;
+  cursor: pointer;
+}

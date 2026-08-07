@@ -216,3 +216,74 @@ class TrendOutput(BaseModel):
     source_id: str
     trend_score: float
     points: list[TrendPoint]
+
+
+class SubtitleItem(BaseModel):
+    start_time: str
+    end_time: str
+    start_seconds: float
+    end_seconds: float
+    text: str
+
+
+class SubtitleParseRequest(BaseModel):
+    text: str
+
+
+class SubtitleParseResponse(BaseModel):
+    subtitles: list[SubtitleItem] = Field(default_factory=list)
+    srt: str
+    count: int
+
+
+class SubtitleBurnOptions(BaseModel):
+    font_name: str = Field(default="Arial")
+    font_size: int = Field(default=24, ge=12, le=72)
+    font_color: str = Field(default="#FFFFFF")
+    bold: bool = Field(default=False)
+    italic: bool = Field(default=False)
+    uppercase: bool = Field(default=False)
+    outline_color: str = Field(default="#000000")
+    outline_width: int = Field(default=2, ge=0, le=10)
+    shadow_color: str = Field(default="#000000")
+    shadow_width: int = Field(default=0, ge=0, le=10)
+    bg_enabled: bool = Field(default=False)
+    bg_color: str = Field(default="#000000")
+    bg_opacity: float = Field(default=0.75, ge=0.0, le=1.0)
+    spacing: int = Field(default=0, ge=-5, le=20)
+    pos_x: float = Field(default=50.0, ge=0.0, le=100.0)
+    pos_y: float = Field(default=85.0, ge=0.0, le=100.0)
+    position: Literal["bottom", "middle", "top", "custom"] = Field(default="bottom")
+    video_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    volume: float = Field(default=1.0, ge=0.0, le=2.0)
+    fade_in: float = Field(default=0.0, ge=0.0, le=5.0)
+    fade_out: float = Field(default=0.0, ge=0.0, le=5.0)
+    aspect_ratio: Literal["16:9", "9:16", "1:1", "original"] = Field(default="16:9")
+    bg_fill_type: Literal["blur", "black", "color"] = Field(default="blur")
+    trim_start: float = Field(default=0.0, ge=0.0)
+    trim_end: float | None = Field(default=None)
+
+
+class SubtitleBurnRequest(BaseModel):
+    video_id: str
+    subtitles: list[SubtitleItem]
+    options: SubtitleBurnOptions = Field(default_factory=SubtitleBurnOptions)
+
+
+class SubtitleBurnResponse(BaseModel):
+    video_id: str
+    output_filename: str
+    video_url: str
+    subtitled_video_url: str
+
+
+class VideoLibraryItem(BaseModel):
+    id: str
+    filename: str
+    type: Literal["original", "subtitled", "scraped"]
+    size_bytes: int
+    created_at: datetime
+    thumbnail_url: str
+    video_url: str
+    metrics: dict[str, int] = {}
+

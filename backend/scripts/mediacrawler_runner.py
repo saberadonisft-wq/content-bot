@@ -153,6 +153,12 @@ def configure_coccoc(executable_path: Path) -> None:
     async def launch_persistent(self, user_data_dir, **kwargs):
         kwargs.pop("channel", None)
         kwargs.setdefault("executable_path", str(executable_path))
+        try:
+            lock_path = Path(user_data_dir) / "SingletonLock"
+            if lock_path.exists():
+                lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         browser_context = await original_persistent(self, user_data_dir, **kwargs)
         start_login_monitor(browser_context, str(user_data_dir))
         return browser_context

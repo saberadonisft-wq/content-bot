@@ -195,7 +195,74 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.status === 204 ? (undefined as T) : response.json();
 }
 
+export type SubtitleItem = {
+  start_time: string;
+  end_time: string;
+  start_seconds: number;
+  end_seconds: number;
+  text: string;
+};
+
+export type SubtitleBurnOptions = {
+  font_name: string;
+  font_size: number;
+  font_color: string;
+  bold: boolean;
+  italic: boolean;
+  uppercase: boolean;
+  outline_color: string;
+  outline_width: number;
+  shadow_color: string;
+  shadow_width: number;
+  bg_enabled: boolean;
+  bg_color: string;
+  bg_opacity: number;
+  spacing: number;
+  pos_x: number;
+  pos_y: number;
+  position: "bottom" | "middle" | "top" | "custom";
+  video_speed?: number;
+  volume?: number;
+  fade_in?: number;
+  fade_out?: number;
+  aspect_ratio?: "16:9" | "9:16" | "1:1" | "original";
+  bg_fill_type?: "blur" | "black" | "color";
+  trim_start?: number;
+  trim_end?: number | null;
+};
+
+export type SubtitleUploadResult = {
+  video_id: string;
+  filename: string;
+  video_url: string;
+};
+
+export type SubtitleParseResult = {
+  subtitles: SubtitleItem[];
+  srt: string;
+  count: number;
+};
+
+export type SubtitleBurnResult = {
+  video_id: string;
+  output_filename: string;
+  video_url: string;
+  subtitled_video_url: string;
+};
+
+export type VideoLibraryItem = {
+  id: string;
+  filename: string;
+  type: "original" | "subtitled" | "scraped";
+  size_bytes: number;
+  created_at: string;
+  thumbnail_url: string;
+  video_url: string;
+  metrics?: Record<string, number>;
+};
+
 export const api = {
+  videos: () => request<VideoLibraryItem[]>("/videos"),
   sources: () => request<Source[]>("/sources"),
   keywords: () => request<Keyword[]>("/keywords"),
   createKeyword: (
@@ -265,4 +332,34 @@ export const api = {
     request<{ id: string; state: string }>(`/runs/${id}/cancel`, {
       method: "POST",
     }),
+  uploadSubtitleVideo: async (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`${API_BASE}/subtitles/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || `Upload failed (${response.status})`);
+    }
+    return response.json() as Promise<SubtitleUploadResult>;
+  },
+  parseSubtitleText: (text: string) =>
+    request<SubtitleParseResult>("/subtitles/parse", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  burnSubtitleVideo: (
+    videoId: string,
+    subtitles: SubtitleItem[],
+    options: SubtitleBurnOptions,
+  ) =>
+    request<SubtitleBurnResult>("/subtitles/burn", {
+      method: "POST",
+      body: JSON.stringify({ video_id: videoId, subtitles, options }),
+    }),
+  deleteVideo: (id: string, type: string) =>
+    request<void>(`/videos/${id}?type=${type}`, { method: "DELETE" }),
 };
+

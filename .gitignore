@@ -12,3 +12,13 @@ vendor/*
 __pycache__/
 .pytest_cache/
 *.py[cod]
+*.tsbuildinfo
+*.egg-info/
+.hallmark/
+.vscode/
+artifacts/
+temp_repo/
+test.jpg
+frontend/vite.config.d.ts
+frontend/vite.config.js
+
