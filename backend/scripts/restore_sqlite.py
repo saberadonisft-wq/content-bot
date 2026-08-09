@@ -48,6 +48,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if settings.mongodb_uri:
+        raise RuntimeError(
+            "MongoDB is the active persistence backend. restore_sqlite.py is legacy-only; use a verified MongoDB restore workflow."
+        )
+
     source_path = args.source.resolve()
     target_path = sqlite_path(settings.content_bot_database_url).resolve()
     if not args.replace_current:

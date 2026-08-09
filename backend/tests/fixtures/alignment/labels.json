@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "language": "vi-VN",
+  "sample_rate": 16000,
+  "provenance": "Windows Microsoft An TTS; deterministic controlled boundaries",
+  "cases": [
+    {
+      "id": "fast_speech",
+      "file": "fast_speech.wav",
+      "category": "nói nhanh",
+      "transcript": "Chúng ta bắt đầu ngay bây giờ nhé.",
+      "speech_start_ms": 420,
+      "speech_end_ms": 1290,
+      "coarse_start_ms": 170,
+      "coarse_end_ms": 1540
+    },
+    {
+      "id": "quiet_speech",
+      "file": "quiet_speech.wav",
+      "category": "nói nhỏ",
+      "transcript": "Bạn có nghe rõ câu này không?",
+      "speech_start_ms": 650,
+      "speech_end_ms": 2280,
+      "coarse_start_ms": 400,
+      "coarse_end_ms": 2530
+    },
+    {
+      "id": "filler_words",
+      "file": "filler_words.wav",
+      "category": "từ đệm",
+      "transcript": "Ờ, à, để tôi nghĩ một chút nhé.",
+      "speech_start_ms": 540,
+      "speech_end_ms": 3330,
+      "coarse_start_ms": 290,
+      "coarse_end_ms": 3580
+    },
+    {
+      "id": "background_music",
+      "file": "background_music.wav",
+      "category": "nhạc nền",
+      "transcript": "Nhạc nền không được che mất lời nói.",
+      "speech_start_ms": 720,
+      "speech_end_ms": 2360,
+      "coarse_start_ms": 470,
+      "coarse_end_ms": 2610
+    },
+    {
+      "id": "background_noise",
+      "file": "background_noise.wav",
+      "category": "tiếng ồn",
+      "transcript": "Bộ lọc cần tìm đúng điểm bắt đầu.",
+      "speech_start_ms": 580,
+      "speech_end_ms": 1890,
+      "coarse_start_ms": 330,
+      "coarse_end_ms": 2140
+    },
+    {
+      "id": "long_pause",
+      "file": "long_pause.wav",
+      "category": "khoảng im lặng",
+      "transcript": "Tôi nói câu đầu tiên. Sau khoảng lặng là câu thứ hai.",
+      "speech_start_ms": 500,
+      "speech_end_ms": 3940,
+      "coarse_start_ms": 250,
+      "coarse_end_ms": 4190
+    },
+    {
+      "id": "two_speakers",
+      "file": "two_speakers.wav",
+      "category": "hai người nói mô phỏng",
+      "transcript": "Tôi sẽ nói trước. Còn tôi trả lời sau.",
+      "speech_start_ms": 600,
+      "speech_end_ms": 2410,
+      "coarse_start_ms": 350,
+      "coarse_end_ms": 2660
+    }
+  ]
+}

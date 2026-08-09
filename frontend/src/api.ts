@@ -1,3 +1,22 @@
+import { cueToLegacySubtitle } from "./subtitles/model";
+import type {
+  MediaMetadata,
+  OverlayLayout,
+  SubtitleCueV2,
+  SubtitleParseResultV2,
+  SubtitleWarning,
+} from "./subtitles/types";
+
+export type {
+  SubtitleCueV2,
+  SubtitleDocumentV2,
+  MediaMetadata,
+  SubtitleParseResultV2,
+  SubtitleTimingSource,
+  SubtitleWarning,
+  SubtitleWordV2,
+} from "./subtitles/types";
+
 export const API_BASE =
   import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
 
@@ -201,6 +220,7 @@ export type SubtitleItem = {
   start_seconds: number;
   end_seconds: number;
   text: string;
+  secondary_text?: string;
 };
 
 export type SubtitleBurnOptions = {
@@ -209,7 +229,10 @@ export type SubtitleBurnOptions = {
   font_color: string;
   bold: boolean;
   italic: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
   uppercase: boolean;
+  alignment_type?: "left" | "center" | "right";
   outline_color: string;
   outline_width: number;
   shadow_color: string;
@@ -218,6 +241,7 @@ export type SubtitleBurnOptions = {
   bg_color: string;
   bg_opacity: number;
   spacing: number;
+  line_spacing?: number;
   pos_x: number;
   pos_y: number;
   position: "bottom" | "middle" | "top" | "custom";
@@ -229,12 +253,25 @@ export type SubtitleBurnOptions = {
   bg_fill_type?: "blur" | "black" | "color";
   trim_start?: number;
   trim_end?: number | null;
+  animation?: "none" | "fade" | "rise" | "pan" | "typewriter";
 };
 
 export type SubtitleUploadResult = {
   video_id: string;
   filename: string;
   video_url: string;
+  media: MediaMetadata;
+};
+
+export type SubtitleOverlayUploadResult = {
+  overlay_id: string;
+  filename: string;
+  overlay_url: string;
+  size_bytes: number;
+};
+
+export type SubtitleOverlayRenderOptions = OverlayLayout & {
+  overlay_id: string;
 };
 
 export type SubtitleParseResult = {
@@ -248,6 +285,73 @@ export type SubtitleBurnResult = {
   output_filename: string;
   video_url: string;
   subtitled_video_url: string;
+};
+
+export type SubtitleAlignmentOptions = {
+  engine?: "auto" | "energy" | "faster_whisper";
+  lead_in_ms?: number;
+  tail_ms?: number;
+  window_padding_ms?: number;
+  max_window_ms?: number;
+  force_manual?: boolean;
+};
+
+export type SubtitleAlignmentResult = {
+  document: SubtitleParseResultV2["document"];
+  warnings: SubtitleParseResultV2["warnings"];
+  engine: "energy" | "faster_whisper";
+  cache_hit: boolean;
+  aligned_cue_count: number;
+};
+
+export type SubtitleJob = {
+  id: string;
+  kind: "alignment" | "render";
+  dedupe_key: string;
+  state: "queued" | "running" | "succeeded" | "failed" | "canceled";
+  progress: number;
+  phase: string;
+  message: string;
+  cancel_requested: boolean;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+  result?: SubtitleAlignmentResult | null;
+};
+
+export type SubtitleRenderOptionsV2 = Omit<
+  SubtitleBurnOptions,
+  "trim_start" | "trim_end" | "fade_in" | "fade_out"
+> & {
+  render_mode: "precision" | "effects";
+  profile: "fast" | "balanced" | "quality";
+  encoder: "auto" | "nvenc" | "qsv" | "software";
+  trim_start_ms: number;
+  trim_end_ms?: number | null;
+  fade_in_ms: number;
+  fade_out_ms: number;
+};
+
+export type SubtitleRenderResult = {
+  video_id: string;
+  output_filename: string;
+  subtitled_video_url: string;
+  encoder: string;
+  cache_hit: boolean;
+  audio_copied?: boolean | null;
+  output_size_bytes: number;
+  duration_ms: number;
+  elapsed_seconds?: number;
+  realtime_factor?: number;
+  fallback_reasons: string[];
+  warnings?: SubtitleWarning[];
+  overlay_applied?: boolean;
+};
+
+export type SubtitleRenderJob = Omit<SubtitleJob, "result"> & {
+  result?: SubtitleRenderResult | null;
 };
 
 export type VideoLibraryItem = {
@@ -332,12 +436,13 @@ export const api = {
     request<{ id: string; state: string }>(`/runs/${id}/cancel`, {
       method: "POST",
     }),
-  uploadSubtitleVideo: async (file: File) => {
+  uploadSubtitleVideo: async (file: File, signal?: AbortSignal) => {
     const formData = new FormData();
     formData.append("file", file);
     const response = await fetch(`${API_BASE}/subtitles/upload`, {
       method: "POST",
       body: formData,
+      signal,
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -345,21 +450,103 @@ export const api = {
     }
     return response.json() as Promise<SubtitleUploadResult>;
   },
+  uploadSubtitleOverlay: async (file: File, signal?: AbortSignal) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`${API_BASE}/subtitles/overlays`, {
+      method: "POST",
+      body: formData,
+      signal,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || `Overlay upload failed (${response.status})`);
+    }
+    return response.json() as Promise<SubtitleOverlayUploadResult>;
+  },
+  subtitleVideoMetadata: (videoId: string, signal?: AbortSignal) =>
+    request<MediaMetadata>(`/subtitles/video/${videoId}/metadata`, { signal }),
   parseSubtitleText: (text: string) =>
     request<SubtitleParseResult>("/subtitles/parse", {
       method: "POST",
       body: JSON.stringify({ text }),
     }),
+  parseSubtitleTextV2: (
+    text: string,
+    mediaDurationMs?: number | null,
+    signal?: AbortSignal,
+  ) =>
+    request<SubtitleParseResultV2>("/subtitles/v2/parse", {
+      method: "POST",
+      body: JSON.stringify({
+        text,
+        ...(mediaDurationMs ? { media_duration_ms: mediaDurationMs } : {}),
+      }),
+      signal,
+    }),
+  alignSubtitleDocument: (
+    videoId: string,
+    document: SubtitleParseResultV2["document"],
+    options: SubtitleAlignmentOptions = {},
+    cueIds?: string[] | null,
+    signal?: AbortSignal,
+  ) =>
+    request<SubtitleJob>("/subtitles/v2/align", {
+      method: "POST",
+      body: JSON.stringify({
+        video_id: videoId,
+        document,
+        options,
+        ...(cueIds?.length ? { cue_ids: cueIds } : {}),
+      }),
+      signal,
+    }),
+  subtitleJob: (jobId: string, signal?: AbortSignal) =>
+    request<SubtitleJob>(`/subtitles/jobs/${jobId}`, { signal }),
+  cancelSubtitleJob: (jobId: string, signal?: AbortSignal) =>
+    request<SubtitleJob>(`/subtitles/jobs/${jobId}/cancel`, {
+      method: "POST",
+      signal,
+    }),
+  renderSubtitleDocument: (
+    videoId: string,
+    document: SubtitleParseResultV2["document"],
+    options: SubtitleRenderOptionsV2,
+    overlay?: SubtitleOverlayRenderOptions | null,
+    signal?: AbortSignal,
+  ) =>
+    request<SubtitleRenderJob>("/subtitles/v2/render", {
+      method: "POST",
+      body: JSON.stringify({
+        video_id: videoId,
+        document,
+        options,
+        ...(overlay ? { overlay } : {}),
+      }),
+      signal,
+    }),
+  subtitleRenderJob: (jobId: string, signal?: AbortSignal) =>
+    request<SubtitleRenderJob>(`/subtitles/jobs/${jobId}`, { signal }),
+  cancelSubtitleRenderJob: (jobId: string, signal?: AbortSignal) =>
+    request<SubtitleRenderJob>(`/subtitles/jobs/${jobId}/cancel`, {
+      method: "POST",
+      signal,
+    }),
   burnSubtitleVideo: (
     videoId: string,
-    subtitles: SubtitleItem[],
+    subtitles: SubtitleCueV2[] | SubtitleItem[],
     options: SubtitleBurnOptions,
   ) =>
     request<SubtitleBurnResult>("/subtitles/burn", {
       method: "POST",
-      body: JSON.stringify({ video_id: videoId, subtitles, options }),
+      body: JSON.stringify({
+        video_id: videoId,
+        subtitles: subtitles.map((subtitle) =>
+          "start_ms" in subtitle ? cueToLegacySubtitle(subtitle) : subtitle,
+        ),
+        options,
+      }),
     }),
   deleteVideo: (id: string, type: string) =>
     request<void>(`/videos/${id}?type=${type}`, { method: "DELETE" }),
 };
-

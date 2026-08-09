@@ -2,27 +2,33 @@ import { useEffect, useState } from "react";
 import { Download, Film, LoaderCircle, Trash2, Video, Eye, Heart, MessageCircle } from "lucide-react";
 import { API_BASE, api, VideoLibraryItem } from "./api";
 
+const getErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback;
+
 export function VideoLibrary() {
   const [videos, setVideos] = useState<VideoLibraryItem[]>([]);
   const [filterType, setFilterType] = useState<string>("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const loadVideos = async () => {
-    setLoading(true);
-    try {
-      const data = await api.videos();
-      setVideos(data);
-      setError(null);
-    } catch (err: any) {
-      setError(err.message || "Không thể tải danh sách video");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [thumbnailErrors, setThumbnailErrors] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    loadVideos();
+    let disposed = false;
+    void api.videos()
+      .then((data) => {
+        if (disposed) return;
+        setVideos(data);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (!disposed) setError(getErrorMessage(err, "Không thể tải danh sách video"));
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   const formatSize = (bytes: number) => {
@@ -39,19 +45,27 @@ export function VideoLibrary() {
     if (!confirm("Bạn có chắc chắn muốn xoá video này không?")) return;
     try {
       await api.deleteVideo(id, type);
-      setVideos(videos.filter(v => !(v.id === id && v.type === type)));
-    } catch (err: any) {
-      alert("Xoá video thất bại: " + err.message);
+      setVideos((current) => current.filter((video) => !(video.id === id && video.type === type)));
+    } catch (err: unknown) {
+      alert("Xoá video thất bại: " + getErrorMessage(err, "Lỗi không xác định"));
     }
   };
 
   const resolveUrl = (url: string) => {
     if (!url) return "";
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      return url;
+    try {
+      const parsed = new URL(url, window.location.origin);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        if (url.startsWith("http://") || url.startsWith("https://")) return url;
+        return `${API_BASE}${parsed.pathname.replace("/api/v1", "")}${parsed.search}`;
+      }
+    } catch {
+      return "";
     }
-    return `${API_BASE}${url.replace('/api/v1', '')}`;
+    return "";
   };
+
+  const filteredVideos = videos.filter((video) => filterType === "all" || video.type === filterType);
 
   return (
     <>
@@ -99,20 +113,28 @@ export function VideoLibrary() {
           <Film size={48} style={{ opacity: 0.5, marginBottom: 16 }} />
           <p>Chưa có video nào.</p>
         </div>
+      ) : filteredVideos.length === 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 200, color: "#9ca3af" }}>
+          <Film size={48} style={{ opacity: 0.5, marginBottom: 16 }} />
+          <p>Không có video phù hợp với bộ lọc.</p>
+        </div>
       ) : (
         <div className="canva-design-grid">
-          {videos.filter(v => filterType === "all" || v.type === filterType).map((video) => (
+          {filteredVideos.map((video) => (
             <div key={`${video.type}-${video.id}`} className="canva-design-card">
               <div className="canva-design-thumbnail" style={{ padding: 0, overflow: "hidden", background: "#000" }}>
-                <img 
-                  src={resolveUrl(video.thumbnail_url)} 
-                  alt={video.filename} 
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                  onError={(e) => {
-                    e.currentTarget.style.display = 'none';
-                    e.currentTarget.parentElement!.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;"><svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-video" style="opacity:0.5;color:white;"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg></div>';
-                  }}
-                />
+                {thumbnailErrors.has(`${video.type}:${video.id}`) ? (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%", height: "100%" }}>
+                    <Video size={48} style={{ opacity: 0.5, color: "white" }} />
+                  </div>
+                ) : (
+                  <img
+                    src={resolveUrl(video.thumbnail_url)}
+                    alt={video.filename}
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    onError={() => setThumbnailErrors((current) => new Set(current).add(`${video.type}:${video.id}`))}
+                  />
+                )}
                 {video.type === "subtitled" && (
                   <div style={{ position: "absolute", top: 8, right: 8, background: "#7c3aed", color: "white", fontSize: 11, padding: "4px 8px", borderRadius: 4, fontWeight: "bold" }}>
                     Đã có phụ đề
@@ -152,6 +174,7 @@ export function VideoLibrary() {
                   <a 
                     href={resolveUrl(video.video_url)} 
                     download={video.filename}
+                    aria-label={`Tải xuống ${video.filename}`}
                     className="canva-btn canva-btn-outline" 
                     style={{ padding: '6px 12px', fontSize: 13 }}
                   >
@@ -160,6 +183,8 @@ export function VideoLibrary() {
                   )}
                   <button 
                     onClick={() => handleDelete(video.id, video.type)}
+                    type="button"
+                    aria-label={`Xóa ${video.filename}`}
                     className="canva-btn canva-btn-outline" 
                     style={{ padding: '6px 12px', fontSize: 13, color: '#ef4444', borderColor: '#fca5a5' }}
                     title="Xóa video"

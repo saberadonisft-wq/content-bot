@@ -56,6 +56,7 @@ def test_restore_replaces_configured_database_after_integrity_check(tmp_path, mo
     write_marker(current, "current-data")
     write_marker(backup, "backup-data")
 
+    monkeypatch.setattr(restore_sqlite.settings, "mongodb_uri", None)
     monkeypatch.setattr(restore_sqlite.settings, "content_bot_database_url", f"sqlite:///{current.as_posix()}")
     monkeypatch.setattr(restore_sqlite, "local_api_is_running", lambda: False)
     monkeypatch.setattr(sys, "argv", ["restore_sqlite.py", "--source", str(backup), "--replace-current"])
@@ -68,6 +69,7 @@ def test_restore_replaces_configured_database_after_integrity_check(tmp_path, mo
 def test_restore_refuses_without_explicit_replacement_acknowledgement(tmp_path, monkeypatch) -> None:
     backup = tmp_path / "backup.db"
     write_marker(backup, "safe")
+    monkeypatch.setattr(restore_sqlite.settings, "mongodb_uri", None)
     monkeypatch.setattr(sys, "argv", ["restore_sqlite.py", "--source", str(backup)])
 
     try:
@@ -93,6 +95,7 @@ def test_prune_deletes_only_expired_items_after_apply(monkeypatch) -> None:
         )
         session.commit()
 
+    monkeypatch.setattr(prune_sqlite.settings, "mongodb_uri", None)
     monkeypatch.setattr(prune_sqlite, "SessionLocal", test_session)
     monkeypatch.setattr(prune_sqlite, "local_api_is_running", lambda: False)
     monkeypatch.setattr(sys, "argv", ["prune_sqlite.py", "--days", "90", "--apply"])

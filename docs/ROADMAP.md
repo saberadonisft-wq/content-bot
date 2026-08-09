@@ -20,8 +20,8 @@ This roadmap separates code presence from verified collection. A source is only 
 | Language, sentiment and game topics | Live verified baseline | Explainable local heuristics are shown per item; combined filters and matching CSV export were live verified on stored Black Myth Wukong items without an external AI service. |
 | Filtered insight summary | Dashboard live verified | The API and workbench show source/language/sentiment/topic/signal distributions and top rising items from exactly the same filtered sample as the item table; Vietnamese + negative returned 3 items in both views. |
 | Cross-source story clusters | Dashboard baseline live verified | Conservative title/link grouping is exposed through the filtered insight API and the Workbench. The UI presents member-level sources, item hosts and match reasons, with accessible loading, empty and retry states. Specific article links and strong cross-origin title evidence qualify; homepages/product links do not. Current stored Wukong and Hades II samples correctly return no unsupported clusters, including repeated generic Steam review titles; a positive live-source story remains to be accepted without relaxing those controls. |
-| CSV / JSON export | Implemented | Exports use the same filtered items stored in SQLite. |
-| Local retention pruning | Implemented | The launcher previews expiration first and requires the API to be stopped plus explicit confirmation before deleting expired content and its related local metrics/matches. |
+| CSV / JSON export | Implemented | Exports use the same filtered items stored in the active MongoDB backend. |
+| MongoDB backup, restore and retention pruning | Implemented | Launcher commands use JSON backup/restore and preview/apply retention pruning; legacy SQLite scripts refuse to run when MongoDB is configured. |
 | Delete all local data | Implemented | The launcher requires explicit confirmation and a stopped API, then deletes only the validated workspace data directory (including browser profiles and backups). |
 
 ## Next milestones
@@ -63,8 +63,8 @@ Done when a user can answer “what is trending around this game, where, and why
 - Persist pagination checkpoints for resumable batches.
 - Add bounded retries with exponential backoff for 429 and transient 5xx responses.
 - Add per-source concurrency/rate budgets and a global run queue.
-- Add database migrations and backup/restore for SQLite.
-- Introduce a storage abstraction before optionally migrating larger deployments to MongoDB Atlas; keep the connection URI in local environment configuration and provide an explicit SQLite migration/rollback path.
+- Add transactional MongoDB restore when the deployment supports replica-set transactions.
+- Remove legacy SQLite maintenance tooling after the MongoDB migration path is no longer needed.
 - Add structured logs and a diagnostics download with secrets and account identifiers redacted.
 
 Done when interrupted scans resume safely, failure causes are actionable and local data can be audited or removed.

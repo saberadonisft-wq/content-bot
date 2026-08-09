@@ -3,10 +3,63 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+import certifi
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.database import Database
 
 from .config import settings
+
+
+def configure_mongodb_dns() -> None:
+    """Use explicitly configured resolvers for MongoDB SRV discovery when requested."""
+    servers = [item.strip() for item in settings.mongodb_dns_servers.split(",") if item.strip()]
+    if not servers:
+        return
+    try:
+        import dns.resolver
+
+        resolver = dns.resolver.get_default_resolver()
+        resolver.nameservers = servers
+        resolver.timeout = 1.0
+        resolver.lifetime = 3.0
+    except Exception as err:
+        print(f"[MongoStore] Warning: MongoDB DNS override could not be applied ({err}).")
+
+
+class DummyCollection:
+    def find(self, *args: Any, **kwargs: Any) -> DummyCollection:
+        return self
+    def find_one(self, *args: Any, **kwargs: Any) -> dict | None:
+        return None
+    def find_one_and_update(self, *args: Any, **kwargs: Any) -> dict | None:
+        return None
+    def insert_one(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+    def update_one(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+    def update_many(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+    def delete_one(self, *args: Any, **kwargs: Any) -> Any:
+        class Result:
+            deleted_count = 0
+        return Result()
+    def delete_many(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+    def create_index(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+    def sort(self, *args: Any, **kwargs: Any) -> DummyCollection:
+        return self
+    def limit(self, *args: Any, **kwargs: Any) -> DummyCollection:
+        return self
+    def __iter__(self) -> Any:
+        return iter([])
+
+
+class DummyDatabase:
+    def __getattr__(self, name: str) -> DummyCollection:
+        return DummyCollection()
+    def __getitem__(self, name: str) -> DummyCollection:
+        return DummyCollection()
 
 
 class MongoStore:
@@ -17,39 +70,81 @@ class MongoStore:
             self.client = database.client
             self.db = database
             self._ping_enabled = False
+            self._available = True
             return
         if not settings.mongodb_uri:
-            raise RuntimeError("MONGODB_URI is required")
-        self.client = MongoClient(
-            settings.mongodb_uri,
-            tz_aware=True,
-            serverSelectionTimeoutMS=10_000,
-            connectTimeoutMS=10_000,
-        )
-        self.db = self.client[settings.mongodb_database]
+            self.client = None
+            self.db = DummyDatabase()
+            self._ping_enabled = False
+            self._available = False
+            return
+        configure_mongodb_dns()
+        kwargs: dict[str, Any] = {
+            "tz_aware": True,
+            "serverSelectionTimeoutMS": 1000,
+            "connectTimeoutMS": 1000,
+            "tlsCAFile": certifi.where(),
+        }
+        try:
+            client = MongoClient(settings.mongodb_uri, **kwargs)
+            client.admin.command("ping")
+            self.client = client
+            self.db = self.client[settings.mongodb_database]
+            print("[MongoStore] Connected to MongoDB Atlas successfully.")
+        except Exception as err:
+            print(f"[MongoStore] Warning: MongoDB Atlas connection failed ({err}). Storage is unavailable.")
+            self.client = None
+            self.db = DummyDatabase()
+            self._available = False
+        else:
+            self._available = True
         self._ping_enabled = True
 
-    def initialize(self, ping: bool = True) -> None:
-        if ping and self._ping_enabled:
+    @property
+    def is_available(self) -> bool:
+        return self._available and self.client is not None
+
+    def ping(self) -> bool:
+        if not self.is_available:
+            return False
+        try:
             self.client.admin.command("ping")
-        self.db.keywords.create_index("normalized_name", unique=True)
-        self.db.keywords.create_index([("updated_at", DESCENDING)])
-        self.db.keywords.create_index([("enabled", ASCENDING), ("next_run_at", ASCENDING)])
-        self.db.content_items.create_index([("source_id", ASCENDING), ("external_id", ASCENDING)], unique=True)
-        self.db.content_items.create_index([("source_id", ASCENDING), ("published_at", DESCENDING)])
-        self.db.content_items.create_index("last_seen_at")
-        self.db.item_keyword_matches.create_index(
-            [("content_item_id", ASCENDING), ("keyword_id", ASCENDING)], unique=True
-        )
-        self.db.item_keyword_matches.create_index([("keyword_id", ASCENDING), ("trend_score", DESCENDING)])
-        self.db.metric_snapshots.create_index(
-            [("content_item_id", ASCENDING), ("captured_at", ASCENDING)], unique=True
-        )
-        self.db.crawl_batches.create_index([("keyword_id", ASCENDING), ("started_at", DESCENDING)])
-        self.db.crawl_batches.create_index("state")
-        self.db.source_runs.create_index("batch_id")
+        except Exception as err:
+            print(f"[MongoStore] Warning: MongoDB ping failed: {err}")
+            return False
+        return True
+
+    def initialize(self, ping: bool = False) -> None:
+        if not self.client or isinstance(self.db, DummyDatabase):
+            return
+        if ping and self._ping_enabled:
+            try:
+                self.client.admin.command("ping")
+            except Exception as err:
+                print(f"[MongoStore] Warning: MongoDB Atlas ping failed: {err}")
+        try:
+            self.db.keywords.create_index("normalized_name", unique=True)
+            self.db.keywords.create_index([("updated_at", DESCENDING)])
+            self.db.keywords.create_index([("enabled", ASCENDING), ("next_run_at", ASCENDING)])
+            self.db.content_items.create_index([("source_id", ASCENDING), ("external_id", ASCENDING)], unique=True)
+            self.db.content_items.create_index([("source_id", ASCENDING), ("published_at", DESCENDING)])
+            self.db.content_items.create_index("last_seen_at")
+            self.db.item_keyword_matches.create_index(
+                [("content_item_id", ASCENDING), ("keyword_id", ASCENDING)], unique=True
+            )
+            self.db.item_keyword_matches.create_index([("keyword_id", ASCENDING), ("trend_score", DESCENDING)])
+            self.db.metric_snapshots.create_index(
+                [("content_item_id", ASCENDING), ("captured_at", ASCENDING)], unique=True
+            )
+            self.db.crawl_batches.create_index([("keyword_id", ASCENDING), ("started_at", DESCENDING)])
+            self.db.crawl_batches.create_index("state")
+            self.db.source_runs.create_index("batch_id")
+        except Exception as err:
+            print(f"[MongoStore] Warning: MongoDB index creation skipped: {err}")
 
     def next_id(self, collection: str) -> int:
+        if not self.is_available:
+            raise RuntimeError("MongoDB storage is not available")
         row = self.db.counters.find_one_and_update(
             {"_id": collection},
             {"$inc": {"value": 1}},
@@ -104,13 +199,13 @@ class MongoStore:
         )
         self.db.item_keyword_matches.delete_many({"keyword_id": keyword_id})
         if content_ids:
-            still_matched = set(
+            still_matched = {
                 row["content_item_id"]
                 for row in self.db.item_keyword_matches.find(
                     {"content_item_id": {"$in": content_ids}},
                     {"content_item_id": 1},
                 )
-            )
+            }
             orphan_ids = [cid for cid in content_ids if cid not in still_matched]
             if orphan_ids:
                 self.db.content_items.delete_many({"_id": {"$in": orphan_ids}})
@@ -220,13 +315,30 @@ class MongoStore:
             cursor = cursor.limit(limit)
         return [self.public(row) for row in cursor]
 
-    def item_matches(self, keyword_id: int, positive_only: bool = False) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    def item_matches(
+        self,
+        keyword_id: int,
+        positive_only: bool = False,
+        source_id: str | None = None,
+        min_relevance: float = 0,
+    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
         query: dict[str, Any] = {"keyword_id": keyword_id}
-        if positive_only:
+        if min_relevance > 0:
+            query["relevance_score"] = {"$gte": min_relevance}
+        elif positive_only:
             query["relevance_score"] = {"$gt": 0}
+        raw_matches = list(self.db.item_keyword_matches.find(query))
+        item_ids = [row["content_item_id"] for row in raw_matches]
+        item_query: dict[str, Any] = {"_id": {"$in": item_ids}}
+        if source_id:
+            item_query["source_id"] = source_id
+        items = {
+            row["_id"]: self.public(row)
+            for row in self.db.content_items.find(item_query)
+        }
         rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        for raw_match in self.db.item_keyword_matches.find(query):
-            item = self.item(raw_match["content_item_id"])
+        for raw_match in raw_matches:
+            item = items.get(raw_match["content_item_id"])
             if item is not None:
                 rows.append((item, self.public(raw_match)))
         return rows

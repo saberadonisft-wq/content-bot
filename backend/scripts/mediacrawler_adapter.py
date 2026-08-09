@@ -130,7 +130,7 @@ def run_crawler(args: argparse.Namespace) -> int:
         return 2
     runtime = Path(args.runtime) if args.runtime else DEFAULT_RUNTIME
     if not runtime.exists() or not PROJECT_ROOT.joinpath("data", "mediacrawler-ready").exists():
-        print("MediaCrawler runtime is missing; run .\\scripts\\setup-mediacrawler.ps1", file=sys.stderr)
+        print("MediaCrawler runtime is missing; run .\\scripts\\launcher.ps1 -Action setup-mediacrawler", file=sys.stderr)
         return 3
     run_dir = PROJECT_ROOT / "data" / "mediacrawler-runs" / uuid.uuid4().hex
     run_dir.mkdir(parents=True, exist_ok=True)

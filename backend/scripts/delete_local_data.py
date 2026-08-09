@@ -17,7 +17,7 @@ from app.config import settings
 
 def local_api_is_running() -> bool:
     try:
-        with socket.create_connection(("127.0.0.1", 8000), timeout=0.25):
+        with socket.create_connection(("127.0.0.1", settings.content_bot_port), timeout=0.25):
             return True
     except OSError:
         return False

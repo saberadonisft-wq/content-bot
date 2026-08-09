@@ -27,6 +27,7 @@ LOGIN_COOKIE_MARKERS: dict[str, dict[str, str | None]] = {
     "zhihu": {"z_c0": None},
 }
 _active_login_monitors: set[int] = set()
+logger = logging.getLogger(__name__)
 
 
 def has_login_cookie(platform: str, cookies: list[dict]) -> bool:
@@ -158,7 +159,7 @@ def configure_coccoc(executable_path: Path) -> None:
             if lock_path.exists():
                 lock_path.unlink(missing_ok=True)
         except Exception:
-            pass
+            logger.debug("Unable to remove stale browser lock", exc_info=True)
         browser_context = await original_persistent(self, user_data_dir, **kwargs)
         start_login_monitor(browser_context, str(user_data_dir))
         return browser_context
@@ -176,8 +177,8 @@ def configure_coccoc(executable_path: Path) -> None:
 def install_bilibili_page_recovery() -> None:
     """Rebind Bilibili's API client if its page target disappears mid-run."""
     try:
-        from playwright._impl._errors import TargetClosedError
         from media_platform.bilibili.client import BilibiliClient
+        from playwright._impl._errors import TargetClosedError
     except ImportError:
         return
 

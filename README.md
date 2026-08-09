@@ -33,6 +33,16 @@ To import a legacy SQLite database into MongoDB, stop the API and run `backend/.
 
 The launcher starts the dashboard only. To scan one connector, select a tracked game in the dashboard, open **Sources**, and use **Scan source** or **Login & scan**. Login-gated sources open a visible Cốc Cốc window; the dashboard reports phase, progress, fetched/stored counts and cancellation state.
 
+For maintenance, stop the API before restore or apply-prune operations:
+
+```powershell
+.\scripts\launcher.ps1 -Action setup-mediacrawler
+backend\.venv\Scripts\python.exe backend\scripts\backup_mongodb.py --destination data\backups\content-bot.json
+backend\.venv\Scripts\python.exe backend\scripts\restore_mongodb.py --source data\backups\content-bot.json --replace-current
+backend\.venv\Scripts\python.exe backend\scripts\prune_mongodb.py --days 90
+backend\.venv\Scripts\python.exe backend\scripts\prune_mongodb.py --days 90 --apply
+```
+
 For MediaCrawler sources, Content Bot starts its own visible Cốc Cốc browser; you do **not** need to launch Chrome with remote debugging or configure port `9222`. Login state is persisted per platform under `data/browser-profile/<platform>`. Keep the Cốc Cốc window open, scan the QR code with the platform's mobile app, complete any phone/slider confirmation, and let the command finish. The QR code is rendered by the platform in that visible browser; Content Bot does not download or proxy it to the dashboard. A timeout closes the adapter and its managed browser tree and records the batch as `cancelled`.
 
 The dashboard exposes the same supervised flow. Select a tracked game in **Workbench**, open **Sources**, then use **Scan source** for a public connector or **Login & scan** for one MediaCrawler connector. Login-gated sources are always started one at a time and never run from the background **Run now** action. The live batch panel shows a determinate progress bar for public scans, an indeterminate startup/login bar for Cốc Cốc, the current phase, and fetched/stored counts. **Cancel run** closes the managed crawler browser tree safely.

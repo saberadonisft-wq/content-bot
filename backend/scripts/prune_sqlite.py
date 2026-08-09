@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
+from app.config import settings
 from app.database import SessionLocal
 from app.models import ContentItem
 
@@ -31,6 +32,10 @@ def main() -> int:
     parser.add_argument("--days", required=True, type=int, help="Keep items seen within this many days (1-3650).")
     parser.add_argument("--apply", action="store_true", help="Delete instead of only reporting the matching count.")
     args = parser.parse_args()
+    if settings.mongodb_uri:
+        raise RuntimeError(
+            "MongoDB is the active persistence backend. prune_sqlite.py is legacy-only and will not change runtime data."
+        )
     if not 1 <= args.days <= 3650:
         raise ValueError("--days must be between 1 and 3650")
     if args.apply and local_api_is_running():

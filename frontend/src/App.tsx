@@ -3,7 +3,6 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   Activity,
   CircleStop,
-  Command,
   Database,
   Download,
   Film,
@@ -34,7 +33,7 @@ import {
   runEventsUrl,
 } from "./api";
 
-import { SubtitleStudio } from "./SubtitleStudio";
+import { SubtitleStudio } from "./SubtitleStudioV2";
 import { VideoLibrary } from "./VideoLibrary";
 
 type View = "workbench" | "sources" | "settings" | "subtitles" | "videos";
@@ -112,8 +111,22 @@ const insightEvidence = (item: Item) =>
     ]),
   ).slice(0, 6);
 
+const safeExternalUrl = (value: string) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 export default function App() {
-  const [view, setView] = useState<View>("workbench");
+  const [view, setView] = useState<View>(() => {
+    const requestedView = new URLSearchParams(window.location.search).get("view");
+    return requestedView === "subtitles" || requestedView === "videos"
+      ? requestedView
+      : "workbench";
+  });
   const [sources, setSources] = useState<Source[]>([]);
   const [keywords, setKeywords] = useState<Keyword[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -143,7 +156,6 @@ export default function App() {
 
   const selected =
     keywords.find((keyword) => keyword.id === selectedId) ?? null;
-  const readySources = sources.filter((source) => source.state === "ready");
   const activeBatch =
     batch &&
     selected &&
@@ -424,9 +436,7 @@ export default function App() {
         }
       };
       eventSource.onerror = () => {
-        // Browsers retry EventSource automatically, while the snapshot poll keeps the UI moving.
-        eventSource?.close();
-        eventSource = null;
+        // Keep the connection open so EventSource can retry; polling remains the fallback.
       };
     } catch {
       eventSource = null;
@@ -661,7 +671,7 @@ export default function App() {
             }}
           />
         )}
-        {view === "subtitles" && <SubtitleStudio />}
+        {view === "subtitles" && <SubtitleStudio onBack={() => setView("workbench")} />}
         {view === "videos" && <VideoLibrary />}
       </main>
 
@@ -783,15 +793,23 @@ function Workbench({
       
       <div className="canva-section-title">
         <span>Thiết kế gần đây</span>
-        <span className="canva-see-all" onClick={onNew}>+ Thêm dự án mới</span>
+        <button type="button" className="canva-see-all" onClick={onNew}>+ Thêm dự án mới</button>
       </div>
 
       <div className="canva-design-grid">
         {keywords.map((keyword) => (
-          <div 
+          <div
             key={keyword.id}
             className={`canva-design-card ${selected?.id === keyword.id ? "active" : ""}`}
             onClick={() => onSelect(keyword.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelect(keyword.id);
+              }
+            }}
+            role="button"
+            tabIndex={0}
           >
             <div className="canva-design-thumbnail">
               <Activity />
@@ -979,7 +997,7 @@ function Workbench({
                         <td>
                           <a
                             className="item-title"
-                            href={item.canonical_url}
+                            href={safeExternalUrl(item.canonical_url)}
                             target="_blank"
                             rel="noreferrer"
                           >
@@ -1133,7 +1151,7 @@ function StoryClusters({
                   {cluster.items.slice(0, 6).map((item) => (
                     <li key={item.id}>
                       <a
-                        href={item.canonical_url}
+                        href={safeExternalUrl(item.canonical_url)}
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -1248,7 +1266,7 @@ function InsightOverview({
                 {summary.top_items.slice(0, 5).map((item) => (
                   <li key={item.id}>
                     <a
-                      href={item.canonical_url}
+                      href={safeExternalUrl(item.canonical_url)}
                       target="_blank"
                       rel="noreferrer"
                     >

@@ -11,7 +11,6 @@ from ..mongo import MongoStore, store
 from .connectors import RawContentItem, SearchQuery, SourceConnector
 from .text import clean_terms, engagement, percentile, recency_score, relevance
 
-
 logger = logging.getLogger("content_bot.runs")
 
 
@@ -44,7 +43,10 @@ class EventBus:
         try:
             yield {"type": "connected", "at": utcnow().isoformat()}
             while True:
-                yield await queue.get()
+                try:
+                    yield await asyncio.wait_for(queue.get(), timeout=15)
+                except TimeoutError:
+                    yield {"type": "heartbeat", "at": utcnow().isoformat()}
         finally:
             self._subscribers.discard(queue)
 
@@ -60,6 +62,7 @@ class RunManager:
         self.events = events
         self.store = storage or store
         self._tasks: dict[str, asyncio.Task] = {}
+        self._start_lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(3)
         self._browser_semaphore = asyncio.Semaphore(1)
 
@@ -118,6 +121,12 @@ class RunManager:
     async def start_batch(
         self, keyword_id: int, trigger: str = "manual", source_ids: list[str] | None = None
     ) -> str:
+        async with self._start_lock:
+            return await self._start_batch(keyword_id, trigger, source_ids)
+
+    async def _start_batch(
+        self, keyword_id: int, trigger: str = "manual", source_ids: list[str] | None = None
+    ) -> str:
         keyword = await self._store_call(self.store.keyword, keyword_id)
         if not keyword:
             raise ValueError("Keyword not found")
@@ -164,7 +173,14 @@ class RunManager:
         )
         task = asyncio.create_task(self._execute_batch(batch_id), name=f"crawl-batch-{batch_id}")
         self._tasks[batch_id] = task
+        task.add_done_callback(lambda completed: self._forget_task(batch_id, completed))
         return batch_id
+
+    def _forget_task(self, batch_id: str, task: asyncio.Task) -> None:
+        if not task.cancelled():
+            task.exception()
+        if self._tasks.get(batch_id) is task:
+            self._tasks.pop(batch_id, None)
 
     async def _execute_batch(self, batch_id: str) -> None:
         batch = await self._store_call(self.store.batch, batch_id)

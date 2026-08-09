@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import json
+import logging
 import os
 import shlex
 import sys
@@ -21,6 +22,7 @@ from ..config import settings
 
 DEFAULT_WEB_FEED_URLS = "https://news.google.com/rss/search?q={query}&hl=vi&gl=VN&ceid=VN:vi"
 RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+logger = logging.getLogger(__name__)
 
 
 def allocate_limits(total: int, buckets: int) -> list[int]:
@@ -295,7 +297,7 @@ class JsonlCommandConnector(SourceConnector):
                     try:
                         await query.progress_callback("retrying", "Cốc Cốc page was closed; reopening the browser session")
                     except Exception:
-                        pass
+                        logger.debug("Progress callback failed while retrying browser session", exc_info=True)
                 await asyncio.sleep(1)
 
     async def _search_once(self, query: SearchQuery) -> AsyncIterator[RawContentItem]:
@@ -328,6 +330,7 @@ class JsonlCommandConnector(SourceConnector):
                     await query.progress_callback(*progress)
                 except Exception:
                     # Progress reporting must never stop the crawler process.
+                    logger.debug("Progress callback failed", exc_info=True)
                     continue
 
         async def drain_stderr() -> None:
@@ -982,6 +985,7 @@ class MastodonConnector(SourceConnector):
                         )
                     except Exception:
                         # Skip an unreachable instance rather than failing the whole run.
+                        logger.debug("Mastodon instance request failed", exc_info=True)
                         continue
 
                     posts = response.json()

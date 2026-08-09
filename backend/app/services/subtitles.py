@@ -9,137 +9,772 @@ from typing import Any
 
 import imageio_ffmpeg
 
+from .media_probe import probe_media
+from .subtitle_timing import (
+    SubtitleTimingError,
+    cue_times_ms,
+    cue_to_legacy,
+    decimal_seconds_to_ms,
+    ms_to_seconds,
+    ms_to_srt_time,
+    parse_timestamp_to_ms,
+    stable_cue_id,
+    timestamp_precision_ms,
+    validate_cues,
+)
+
+BURN_PROGRESS: dict[str, float] = {}
+
+# CSS font-size and ASS Fontsize do not describe the same glyph box. With the
+# bundled Arimo font, libass needs a 1.5x nominal Fontsize to match the browser
+# preview. Geometric ASS values (outline, shadow and spacing) must not use this
+# correction because they already map directly to the design canvas.
+SUBTITLE_DESIGN_HEIGHT = 720
+ASS_FONT_METRIC_CORRECTION = 1.5
+
+ALLOWED_TIMING_SOURCES = frozenset(
+    {
+        "manual",
+        "gemini_estimate",
+        "asr_word",
+        "forced_alignment",
+        "imported_srt",
+        "imported_vtt",
+    }
+)
+LANGUAGE_PATTERN = re.compile(r"^[A-Za-z0-9-]{2,32}$")
+MAX_SUBTITLE_CUES = 500
+MAX_CUE_TEXT_LENGTH = 4000
+MAX_WORDS_PER_CUE = 500
+MAX_WORD_TEXT_LENGTH = 500
+
+TIMESTAMP_TOKEN = r"\d{1,4}:\d{2}(?::\d{2})?(?:[.,]\d+)?"
+INLINE_PATTERN = re.compile(
+    rf"^\[?\s*({TIMESTAMP_TOKEN})\s*(?:-->|[-–—>])\s*({TIMESTAMP_TOKEN})\s*\]?:?\s*(.*)$"
+)
+
 
 def parse_timestamp_to_seconds(ts_str: str) -> float:
-    ts_str = ts_str.strip().replace(",", ".")
-    parts = ts_str.split(":")
-    if len(parts) == 3:
-        h, m, s = parts
-        return float(h) * 3600 + float(m) * 60 + float(s)
-    elif len(parts) == 2:
-        m, s = parts
-        return float(m) * 60 + float(s)
-    else:
-        return float(ts_str)
+    return ms_to_seconds(parse_timestamp_to_ms(ts_str))
 
 
 def seconds_to_srt_time(seconds: float) -> str:
-    millis = int(round((seconds % 1) * 1000))
-    total_secs = int(seconds)
-    secs = total_secs % 60
-    mins = (total_secs // 60) % 60
-    hrs = total_secs // 3600
-    if millis >= 1000:
-        millis -= 1000
-        total_secs += 1
-        secs = total_secs % 60
-        mins = (total_secs // 60) % 60
-        hrs = total_secs // 3600
-    return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
+    return ms_to_srt_time(decimal_seconds_to_ms(seconds))
+
+
+def _strip_json_fence(text: str) -> str:
+    match = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    return match.group(1).strip() if match else text
+
+
+def _safe_confidence(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    return confidence if 0.0 <= confidence <= 1.0 else None
+
+
+def _normalize_timing_source(value: object, *, fallback: str) -> str:
+    candidate = str(value or "").strip()
+    if candidate in ALLOWED_TIMING_SOURCES:
+        return candidate
+    return fallback if fallback in ALLOWED_TIMING_SOURCES else "gemini_estimate"
+
+
+def _normalize_precision(value: object, *, fallback: int) -> int:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= 60_000
+    ):
+        return value
+    return min(60_000, max(1, fallback))
+
+
+def _normalize_revision(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(0, value)
+    return 0
+
+
+def _bounded_text(value: object, *, max_length: int) -> tuple[str, bool]:
+    text = "" if value is None else str(value).strip()
+    if len(text) <= max_length:
+        return text, False
+    return text[:max_length].rstrip(), True
+
+
+def _parse_json_word(
+    raw_word: object,
+    *,
+    cue_id: str,
+    index: int,
+    used_ids: set[str],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_word, dict):
+        return None
+    text, _truncated = _bounded_text(
+        raw_word.get("text", ""), max_length=MAX_WORD_TEXT_LENGTH
+    )
+    if not text:
+        return None
+    try:
+        start_ms, end_ms = cue_times_ms(raw_word)
+    except SubtitleTimingError:
+        return None
+    if start_ms < 0 or end_ms <= start_ms:
+        return None
+    return {
+        "id": stable_cue_id(
+            start_ms,
+            end_ms,
+            text,
+            requested_id=raw_word.get("id") or f"{cue_id}-w{index + 1}",
+            used_ids=used_ids,
+        ),
+        "text": text,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "confidence": _safe_confidence(raw_word.get("confidence")),
+    }
+
+
+def _build_cue(
+    *,
+    start_ms: int,
+    end_ms: int,
+    text: str,
+    requested_id: object | None,
+    used_ids: set[str],
+    timing_source: str,
+    timing_precision_ms: int,
+    confidence: float | None = None,
+    speech_start_ms: object | None = None,
+    speech_end_ms: object | None = None,
+    secondary_text: object | None = None,
+    words: object | None = None,
+    revision: int = 0,
+    needs_review: bool | None = None,
+    warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    cue_id = stable_cue_id(
+        start_ms,
+        end_ms,
+        text,
+        requested_id=requested_id,
+        used_ids=used_ids,
+    )
+    word_ids: set[str] = set()
+    raw_words = words if isinstance(words, list) else []
+    if len(raw_words) > MAX_WORDS_PER_CUE and warnings is not None:
+        warnings.append(
+            {
+                "code": "too_many_words",
+                "cue_id": cue_id,
+                "message": "Cue có quá 500 word timing; chỉ giữ 500 mục đầu.",
+            }
+        )
+    parsed_words: list[dict[str, Any]] = []
+    for index, raw_word in enumerate(raw_words[:MAX_WORDS_PER_CUE]):
+        word = _parse_json_word(
+            raw_word,
+            cue_id=cue_id,
+            index=index,
+            used_ids=word_ids,
+        )
+        if word is None:
+            if warnings is not None:
+                warnings.append(
+                    {
+                        "code": "invalid_word",
+                        "cue_id": cue_id,
+                        "message": f"Word timing {index + 1} không hợp lệ và đã bị bỏ qua.",
+                    }
+                )
+            continue
+        if word["start_ms"] < start_ms or word["end_ms"] > end_ms:
+            if warnings is not None:
+                warnings.append(
+                    {
+                        "code": "word_outside_cue",
+                        "cue_id": cue_id,
+                        "message": f"Word timing {index + 1} nằm ngoài cue và đã bị bỏ qua.",
+                    }
+                )
+            continue
+        if (
+            isinstance(raw_word, dict)
+            and len(str(raw_word.get("text", "")).strip()) > MAX_WORD_TEXT_LENGTH
+            and warnings is not None
+        ):
+            warnings.append(
+                {
+                    "code": "word_text_truncated",
+                    "cue_id": cue_id,
+                    "message": f"Nội dung word timing {index + 1} đã được giới hạn còn 500 ký tự.",
+                }
+            )
+        parsed_words.append(word)
+
+    secondary, secondary_truncated = _bounded_text(
+        secondary_text,
+        max_length=MAX_CUE_TEXT_LENGTH,
+    )
+    if secondary_truncated and warnings is not None:
+        warnings.append(
+            {
+                "code": "secondary_text_truncated",
+                "cue_id": cue_id,
+                "message": "Phụ đề phụ đã được giới hạn còn 4.000 ký tự.",
+            }
+        )
+    cue = {
+        "id": cue_id,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "text": text,
+        "timing_source": timing_source,
+        "timing_precision_ms": timing_precision_ms,
+        "confidence": confidence,
+        "needs_review": (
+            bool(needs_review)
+            if needs_review is not None
+            else confidence is not None and confidence < 0.65
+        ),
+        "revision": _normalize_revision(revision),
+    }
+    if secondary:
+        cue["secondary_text"] = secondary
+    if (
+        isinstance(speech_start_ms, int)
+        and not isinstance(speech_start_ms, bool)
+        and isinstance(speech_end_ms, int)
+        and not isinstance(speech_end_ms, bool)
+        and start_ms <= speech_start_ms < speech_end_ms <= end_ms
+    ):
+        cue["speech_start_ms"] = speech_start_ms
+        cue["speech_end_ms"] = speech_end_ms
+    elif (
+        speech_start_ms is not None or speech_end_ms is not None
+    ) and warnings is not None:
+        warnings.append(
+            {
+                "code": "invalid_speech_range",
+                "cue_id": cue_id,
+                "message": "Speech timing không hợp lệ hoặc nằm ngoài display timing; đã bỏ qua.",
+            }
+        )
+    if parsed_words:
+        cue["words"] = parsed_words
+    return cue
+
+
+def parse_subtitles_v2(
+    raw_text: str,
+    *,
+    media_duration_ms: int | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    text = _strip_json_fence(raw_text.strip())
+    warnings: list[dict[str, Any]] = []
+    cues: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    language = "vi"
+    document_source = "gemini_estimate"
+    document_precision = 1000
+
+    if not text:
+        document = {
+            "schema_version": 2,
+            "language": language,
+            "timebase": "milliseconds",
+            "timing_source": document_source,
+            "timing_precision_ms": document_precision,
+            "segments": [],
+        }
+        return document, warnings
+
+    data: object | None = None
+    looks_like_json = text.startswith("{") or bool(re.match(r"^\[\s*(?:\{|\])", text))
+    if looks_like_json:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            warnings.append(
+                {
+                    "code": "invalid_json",
+                    "message": f"JSON không hợp lệ tại dòng {exc.lineno}, cột {exc.colno}; thử parser văn bản.",
+                }
+            )
+
+    if data is not None:
+        if isinstance(data, dict):
+            raw_segments = data.get("segments", data.get("subtitles", []))
+            raw_language = str(data.get("language", "vi") or "").strip()
+            language = raw_language if LANGUAGE_PATTERN.fullmatch(raw_language) else "vi"
+            if language != raw_language:
+                warnings.append(
+                    {
+                        "code": "invalid_language",
+                        "message": "Mã ngôn ngữ không hợp lệ; đã dùng giá trị mặc định 'vi'.",
+                    }
+                )
+            raw_document_source = data.get("timing_source", "gemini_estimate")
+            document_source = _normalize_timing_source(
+                raw_document_source,
+                fallback="gemini_estimate",
+            )
+            if document_source != str(raw_document_source or "").strip():
+                warnings.append(
+                    {
+                        "code": "invalid_timing_source",
+                        "message": "Nguồn timing không hợp lệ; đã dùng 'gemini_estimate'.",
+                    }
+                )
+            raw_precision = data.get("timing_precision_ms", 1000)
+            document_precision = _normalize_precision(raw_precision, fallback=1000)
+            if document_precision != raw_precision:
+                warnings.append(
+                    {
+                        "code": "invalid_timing_precision",
+                        "message": "Độ chính xác timing không hợp lệ; đã dùng 1.000 ms.",
+                    }
+                )
+        else:
+            raw_segments = data
+
+        if not isinstance(raw_segments, list):
+            warnings.append(
+                {
+                    "code": "invalid_segments",
+                    "message": "Trường segments phải là một mảng.",
+                }
+            )
+            raw_segments = []
+
+        if len(raw_segments) > MAX_SUBTITLE_CUES:
+            warnings.append(
+                {
+                    "code": "too_many_segments",
+                    "message": "Kết quả có quá 500 segment; chỉ giữ 500 mục đầu.",
+                }
+            )
+
+        for index, item in enumerate(raw_segments[:MAX_SUBTITLE_CUES]):
+            if not isinstance(item, dict):
+                warnings.append(
+                    {
+                        "code": "invalid_segment",
+                        "message": f"Segment {index + 1} không phải object.",
+                    }
+                )
+                continue
+            content, content_truncated = _bounded_text(
+                item.get("text", item.get("content", "")),
+                max_length=MAX_CUE_TEXT_LENGTH,
+            )
+            if not content:
+                warnings.append(
+                    {
+                        "code": "empty_text",
+                        "message": f"Segment {index + 1} không có nội dung.",
+                    }
+                )
+                continue
+            if content_truncated:
+                warnings.append(
+                    {
+                        "code": "cue_text_truncated",
+                        "message": f"Segment {index + 1} đã được giới hạn còn 4.000 ký tự.",
+                    }
+                )
+            try:
+                if "start_ms" in item or "end_ms" in item:
+                    start_raw = item.get("start_ms")
+                    end_raw = item.get("end_ms")
+                    if isinstance(start_raw, bool) or not isinstance(start_raw, int):
+                        raise SubtitleTimingError("start_ms must be an integer")
+                    if isinstance(end_raw, bool) or not isinstance(end_raw, int):
+                        raise SubtitleTimingError("end_ms must be an integer")
+                    start_ms, end_ms = start_raw, end_raw
+                    inferred_precision = 1
+                else:
+                    start_raw = item.get("start", item.get("start_time", "0"))
+                    end_raw = item.get("end", item.get("end_time", "0"))
+                    start_ms = parse_timestamp_to_ms(str(start_raw))
+                    end_ms = parse_timestamp_to_ms(str(end_raw))
+                    inferred_precision = max(
+                        timestamp_precision_ms(str(start_raw)),
+                        timestamp_precision_ms(str(end_raw)),
+                    )
+            except SubtitleTimingError as exc:
+                warnings.append(
+                    {
+                        "code": "invalid_timestamp",
+                        "message": str(exc),
+                        "cue_id": f"segment-{index + 1}",
+                    }
+                )
+                continue
+            if start_ms < 0 or end_ms <= start_ms:
+                warnings.append(
+                    {
+                        "code": "invalid_range",
+                        "message": "Segment có end_ms không lớn hơn start_ms.",
+                        "cue_id": f"segment-{index + 1}",
+                    }
+                )
+                continue
+
+            requested_precision = item.get(
+                "timing_precision_ms", document_precision or inferred_precision
+            )
+            precision = _normalize_precision(
+                requested_precision,
+                fallback=inferred_precision,
+            )
+            raw_source = item.get("timing_source", document_source)
+            timing_source = _normalize_timing_source(
+                raw_source,
+                fallback=document_source,
+            )
+            if timing_source != str(raw_source or "").strip():
+                warnings.append(
+                    {
+                        "code": "invalid_timing_source",
+                        "cue_id": f"segment-{index + 1}",
+                        "message": "Nguồn timing của segment không hợp lệ; đã dùng nguồn của tài liệu.",
+                    }
+                )
+            if precision != requested_precision:
+                warnings.append(
+                    {
+                        "code": "invalid_timing_precision",
+                        "cue_id": f"segment-{index + 1}",
+                        "message": "Độ chính xác timing của segment không hợp lệ; đã dùng giá trị suy luận.",
+                    }
+                )
+            cue = _build_cue(
+                start_ms=start_ms,
+                end_ms=end_ms,
+                text=content,
+                requested_id=item.get("id"),
+                used_ids=used_ids,
+                timing_source=timing_source,
+                timing_precision_ms=precision,
+                confidence=_safe_confidence(item.get("confidence")),
+                speech_start_ms=item.get("speech_start_ms"),
+                speech_end_ms=item.get("speech_end_ms"),
+                secondary_text=item.get("secondary_text"),
+                words=item.get("words"),
+                revision=_normalize_revision(item.get("revision", 0)),
+                needs_review=item.get("needs_review")
+                if isinstance(item.get("needs_review"), bool)
+                else None,
+                warnings=warnings,
+            )
+            cues.append(cue)
+
+    if data is None:
+        lines = [line.strip() for line in text.splitlines()]
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if not line or line.isdigit() or line.upper() == "WEBVTT":
+                index += 1
+                continue
+
+            start_raw: str | None = None
+            end_raw: str | None = None
+            content = ""
+            source = "gemini_estimate"
+
+            if "-->" in line:
+                match = re.match(
+                    rf"^\[?\s*({TIMESTAMP_TOKEN})\s*-->\s*({TIMESTAMP_TOKEN})\s*\]?:?\s*(.*)$",
+                    line,
+                )
+                if match:
+                    start_raw, end_raw, content = match.groups()
+                    source = "imported_srt" if "," in line else "imported_vtt"
+                    if not content.strip():
+                        text_lines: list[str] = []
+                        cursor = index + 1
+                        while cursor < len(lines):
+                            candidate = lines[cursor]
+                            if not candidate:
+                                if text_lines:
+                                    break
+                                cursor += 1
+                                continue
+                            if (
+                                candidate.isdigit()
+                                or "-->" in candidate
+                                or INLINE_PATTERN.match(candidate)
+                            ):
+                                break
+                            text_lines.append(candidate)
+                            cursor += 1
+                        content = "\n".join(text_lines)
+                        index = cursor - 1
+            else:
+                match = INLINE_PATTERN.match(line)
+                if match:
+                    start_raw, end_raw, content = match.groups()
+                    if (
+                        not content.strip()
+                        and index + 1 < len(lines)
+                        and not INLINE_PATTERN.match(lines[index + 1])
+                    ):
+                        index += 1
+                        content = lines[index]
+
+            if start_raw is not None and end_raw is not None:
+                content = re.sub(r"^[:\-|\s]+", "", content).strip()
+                try:
+                    start_ms = parse_timestamp_to_ms(start_raw)
+                    end_ms = parse_timestamp_to_ms(end_raw)
+                except SubtitleTimingError as exc:
+                    warnings.append({"code": "invalid_timestamp", "message": str(exc)})
+                    index += 1
+                    continue
+                if content and end_ms > start_ms:
+                    precision = max(
+                        timestamp_precision_ms(start_raw),
+                        timestamp_precision_ms(end_raw),
+                    )
+                    cues.append(
+                        _build_cue(
+                            start_ms=start_ms,
+                            end_ms=end_ms,
+                            text=content,
+                            requested_id=None,
+                            used_ids=used_ids,
+                            timing_source=source,
+                            timing_precision_ms=precision,
+                        )
+                    )
+                elif content:
+                    warnings.append(
+                        {
+                            "code": "invalid_range",
+                            "message": "Cue có end_ms không lớn hơn start_ms.",
+                        }
+                    )
+            index += 1
+
+    original_order = [cue["id"] for cue in cues]
+    cues.sort(key=lambda cue: (cue["start_ms"], cue["end_ms"], cue["id"]))
+    if original_order != [cue["id"] for cue in cues]:
+        warnings.append(
+            {
+                "code": "out_of_order",
+                "message": "Các cue đã được sắp lại theo start_ms/end_ms/id.",
+            }
+        )
+    warnings.extend(validate_cues(cues, media_duration_ms=media_duration_ms))
+    if cues:
+        document_precision = max(cue["timing_precision_ms"] for cue in cues)
+        sources = {cue["timing_source"] for cue in cues}
+        if len(sources) == 1:
+            document_source = next(iter(sources))
+
+    document = {
+        "schema_version": 2,
+        "language": language,
+        "timebase": "milliseconds",
+        "timing_source": document_source,
+        "timing_precision_ms": document_precision,
+        "segments": cues,
+    }
+    return document, warnings
 
 
 def parse_subtitles_text(raw_text: str) -> list[dict[str, Any]]:
-    text = raw_text.strip()
-    if not text:
-        return []
-
-    # 1. Try JSON format
-    if text.startswith("[") and text.endswith("]"):
-        try:
-            data = json.loads(text)
-            subtitles = []
-            for item in data:
-                start_raw = str(item.get("start", item.get("start_time", "00:00")))
-                end_raw = str(item.get("end", item.get("end_time", "00:05")))
-                content = str(item.get("text", item.get("content", ""))).strip()
-                s_sec = parse_timestamp_to_seconds(start_raw)
-                e_sec = parse_timestamp_to_seconds(end_raw)
-                if content:
-                    subtitles.append({
-                        "start_time": seconds_to_srt_time(s_sec),
-                        "end_time": seconds_to_srt_time(e_sec),
-                        "start_seconds": s_sec,
-                        "end_seconds": e_sec,
-                        "text": content,
-                    })
-            if subtitles:
-                return subtitles
-        except Exception:
-            pass
-
-    # 2. Try inline brackets [MM:SS - MM:SS] text
-    bracket_pattern = re.compile(
-        r"\[?\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)\s*[-–—>]\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)\s*\]?:?\s*(.*)"
-    )
-    subtitles = []
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
-        # Match inline bracket or timestamp: "[00:00 - 00:03] Hello" or "00:00 - 00:03: Hello"
-        match = bracket_pattern.match(line)
-        if match:
-            s_raw, e_raw, content = match.groups()
-            content = content.strip()
-
-            # If content was empty on the same line, look at next line
-            if not content and i + 1 < len(lines) and not bracket_pattern.match(lines[i + 1]):
-                i += 1
-                content = lines[i]
-
-            # Remove leading bullets, colons, or dashes if present
-            content = re.sub(r"^[:\-\|\s]+", "", content).strip()
-
-            s_sec = parse_timestamp_to_seconds(s_raw)
-            e_sec = parse_timestamp_to_seconds(e_raw)
-            if content:
-                subtitles.append({
-                    "start_time": seconds_to_srt_time(s_sec),
-                    "end_time": seconds_to_srt_time(e_sec),
-                    "start_seconds": s_sec,
-                    "end_seconds": e_sec,
-                    "text": content,
-                })
-            i += 1
-            continue
-
-        # 3. Match SRT format: "00:00:00,000 --> 00:00:03,500"
-        if "-->" in line:
-            parts = line.split("-->")
-            if len(parts) == 2:
-                s_sec = parse_timestamp_to_seconds(parts[0])
-                e_sec = parse_timestamp_to_seconds(parts[1])
-                i += 1
-                text_lines = []
-                while i < len(lines) and not lines[i].isdigit() and "-->" not in lines[i]:
-                    text_lines.append(lines[i])
-                    i += 1
-                content = " ".join(text_lines).strip()
-                if content:
-                    subtitles.append({
-                        "start_time": seconds_to_srt_time(s_sec),
-                        "end_time": seconds_to_srt_time(e_sec),
-                        "start_seconds": s_sec,
-                        "end_seconds": e_sec,
-                        "text": content,
-                    })
-                continue
-
-        i += 1
-
-    return subtitles
+    document, _warnings = parse_subtitles_v2(raw_text)
+    return [cue_to_legacy(cue) for cue in document["segments"]]
 
 
 def subtitles_to_srt(subtitles: list[dict[str, Any]]) -> str:
     blocks = []
     for idx, sub in enumerate(subtitles, 1):
-        s_time = sub["start_time"]
-        e_time = sub["end_time"]
-        text = sub["text"]
+        start_ms, end_ms = cue_times_ms(sub)
+        s_time = ms_to_srt_time(start_ms)
+        e_time = ms_to_srt_time(end_ms)
+        text = str(sub["text"])
+        if sub.get("secondary_text"):
+            text = f"{text}\n{sub['secondary_text']}"
         blocks.append(f"{idx}\n{s_time} --> {e_time}\n{text}\n")
     return "\n".join(blocks)
+
+
+def _ass_animation_tag(
+    animation: str,
+    alignment_type: str,
+    position: str,
+    pos_x: float,
+    pos_y: float,
+) -> str:
+    if animation == "fade":
+        return r"{\fad(450,450)}"
+    if animation == "typewriter":
+        # ASS has no typewriter primitive; a short fade is the closest renderer-safe fallback.
+        return r"{\fad(120,0)}"
+
+    anchors = {
+        "left": 80,
+        "center": 640,
+        "right": 1200,
+    }
+    x = (
+        int(pos_x / 100 * 1280)
+        if position == "custom"
+        else anchors.get(alignment_type, 640)
+    )
+    y = (
+        int(pos_y / 100 * 720)
+        if position == "custom"
+        else {
+            "top": 80,
+            "middle": 360,
+            "bottom": 640,
+        }.get(position, 640)
+    )
+    if animation == "rise":
+        return f"{{\\move({x},{y + 80},{x},{y},0,450)}}"
+    if animation == "pan":
+        return f"{{\\move({x - 120},{y},{x},{y},0,450)}}"
+    return ""
+
+
+def _ass_time(seconds: float) -> str:
+    total_centiseconds = max(0, round(seconds * 100))
+    hours, remainder = divmod(total_centiseconds, 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    secs, centiseconds = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{secs:02d}.{centiseconds:02d}"
+
+
+def css_font_size_to_ass(font_size: float, play_res_y: int) -> float:
+    """Convert the 720p CSS design font size to libass' nominal Fontsize."""
+    return round(
+        float(font_size)
+        * play_res_y
+        / SUBTITLE_DESIGN_HEIGHT
+        * ASS_FONT_METRIC_CORRECTION,
+        2,
+    )
+
+
+def subtitles_to_ass(subtitles: list[dict[str, Any]], options: dict[str, Any]) -> str:
+    font_name = (
+        re.sub(r"[^A-Za-z0-9 ._-]", "", str(options.get("font_name", "Arial")))
+        or "Arial"
+    )
+    design_font_size = int(options.get("font_size", 24))
+    ass_font_size = css_font_size_to_ass(design_font_size, SUBTITLE_DESIGN_HEIGHT)
+    font_color = hex_to_ass_color(str(options.get("font_color", "#FFFFFF")))
+    outline_color = hex_to_ass_color(str(options.get("outline_color", "#000000")))
+    shadow_color = hex_to_ass_color(str(options.get("shadow_color", "#000000")))
+    bg_opacity = float(options.get("bg_opacity", 0.75))
+    bg_color = hex_to_ass_color(
+        str(options.get("bg_color", "#000000")), opacity=bg_opacity
+    )
+    bold = -1 if options.get("bold", False) else 0
+    italic = -1 if options.get("italic", False) else 0
+    underline = -1 if options.get("underline", False) else 0
+    strikethrough = -1 if options.get("strikethrough", False) else 0
+    border_style = 3 if options.get("bg_enabled", False) else 1
+    back_color = bg_color if options.get("bg_enabled", False) else shadow_color
+    position = str(options.get("position", "bottom"))
+    alignment_type = str(options.get("alignment_type", "center"))
+    vertical_position = (
+        position if position in {"top", "middle", "bottom"} else "middle"
+    )
+    alignment = {
+        "top": {"left": 7, "center": 8, "right": 9},
+        "middle": {"left": 4, "center": 5, "right": 6},
+        "bottom": {"left": 1, "center": 2, "right": 3},
+    }[vertical_position].get(alignment_type, 2)
+    line_spacing = max(0.8, min(3.0, float(options.get("line_spacing", 1.2))))
+    # Event positions use browser/design pixels, not ASS's corrected nominal
+    # font size, so multiline anchors stay identical to the live preview.
+    line_height = design_font_size * line_spacing
+    if position == "custom":
+        base_x = int(float(options.get("pos_x", 50.0)) / 100 * 1280)
+        base_y = int(float(options.get("pos_y", 50.0)) / 100 * 720)
+    else:
+        base_x = {"left": 80, "center": 640, "right": 1200}.get(alignment_type, 640)
+        base_y = {"top": 80, "middle": 360, "bottom": 640}[position]
+
+    header = "\n".join(
+        [
+            "[Script Info]",
+            "ScriptType: v4.00+",
+            "PlayResX: 1280",
+            "PlayResY: 720",
+            "ScaledBorderAndShadow: yes",
+            "",
+            "[V4+ Styles]",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+            f"Style: Default,{font_name},{ass_font_size},{font_color},{font_color},{outline_color},{back_color},{bold},{italic},{underline},{strikethrough},100,100,{int(options.get('spacing', 0))},0,{border_style},{int(options.get('outline_width', 2))},{int(options.get('shadow_width', 0))},{alignment},20,20,20,1",
+            "",
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+        ]
+    )
+    events: list[str] = []
+    animation = str(options.get("animation", "none"))
+    for subtitle in subtitles:
+        start_value = subtitle.get("start_seconds")
+        end_value = subtitle.get("end_seconds")
+        start = (
+            float(start_value)
+            if start_value is not None
+            else parse_timestamp_to_seconds(str(subtitle["start_time"]))
+        )
+        end = (
+            float(end_value)
+            if end_value is not None
+            else parse_timestamp_to_seconds(str(subtitle["end_time"]))
+        )
+        text_lines = str(subtitle.get("text", "")).replace("\r\n", "\n").splitlines()
+        if subtitle.get("secondary_text"):
+            text_lines.extend(
+                str(subtitle["secondary_text"]).replace("\r\n", "\n").splitlines()
+            )
+        text_lines = [line.strip() for line in text_lines if line.strip()]
+        if not text_lines:
+            continue
+        for index, line in enumerate(text_lines):
+            if vertical_position == "top":
+                y = base_y + index * line_height
+            elif vertical_position == "bottom":
+                y = base_y - (len(text_lines) - 1 - index) * line_height
+            else:
+                y = base_y + (index - (len(text_lines) - 1) / 2) * line_height
+            animation_tag = _ass_animation_tag(
+                animation,
+                alignment_type,
+                position,
+                base_x / 1280 * 100,
+                y / 720 * 100,
+            )
+            animation_inner = animation_tag[1:-1] if animation_tag else ""
+            override = (
+                f"{{{animation_inner}}}"
+                if animation in {"rise", "pan"} and animation_inner
+                else f"{{\\pos({base_x},{round(y)}){animation_inner}}}"
+            )
+            safe_line = line.replace("{", "\\{").replace("}", "\\}")
+            events.append(
+                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{override}{safe_line}"
+            )
+    return header + ("\n" + "\n".join(events) if events else "") + "\n"
 
 
 def hex_to_ass_color(hex_color: str, opacity: float = 1.0) -> str:
@@ -147,7 +782,7 @@ def hex_to_ass_color(hex_color: str, opacity: float = 1.0) -> str:
     hex_color = hex_color.lstrip("#")
     if len(hex_color) == 3:
         hex_color = "".join(c * 2 for c in hex_color)
-    alpha = max(0, min(255, int(round((1.0 - opacity) * 255))))
+    alpha = max(0, min(255, round((1.0 - opacity) * 255)))
     if len(hex_color) == 6:
         r, g, b = hex_color[0:2], hex_color[2:4], hex_color[4:6]
         return f"&H{alpha:02X}{b}{g}{r}"
@@ -159,6 +794,7 @@ def burn_subtitles_to_video(
     subtitles: list[dict[str, Any]],
     options: dict[str, Any],
     output_path: Path,
+    video_id: str | None = None,
 ) -> Path:
     if not video_path.exists():
         raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -172,66 +808,6 @@ def burn_subtitles_to_video(
             item["text"] = item["text"].upper()
         processed_subtitles.append(item)
 
-    srt_content = subtitles_to_srt(processed_subtitles)
-    
-    # Save temp srt file in the same directory as output_path to avoid path escaping issues in FFmpeg filter
-    temp_srt_path = output_path.parent / f"temp_{uuid.uuid4().hex[:8]}.srt"
-    temp_srt_path.write_text(srt_content, encoding="utf-8")
-
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-
-    # Configure style options for FFmpeg subtitles filter
-    font_name = options.get("font_name", "Arial")
-    font_size = options.get("font_size", 24)
-    font_color = hex_to_ass_color(options.get("font_color", "#FFFFFF"))
-    bold = 1 if options.get("bold", False) else 0
-    italic = 1 if options.get("italic", False) else 0
-    outline_color = hex_to_ass_color(options.get("outline_color", "#000000"))
-    outline_width = options.get("outline_width", 2)
-    shadow_color = hex_to_ass_color(options.get("shadow_color", "#000000"))
-    shadow_width = options.get("shadow_width", 0)
-    spacing = options.get("spacing", 0)
-    bg_enabled = options.get("bg_enabled", False)
-    bg_opacity = options.get("bg_opacity", 0.75)
-    bg_color = hex_to_ass_color(options.get("bg_color", "#000000"), opacity=bg_opacity)
-    position = options.get("position", "bottom")
-
-    border_style = 3 if bg_enabled else 1
-
-    alignment = 2  # bottom center
-    margin_v = 20
-    margin_l = 20
-
-    if position == "middle":
-        alignment = 10  # middle center
-    elif position == "top":
-        alignment = 6  # top center
-    elif position == "custom":
-        pos_y = options.get("pos_y", 85.0)
-        pos_x = options.get("pos_x", 50.0)
-        alignment = 7  # Top-left origin
-        # Assuming reference resolution 1280x720 in ASS
-        margin_l = max(0, int((pos_x / 100.0) * 1280))
-        margin_v = max(0, int((pos_y / 100.0) * 720))
-
-    force_style = (
-        f"Fontname='{font_name}',"
-        f"FontSize={font_size},"
-        f"PrimaryColour={font_color},"
-        f"Bold={bold},"
-        f"Italic={italic},"
-        f"OutlineColour={outline_color},"
-        f"Outline={outline_width},"
-        f"ShadowColour={shadow_color},"
-        f"Shadow={shadow_width},"
-        f"Spacing={spacing},"
-        f"BorderStyle={border_style},"
-        f"BackColour={bg_color},"
-        f"Alignment={alignment},"
-        f"MarginL={margin_l},"
-        f"MarginV={margin_v}"
-    )
-
     # Video editing options
     video_speed = options.get("video_speed", 1.0)
     volume = options.get("volume", 1.0)
@@ -239,12 +815,19 @@ def burn_subtitles_to_video(
     fade_out = options.get("fade_out", 0.0)
     aspect_ratio = options.get("aspect_ratio", "16:9")
     bg_fill_type = options.get("bg_fill_type", "blur")
+    background_color = str(options.get("bg_color", "#000000")).lstrip("#")
+    pad_color = f"0x{background_color}"
     trim_start = options.get("trim_start", 0.0)
     trim_end = options.get("trim_end", None)
 
-    # Convert Windows path for FFmpeg subtitles filter: C:\path\sub.srt -> C\:/path/sub.srt
+    ass_content = subtitles_to_ass(processed_subtitles, options)
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+
+    # Convert Windows path for FFmpeg subtitles filter: C:\path\sub.ass -> C\:/path/sub.ass
+    temp_srt_path = output_path.parent / f"temp_{uuid.uuid4().hex[:8]}.ass"
+    temp_srt_path.write_text(ass_content, encoding="utf-8")
     escaped_srt = str(temp_srt_path.resolve()).replace("\\", "/").replace(":", "\\:")
-    sub_filter = f"subtitles='{escaped_srt}':force_style='{force_style}'"
+    sub_filter = f"subtitles='{escaped_srt}'"
 
     # Input trimming options
     input_args = []
@@ -257,11 +840,17 @@ def burn_subtitles_to_video(
     video_filters = []
     if aspect_ratio == "9:16":
         if bg_fill_type == "blur":
-            video_filters.append("split[v1][v2];[v1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=30[bg];[v2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2")
+            video_filters.append(
+                "split[v1][v2];[v1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=30[bg];[v2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2"
+            )
         else:
-            video_filters.append("scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2:color=black")
+            video_filters.append(
+                f"scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2:color={pad_color}"
+            )
     elif aspect_ratio == "1:1":
-        video_filters.append("scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(1080-iw)/2:(1080-ih)/2:color=black")
+        video_filters.append(
+            f"scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(1080-iw)/2:(1080-ih)/2:color={pad_color}"
+        )
 
     if video_speed != 1.0:
         video_filters.append(f"setpts=(1/{video_speed})*PTS")
@@ -273,6 +862,12 @@ def burn_subtitles_to_video(
         audio_filters.append(f"volume={volume}")
     if fade_in > 0:
         audio_filters.append(f"afade=t=in:ss=0:d={fade_in}")
+    if fade_out > 0:
+        media_duration = probe_media(video_path)["duration_ms"] / 1000
+        source_end = min(float(trim_end or media_duration), media_duration)
+        output_duration = max(0.0, (source_end - float(trim_start)) / video_speed)
+        fade_start = max(0.0, output_duration - float(fade_out))
+        audio_filters.append(f"afade=t=out:st={fade_start:.3f}:d={float(fade_out):.3f}")
     if video_speed != 1.0:
         audio_filters.append(f"atempo={video_speed}")
 
@@ -294,20 +889,66 @@ def burn_subtitles_to_video(
         "-c:a",
         "aac",
         "-preset",
-        "fast",
+        "ultrafast",
         str(output_path.resolve()),
     ]
 
+    if video_id:
+        BURN_PROGRESS[video_id] = 0.0
+
     try:
-        process = subprocess.run(
+        process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            check=False,
         )
+
+        duration_secs = 0.0
+        duration_pattern = re.compile(rb"Duration: (\d{2}):(\d{2}):(\d{2}\.\d+)")
+        time_pattern = re.compile(rb"time=(\d{2}):(\d{2}):(\d{2}\.\d+)")
+
+        buffer = b""
+        while True:
+            chunk = process.stderr.read(1024)
+            if not chunk and process.poll() is not None:
+                break
+            buffer += chunk
+
+            while b"\r" in buffer or b"\n" in buffer:
+                if b"\r" in buffer and b"\n" in buffer:
+                    first_sep = (
+                        b"\r" if buffer.find(b"\r") < buffer.find(b"\n") else b"\n"
+                    )
+                elif b"\r" in buffer:
+                    first_sep = b"\r"
+                else:
+                    first_sep = b"\n"
+
+                line, buffer = buffer.split(first_sep, 1)
+
+                if duration_secs == 0.0:
+                    match = duration_pattern.search(line)
+                    if match:
+                        h, m, s = match.groups()
+                        duration_secs = float(h) * 3600 + float(m) * 60 + float(s)
+
+                match = time_pattern.search(line)
+                if match and duration_secs > 0:
+                    h, m, s = match.groups()
+                    current_secs = float(h) * 3600 + float(m) * 60 + float(s)
+                    progress = min(
+                        100.0, max(0.0, (current_secs / duration_secs) * 100)
+                    )
+                    if video_id:
+                        BURN_PROGRESS[video_id] = round(progress, 2)
+
+        process.wait()
         if process.returncode != 0:
-            raise RuntimeError(f"FFmpeg error: {process.stderr}")
+            err = process.stderr.read() if process.stderr else b""
+            raise RuntimeError(f"FFmpeg error: {err.decode('utf-8', errors='ignore')}")
+
+        if video_id:
+            BURN_PROGRESS[video_id] = 100.0
     finally:
         if temp_srt_path.exists():
             temp_srt_path.unlink()

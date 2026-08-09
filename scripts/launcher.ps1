@@ -5,6 +5,14 @@
     Run with: .\scripts\launcher.ps1
 ##>
 
+param(
+    [ValidateSet("start", "setup-mediacrawler", "setup-subtitles")]
+    [string]$Action = "start",
+    [ValidateSet("tiny", "base", "small", "medium", "large-v3")]
+    [string]$SubtitleModel = "small",
+    [switch]$DownloadSubtitleModel
+)
+
 $ErrorActionPreference = "Stop"
 $taskRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $taskRoot
@@ -19,6 +27,38 @@ function Test-ApiReady {
         return $ready.status -eq "ready"
     } catch {
         return $false
+    }
+}
+
+function Get-ManagedApiProcesses([int[]]$RootPids) {
+    $processTable = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $knownPids = [System.Collections.Generic.HashSet[int]]::new()
+    $pendingPids = [System.Collections.Generic.Queue[int]]::new()
+
+    foreach ($rootPid in $RootPids | Where-Object { $_ -gt 0 } | Select-Object -Unique) {
+        $pendingPids.Enqueue($rootPid)
+    }
+
+    while ($pendingPids.Count -gt 0) {
+        $parentPid = $pendingPids.Dequeue()
+        foreach ($process in $processTable | Where-Object { $_.ParentProcessId -eq $parentPid }) {
+            if ($knownPids.Add([int]$process.ProcessId)) {
+                $pendingPids.Enqueue([int]$process.ProcessId)
+            }
+        }
+    }
+
+    $allPids = @($RootPids + @($knownPids)) | Where-Object { $_ -gt 0 } | Select-Object -Unique
+    @($processTable | Where-Object { $_.ProcessId -in $allPids })
+}
+
+function Stop-ManagedApi([int[]]$RootPids) {
+    $processes = @(Get-ManagedApiProcesses $RootPids)
+    foreach ($process in $processes | Sort-Object ProcessId -Descending) {
+        $commandLine = [string]$process.CommandLine
+        if ($commandLine.Contains("uvicorn app.main:app", [StringComparison]::OrdinalIgnoreCase)) {
+            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -81,6 +121,9 @@ function Invoke-Start([switch]$ApiOnly) {
         } while (-not $apiReady -and -not $apiProcess.HasExited -and (Get-Date) -lt $deadline)
 
         if (-not $apiReady) {
+            if (-not $apiProcess.HasExited) {
+                Stop-ManagedApi @($apiProcess.Id)
+            }
             Remove-Item -LiteralPath $apiStateFile -Force -ErrorAction SilentlyContinue
             throw "Content Bot API did not become healthy. Read data\logs\api-stderr.log and api-stdout.log."
         }
@@ -144,9 +187,7 @@ function Invoke-Stop {
         }
     }
 
-    foreach ($managedPid in $managedPids) {
-        Stop-Process -Id $managedPid -Force -ErrorAction SilentlyContinue
-    }
+    Stop-ManagedApi $managedPids
 
     $deadline = (Get-Date).AddSeconds(10)
     do {
@@ -299,6 +340,29 @@ function Invoke-SetupMediaCrawler {
     Write-Host "MediaCrawler is ready."
 }
 
+function Invoke-SetupSubtitles([string]$Model, [switch]$DownloadModel) {
+    $runtime = Join-Path $taskRoot "backend\.venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $runtime)) {
+        python -m venv (Join-Path $taskRoot "backend\.venv")
+        if ($LASTEXITCODE -ne 0) { throw "Unable to create the backend virtual environment." }
+    }
+
+    & $runtime -m pip install -e "backend[alignment]"
+    if ($LASTEXITCODE -ne 0) { throw "Unable to install subtitle alignment dependencies." }
+
+    if ($DownloadModel) {
+        $modelRoot = Join-Path $taskRoot "data\models\faster-whisper"
+        & $runtime "backend\scripts\download_subtitle_model.py" --model $Model --cache-dir $modelRoot
+        if ($LASTEXITCODE -ne 0) { throw "Unable to download the Faster Whisper model." }
+        Write-Host "Faster Whisper model '$Model' is ready."
+        Write-Host "Set CONTENT_BOT_ALIGNMENT_ENGINE=faster_whisper and CONTENT_BOT_ALIGNMENT_WHISPER_MODEL=$Model in backend\.env, then restart Content Bot."
+    } else {
+        Write-Host "Subtitle alignment dependencies are ready."
+        Write-Host "Energy alignment remains the lightweight default."
+        Write-Host "To enable word-level Faster Whisper alignment, rerun with -DownloadSubtitleModel."
+    }
+}
+
 function Invoke-ScanSource([string]$Keyword, [string]$SourceId, [int]$TimeoutSeconds = 660, [switch]$Json) {
     $apiBase = "http://127.0.0.1:8000/api/v1"
     try { Invoke-RestMethod -Uri "$apiBase/ready" -TimeoutSec 3 | Out-Null } catch { throw "Content Bot API is not ready; check MongoDB and data\logs\api-stderr.log." }
@@ -353,8 +417,8 @@ function Invoke-Backup([string]$DestinationDirectory = "data\backups") {
     $python = Get-BackendPython
     $backupRoot = [IO.Path]::GetFullPath((Join-Path $taskRoot $DestinationDirectory))
     $timestamp = [DateTimeOffset]::Now.ToString("yyyyMMdd-HHmmss-fff")
-    $destination = Join-Path $backupRoot "content-bot-$timestamp.db"
-    & $python "backend\scripts\backup_sqlite.py" --destination $destination
+    $destination = Join-Path $backupRoot "content-bot-$timestamp.json"
+    & $python "backend\scripts\backup_mongodb.py" --destination $destination
     if ($LASTEXITCODE -ne 0) { throw "Backup failed." }
     Write-Host "Backup saved to $destination"
 }
@@ -364,7 +428,7 @@ function Invoke-Restore([string]$Backup) {
     if (Test-LocalListener 8000) { throw "Stop the API before restoring." }
     $backupPath = [IO.Path]::GetFullPath((Join-Path $taskRoot $Backup))
     if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) { throw "Backup file was not found: $backupPath" }
-    & $python "backend\scripts\restore_sqlite.py" --source $backupPath --replace-current
+    & $python "backend\scripts\restore_mongodb.py" --source $backupPath --replace-current
     if ($LASTEXITCODE -ne 0) { throw "Restore failed." }
     Write-Host "Database restored."
 }
@@ -373,9 +437,9 @@ function Invoke-Prune([int]$Days = 90, [switch]$Apply) {
     $python = Get-BackendPython
     if ($Apply -and (Test-LocalListener 8000)) { throw "Stop the API before pruning." }
     if ($Apply) {
-        & $python "backend\scripts\prune_sqlite.py" --days $Days --apply
+        & $python "backend\scripts\prune_mongodb.py" --days $Days --apply
     } else {
-        & $python "backend\scripts\prune_sqlite.py" --days $Days
+        & $python "backend\scripts\prune_mongodb.py" --days $Days
     }
     if ($LASTEXITCODE -ne 0) { throw "Prune failed." }
 }
@@ -393,7 +457,13 @@ function Read-RequiredValue([string]$Prompt) {
 }
 
 try {
-    Invoke-Start
+    if ($Action -eq "setup-mediacrawler") {
+        Invoke-SetupMediaCrawler
+    } elseif ($Action -eq "setup-subtitles") {
+        Invoke-SetupSubtitles -Model $SubtitleModel -DownloadModel:$DownloadSubtitleModel
+    } else {
+        Invoke-Start
+    }
 } catch {
     Write-Error "Content Bot could not start: $($_.Exception.Message)"
     exit 1

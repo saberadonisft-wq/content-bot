@@ -26,6 +26,10 @@ def main() -> int:
     parser.add_argument("--destination", required=True, type=Path)
     args = parser.parse_args()
 
+    if settings.mongodb_uri:
+        raise RuntimeError(
+            "MongoDB is the active persistence backend. backup_sqlite.py is legacy-only; use mongodump for the configured MongoDB database."
+        )
     source_path = sqlite_path(settings.content_bot_database_url).resolve()
     destination = args.destination.resolve()
     if not source_path.exists():

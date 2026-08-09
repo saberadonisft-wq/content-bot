@@ -230,4 +230,85 @@
   color: #4b5563;
   font-weight: 600;
   cursor: pointer;
+  border: 0;
+  background: transparent;
+  padding: 4px 0;
+  font: inherit;
+}
+
+.canva-see-all:focus-visible,
+.canva-home-nav-item:focus-visible,
+.canva-home-create-btn:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.45);
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .canva-home-app {
+    min-height: 100dvh;
+    height: auto;
+    width: 100%;
+    overflow: visible;
+    flex-direction: column;
+  }
+
+  .canva-home-sidebar {
+    width: 100%;
+    padding: 10px 12px;
+    border-right: 0;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .canva-home-sidebar-header {
+    margin-bottom: 10px;
+    font-size: 18px;
+  }
+
+  .canva-home-create-btn {
+    width: 100%;
+    margin-bottom: 10px;
+  }
+
+  .canva-home-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 6px;
+    padding-bottom: 2px;
+  }
+
+  .canva-home-nav-item {
+    flex: 0 0 auto;
+    padding: 9px 12px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .canva-home-sidebar-footer {
+    display: none;
+  }
+
+  .canva-home-main,
+  .canva-home-app.home-mode .canva-home-main {
+    padding: 16px;
+    min-width: 0;
+  }
+
+  .canva-home-header {
+    margin-bottom: 20px;
+  }
+
+  .canva-home-header h1 {
+    font-size: 24px;
+  }
+
+  .canva-section-title {
+    gap: 12px;
+    flex-wrap: wrap;
+    font-size: 18px;
+  }
+
+  .canva-design-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
 }

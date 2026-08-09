@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type CSSProperties } from "react";
 import {
   Upload,
   Copy,
@@ -21,7 +21,6 @@ import {
   AlignRight,
   Music,
   Shapes,
-  Clock,
   Underline,
   Strikethrough,
   List,
@@ -29,9 +28,12 @@ import {
   Grid,
   X,
   Scissors,
-  Sliders,
   Volume2,
-  FastForward
+  FastForward,
+  Paintbrush,
+  Maximize2,
+  HelpCircle,
+  Subtitles,
 } from "lucide-react";
 import {
   API_BASE,
@@ -62,7 +64,14 @@ const hexToRgba = (hex: string, alpha: number) => {
   return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
 };
 
-export function SubtitleStudio() {
+const getErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback;
+
+type SubtitleStudioProps = {
+  onBack?: () => void;
+};
+
+export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoId, setVideoId] = useState<string | null>(null);
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string | null>(null);
@@ -72,7 +81,7 @@ export function SubtitleStudio() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [previewMode, setPreviewMode] = useState<"live" | "rendered">("live");
 
-  const [activeTab, setActiveTab] = useState<"upload" | "text" | "style" | "presets" | "video_edit">("upload");
+  const [activeTab, setActiveTab] = useState<"upload" | "text" | "style" | "presets" | "video_edit" | "position" | "animate">("text");
 
   const [uploading, setUploading] = useState(false);
   const [parsing, setParsing] = useState(false);
@@ -80,32 +89,81 @@ export function SubtitleStudio() {
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
+  const [showSpacingPopover, setShowSpacingPopover] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(42);
+  const [copiedStyleBuffer, setCopiedStyleBuffer] = useState<Partial<SubtitleBurnOptions> | null>(null);
+  const [isEditingInline, setIsEditingInline] = useState(false);
+
   const [rawText, setRawText] = useState("");
   const [subtitles, setSubtitles] = useState<SubtitleItem[]>([]);
   const [selectedSubIndex, setSelectedSubIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  
+  const [renderElapsedSec, setRenderElapsedSec] = useState(0);
+
+  useEffect(() => {
+    if (!rendering) return undefined;
+    const interval = window.setInterval(() => {
+      setRenderElapsedSec((prev) => prev + 1);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [rendering]);
+
+
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
-  const dragOffset = useRef({ x: 0, y: 0 });
+  const [videoThumbnails, setVideoThumbnails] = useState<string[]>([]);
+  const [overlayImage, setOverlayImage] = useState<string | null>(null);
+  const [overlayName, setOverlayName] = useState<string>("");
+
+  const extractVideoThumbnails = (videoUrl: string, totalDur: number) => {
+    if (!totalDur || totalDur <= 0) return;
+    const v = document.createElement("video");
+    v.src = videoUrl;
+    v.crossOrigin = "anonymous";
+    v.onloadeddata = async () => {
+      const thumbs: string[] = [];
+      const count = 8;
+      const step = totalDur / count;
+      const canvas = document.createElement("canvas");
+      canvas.width = 120;
+      canvas.height = 68;
+      const ctx = canvas.getContext("2d");
+
+      for (let i = 0; i < count; i++) {
+        v.currentTime = Math.min(totalDur - 0.1, i * step);
+        await new Promise((resolve) => {
+          v.onseeked = resolve;
+        });
+        if (ctx) {
+          ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+          thumbs.push(canvas.toDataURL("image/jpeg", 0.7));
+        }
+      }
+      setVideoThumbnails(thumbs);
+    };
+  };
 
   const [options, setOptions] = useState<SubtitleBurnOptions>({
-    font_name: "Arial",
-    font_size: 24,
+    font_name: "Arimo",
+    font_size: 38,
     font_color: "#FFFFFF",
-    bold: false,
+    bold: true,
     italic: false,
+    underline: false,
+    strikethrough: false,
     uppercase: false,
+    alignment_type: "center",
     outline_color: "#000000",
     outline_width: 2,
     shadow_color: "#000000",
-    shadow_width: 0,
+    shadow_width: 2,
     bg_enabled: false,
     bg_color: "#000000",
     bg_opacity: 0.75,
     spacing: 0,
+    line_spacing: 1.2,
     pos_x: 50,
-    pos_y: 85,
-    position: "bottom",
+    pos_y: 50,
+    position: "custom",
     video_speed: 1.0,
     volume: 1.0,
     fade_in: 0.0,
@@ -114,6 +172,7 @@ export function SubtitleStudio() {
     bg_fill_type: "blur",
     trim_start: 0,
     trim_end: null,
+    animation: "none",
   });
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -128,43 +187,180 @@ export function SubtitleStudio() {
     ? subtitles[selectedSubIndex]
     : null;
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (previewMode !== "live") return;
+  const formatSrtTime = (totalSeconds: number): string => {
+    const s = Math.max(0, totalSeconds);
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = Math.floor(s % 60);
+    const millis = Math.floor((s % 1) * 1000);
+    return `${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")},${millis.toString().padStart(3, "0")}`;
+  };
+
+  const dragStartRef = useRef<{
+    startX: number;
+    startY: number;
+    mouseX: number;
+    mouseY: number;
+  }>({ startX: 0, startY: 0, mouseX: 0, mouseY: 0 });
+
+  const [isResizingText, setIsResizingText] = useState(false);
+  const resizeStartRef = useRef<{ startSize: number; mouseY: number }>({ startSize: 38, mouseY: 0 });
+
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const timelineTracksAreaRef = useRef<HTMLDivElement>(null);
+
+  const [pillDragState, setPillDragState] = useState<{
+    index: number;
+    mode: "move" | "trim_start" | "trim_end";
+    startMouseX: number;
+    origStartSec: number;
+    origEndSec: number;
+  } | null>(null);
+
+  const handleStartDrag = (e: React.MouseEvent) => {
+    if (previewMode !== "live" || !playerWrapperRef.current || isEditingInline) return;
     e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    
-    dragOffset.current = {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
+    e.stopPropagation();
+
+    dragStartRef.current = {
+      startX: options.pos_x,
+      startY: options.pos_y,
+      mouseX: e.clientX,
+      mouseY: e.clientY,
     };
-    
+
     setIsDragging(true);
+  };
+
+  const handleStartResizeText = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    resizeStartRef.current = {
+      startSize: options.font_size,
+      mouseY: e.clientY,
+    };
+    setIsResizingText(true);
+  };
+
+  const handleStartScrubbing = (e: React.MouseEvent) => {
+    if (!timelineTracksAreaRef.current) return;
+    const rect = timelineTracksAreaRef.current.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const totalDur = duration || 40;
+    const newTime = Math.max(0, Math.min(totalDur, (clickX / rect.width) * totalDur));
+    handleSeek(newTime);
+    setIsScrubbing(true);
+  };
+
+  const handleStartPillDrag = (e: React.MouseEvent, index: number, mode: "move" | "trim_start" | "trim_end") => {
+    e.preventDefault();
+    e.stopPropagation();
+    setSelectedSubIndex(index);
+    const sub = subtitles[index];
+    if (!sub) return;
+    setPillDragState({
+      index,
+      mode,
+      startMouseX: e.clientX,
+      origStartSec: sub.start_seconds,
+      origEndSec: sub.end_seconds,
+    });
   };
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (!isDragging || !playerWrapperRef.current) return;
-      const rect = playerWrapperRef.current.getBoundingClientRect();
-      
-      let x = ((e.clientX - dragOffset.current.x - rect.left) / rect.width) * 100;
-      let y = ((e.clientY - dragOffset.current.y - rect.top) / rect.height) * 100;
-      
-      x = Math.max(0, Math.min(100, x));
-      y = Math.max(0, Math.min(100, y));
+      // 1. Drag subtitle position on Canvas
+      if (isDragging && playerWrapperRef.current) {
+        const rect = playerWrapperRef.current.getBoundingClientRect();
+        if (rect.width && rect.height) {
+          const deltaXPercent = ((e.clientX - dragStartRef.current.mouseX) / rect.width) * 100;
+          const deltaYPercent = ((e.clientY - dragStartRef.current.mouseY) / rect.height) * 100;
 
-      setOptions((prev) => ({
-        ...prev,
-        position: "custom",
-        pos_x: Math.round(x * 10) / 10,
-        pos_y: Math.round(y * 10) / 10,
-      }));
+          let newX = dragStartRef.current.startX + deltaXPercent;
+          let newY = dragStartRef.current.startY + deltaYPercent;
+
+          // Magnetic snapping at center (50%)
+          if (Math.abs(newX - 50) < 1.8) newX = 50;
+          if (Math.abs(newY - 50) < 1.8) newY = 50;
+
+          newX = Math.max(0, Math.min(100, newX));
+          newY = Math.max(0, Math.min(100, newY));
+
+          setOptions((prev) => ({
+            ...prev,
+            position: "custom",
+            pos_x: Math.round(newX * 10) / 10,
+            pos_y: Math.round(newY * 10) / 10,
+          }));
+        }
+      }
+
+      // 2. Resize subtitle font size via corner handles
+      if (isResizingText) {
+        const deltaY = resizeStartRef.current.mouseY - e.clientY;
+        const newFontSize = Math.max(14, Math.min(96, Math.round(resizeStartRef.current.startSize + deltaY * 0.3)));
+        setOptions((prev) => ({ ...prev, font_size: newFontSize }));
+      }
+
+      // 3. Scrub timeline playhead
+      if (isScrubbing && timelineTracksAreaRef.current) {
+        const rect = timelineTracksAreaRef.current.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+        const totalDur = duration || 40;
+        const newTime = Math.max(0, Math.min(totalDur, (clickX / rect.width) * totalDur));
+        if (videoRef.current) {
+          videoRef.current.currentTime = newTime;
+        }
+        setCurrentTime(newTime);
+      }
+
+      // 4. Move / Trim subtitle pills on timeline
+      if (pillDragState && timelineTracksAreaRef.current) {
+        const rect = timelineTracksAreaRef.current.getBoundingClientRect();
+        const totalDur = duration || 40;
+        const deltaSec = ((e.clientX - pillDragState.startMouseX) / rect.width) * totalDur;
+        const { index, mode, origStartSec, origEndSec } = pillDragState;
+
+        setSubtitles((prev) => {
+          return prev.map((item, idx) => {
+            if (idx !== index) return item;
+
+            let newStart = item.start_seconds;
+            let newEnd = item.end_seconds;
+            const durationSec = origEndSec - origStartSec;
+
+            if (mode === "move") {
+              newStart = Math.max(0, Math.min(totalDur - durationSec, origStartSec + deltaSec));
+              newEnd = newStart + durationSec;
+            } else if (mode === "trim_start") {
+              newStart = Math.max(0, Math.min(item.end_seconds - 0.3, origStartSec + deltaSec));
+            } else if (mode === "trim_end") {
+              newEnd = Math.max(item.start_seconds + 0.3, Math.min(totalDur, origEndSec + deltaSec));
+            }
+
+            newStart = Math.round(newStart * 10) / 10;
+            newEnd = Math.round(newEnd * 10) / 10;
+
+            return {
+              ...item,
+              start_seconds: newStart,
+              end_seconds: newEnd,
+              start_time: formatSrtTime(newStart),
+              end_time: formatSrtTime(newEnd),
+            };
+          });
+        });
+      }
     };
 
     const handleMouseUp = () => {
       if (isDragging) setIsDragging(false);
+      if (isResizingText) setIsResizingText(false);
+      if (isScrubbing) setIsScrubbing(false);
+      if (pillDragState) setPillDragState(null);
     };
 
-    if (isDragging) {
+    if (isDragging || isResizingText || isScrubbing || pillDragState) {
       window.addEventListener("mousemove", handleMouseMove);
       window.addEventListener("mouseup", handleMouseUp);
     }
@@ -172,7 +368,7 @@ export function SubtitleStudio() {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isDragging]);
+  }, [isDragging, isResizingText, isScrubbing, pillDragState, duration]);
 
   const applyPreset = (type: string) => {
     if (type === "tiktok") {
@@ -245,31 +441,38 @@ export function SubtitleStudio() {
     setUploading(true);
     setSubtitledVideoUrl(null);
     setPreviewMode("live");
+    setSubtitles([]);
+    setRawText("");
+    setSelectedSubIndex(null);
 
     try {
       const res = await api.uploadSubtitleVideo(file);
       setVideoId(res.video_id);
       setOriginalVideoUrl(`${API_BASE}/subtitles/video/${res.video_id}`);
       setActiveTab("text");
-    } catch (err: any) {
-      setError(err.message || "Upload video thất bại");
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, "Upload video thất bại"));
     } finally {
       setUploading(false);
     }
   };
 
   const handleParseText = async () => {
-    if (!rawText.trim()) return;
+    const text = rawText.trim();
+    if (!text) {
+      setError("Hãy dán nội dung phụ đề trước khi bấm Bóc Tách Phụ Đề.");
+      return;
+    }
     setParsing(true);
     setError(null);
     try {
-      const res = await api.parseSubtitleText(rawText);
+      const res = await api.parseSubtitleText(text);
       setSubtitles(res.subtitles);
       if (res.subtitles.length === 0) {
         setError("Không bóc tách được mốc thời gian nào từ văn bản. Hãy kiểm tra lại cấu trúc văn bản dán.");
       }
-    } catch (err: any) {
-      setError(err.message || "Phân tích phụ đề thất bại");
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, "Phân tích phụ đề thất bại"));
     } finally {
       setParsing(false);
     }
@@ -279,10 +482,10 @@ export function SubtitleStudio() {
     if (videoRef.current) {
       videoRef.current.currentTime = seconds;
       setCurrentTime(seconds);
-      videoRef.current.play().catch(() => {});
+      videoRef.current.play().catch(() => { });
     }
   };
-  
+
   const togglePlay = () => {
     if (videoRef.current) {
       if (videoRef.current.paused) {
@@ -318,15 +521,16 @@ export function SubtitleStudio() {
 
   const handleBurnSubtitles = async () => {
     if (!videoId || subtitles.length === 0) return;
+    setRenderElapsedSec(0);
     setRendering(true);
     setError(null);
     try {
-      const res = await api.burnSubtitleVideo(videoId, subtitles, options);
+      await api.burnSubtitleVideo(videoId, subtitles, options);
       const url = `${API_BASE}/subtitles/video/${videoId}?type=subtitled&t=${Date.now()}`;
       setSubtitledVideoUrl(url);
       setPreviewMode("rendered");
-    } catch (err: any) {
-      setError(err.message || "Ghép phụ đề thất bại");
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, "Ghép phụ đề thất bại"));
     } finally {
       setRendering(false);
     }
@@ -343,7 +547,7 @@ export function SubtitleStudio() {
       {/* ── HEADER ── */}
       <header className="canva-header">
         <div className="canva-brand">
-          <button className="canva-btn canva-btn-primary" style={{ padding: '8px', background: 'rgba(255,255,255,0.2)', color: 'white' }}>
+          <button type="button" aria-label="Về trang chủ" onClick={onBack} className="canva-btn canva-btn-primary" style={{ padding: '8px', background: 'rgba(255,255,255,0.2)', color: 'white' }}>
             <Home size={20} />
           </button>
           <span style={{ margin: '0 12px' }}>Tệp</span>
@@ -354,24 +558,29 @@ export function SubtitleStudio() {
           Thiết kế không tên - Phụ Đề Video
         </div>
         <div className="canva-header-actions">
-          <button className="canva-btn canva-btn-secondary" style={{ background: 'rgba(0,0,0,0.2)' }}>
+          <button type="button" className="canva-btn canva-btn-secondary" style={{ background: 'rgba(0,0,0,0.2)' }}>
             <Sparkles size={16} className="icon-gold" /> Dùng thử với giá 0 đ
           </button>
           <span className="canva-toolbar-divider" style={{ background: 'rgba(255,255,255,0.3)', margin: '0 8px' }}></span>
+          {rendering && (
+            <span style={{ fontSize: 13, marginRight: 16, color: '#ffeb3b', display: 'flex', alignItems: 'center' }}>
+              Đang xử lý video (có thể mất vài phút)...
+            </span>
+          )}
           {videoId && subtitles.length > 0 && (
-            <button 
-              className="canva-btn canva-btn-primary" 
-              onClick={handleBurnSubtitles} 
+            <button
+              className="canva-btn canva-btn-primary"
+              onClick={handleBurnSubtitles}
               disabled={rendering}
             >
               {rendering ? <LoaderCircle className="spin" size={16} /> : <Film size={16} />}
-              <span>{rendering ? "Đang Xuất..." : "Xuất Video"}</span>
+              <span>{rendering ? `Đang Xuất... (${formatTime(renderElapsedSec)})` : "Xuất Video"}</span>
             </button>
           )}
           {subtitledVideoUrl && (
-            <a 
-              href={subtitledVideoUrl} 
-              download={`subtitled_${videoId}.mp4`} 
+            <a
+              href={subtitledVideoUrl}
+              download={`subtitled_${videoId}.mp4`}
               className="canva-btn canva-btn-secondary"
             >
               <Download size={16} /> Chia sẻ
@@ -384,36 +593,46 @@ export function SubtitleStudio() {
       <div className="canva-body">
         {/* LEFT ICONS */}
         <div className="canva-sidebar-icons">
-          <button 
-            className={`canva-icon-tab ${activeTab === "upload" ? "active" : ""}`} 
+          <button
+            type="button"
+            aria-label="Tải lên"
+            className={`canva-icon-tab ${activeTab === "upload" ? "active" : ""}`}
             onClick={() => setActiveTab("upload")}
           >
             <Upload size={22} />
             <span>Tải lên</span>
           </button>
-          <button 
-            className={`canva-icon-tab ${activeTab === "text" ? "active" : ""}`} 
+          <button
+            type="button"
+            aria-label="Văn bản"
+            className={`canva-icon-tab ${activeTab === "text" ? "active" : ""}`}
             onClick={() => setActiveTab("text")}
           >
             <Type size={22} />
             <span>Văn bản</span>
           </button>
-          <button 
-            className={`canva-icon-tab ${activeTab === "presets" ? "active" : ""}`} 
+          <button
+            type="button"
+            aria-label="Mẫu"
+            className={`canva-icon-tab ${activeTab === "presets" ? "active" : ""}`}
             onClick={() => setActiveTab("presets")}
           >
             <LayoutTemplate size={22} />
             <span>Mẫu</span>
           </button>
-          <button 
-            className={`canva-icon-tab ${activeTab === "style" ? "active" : ""}`} 
+          <button
+            type="button"
+            aria-label="Hiệu ứng"
+            className={`canva-icon-tab ${activeTab === "style" ? "active" : ""}`}
             onClick={() => setActiveTab("style")}
           >
             <Palette size={22} />
             <span>Hiệu ứng</span>
           </button>
-          <button 
-            className={`canva-icon-tab ${activeTab === "video_edit" ? "active" : ""}`} 
+          <button
+            type="button"
+            aria-label="Biên tập video"
+            className={`canva-icon-tab ${activeTab === "video_edit" ? "active" : ""}`}
             onClick={() => setActiveTab("video_edit")}
           >
             <Scissors size={22} />
@@ -430,7 +649,7 @@ export function SubtitleStudio() {
             <div className="canva-panel-content">
               <h3>Tải video lên</h3>
               <p className="canva-text-muted">Chọn video từ máy tính của bạn để bắt đầu chỉnh sửa phụ đề.</p>
-              
+
               <div className="upload-box" style={{ marginTop: 16 }}>
                 <input
                   type="file"
@@ -461,6 +680,55 @@ export function SubtitleStudio() {
                   )}
                 </label>
               </div>
+
+              <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px solid #e5e7eb" }}>
+                <h4 style={{ margin: "0 0 4px 0", fontSize: 15, fontWeight: 700 }}>Tải logo / hình ảnh đè</h4>
+                <p className="canva-text-muted">Chọn tệp ảnh logo (PNG/JPG) để chèn đè lên video nếu muốn.</p>
+
+                <div className="upload-box" style={{ marginTop: 12 }}>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    id="logo-upload"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const url = URL.createObjectURL(file);
+                        setOverlayImage(url);
+                        setOverlayName(file.name);
+                      }
+                    }}
+                    style={{ display: "none" }}
+                  />
+                  <label htmlFor="logo-upload" className="upload-label">
+                    {overlayImage ? (
+                      <div className="file-info" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <img src={overlayImage} alt="Logo" style={{ width: 28, height: 28, objectFit: "contain", borderRadius: 4 }} />
+                          <strong style={{ fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 140 }}>{overlayName}</strong>
+                        </div>
+                        <button
+                          type="button"
+                          className="canva-btn canva-btn-outline"
+                          style={{ padding: "2px 8px", fontSize: 12, color: "#ef4444", borderColor: "#fca5a5" }}
+                          onClick={(evt) => {
+                            evt.preventDefault();
+                            setOverlayImage(null);
+                            setOverlayName("");
+                          }}
+                        >
+                          Xóa
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="upload-placeholder">
+                        <Upload size={24} />
+                        <span>Tải ảnh logo đè lên</span>
+                      </div>
+                    )}
+                  </label>
+                </div>
+              </div>
             </div>
           )}
 
@@ -468,7 +736,7 @@ export function SubtitleStudio() {
           {activeTab === "text" && (
             <div className="canva-panel-content">
               <h3>Tạo phụ đề (Gemini)</h3>
-              
+
               <div className="canva-tool-group">
                 <label className="canva-label">1. Copy Prompt</label>
                 <button
@@ -491,15 +759,16 @@ export function SubtitleStudio() {
                   value={rawText}
                   onChange={(e) => setRawText(e.target.value)}
                 />
-                <button
-                  type="button"
-                  className="canva-btn canva-btn-primary"
-                  onClick={handleParseText}
-                  disabled={parsing || !rawText.trim()}
-                  style={{ width: "100%", marginTop: 8 }}
+                  <button
+                    type="button"
+                    className="canva-btn canva-btn-primary"
+                    onClick={handleParseText}
+                    disabled={parsing}
+                    aria-busy={parsing}
+                    style={{ width: "100%", marginTop: 8 }}
                 >
                   {parsing ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
-                  Bóc Tách Phụ Đề
+                  {parsing ? "Đang bóc tách..." : "Bóc Tách Phụ Đề"}
                 </button>
               </div>
 
@@ -507,15 +776,15 @@ export function SubtitleStudio() {
                 <div className="canva-tool-group" style={{ marginTop: 24 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                     <label className="canva-label" style={{ margin: 0 }}>Danh Sách Phụ Đề</label>
-                    <button type="button" className="btn-icon" onClick={handleAddSub} title="Thêm dòng"><Plus size={16}/></button>
+                    <button type="button" className="btn-icon" onClick={handleAddSub} title="Thêm dòng"><Plus size={16} /></button>
                   </div>
                   <div className="subtitle-list" style={{ maxHeight: '400px' }}>
                     {subtitles.map((sub, idx) => (
-                      <div 
-                        key={idx} 
-                        className={`sub-item-row ${selectedSubIndex === idx ? "selected" : ""}`} 
-                        style={{ 
-                          flexDirection: 'column', 
+                      <div
+                        key={idx}
+                        className={`sub-item-row ${selectedSubIndex === idx ? "selected" : ""}`}
+                        style={{
+                          flexDirection: 'column',
                           alignItems: 'flex-start',
                           border: selectedSubIndex === idx ? "2px solid #7d2ae8" : "1px solid #e5e7eb",
                           borderRadius: 8,
@@ -565,7 +834,7 @@ export function SubtitleStudio() {
             <div className="canva-panel-content">
               <h3>Mẫu Phụ Đề</h3>
               <p className="canva-text-muted">Áp dụng nhanh các phong cách phổ biến.</p>
-              
+
               <div className="canva-presets-grid">
                 <button className="preset-card tiktok" onClick={() => applyPreset("tiktok")}>
                   <span>🔥 TikTok</span>
@@ -597,8 +866,8 @@ export function SubtitleStudio() {
               <div className="canva-effects-section">
                 <div className="canva-effects-grid">
                   {/* Không có */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, shadow_width: 0, outline_width: 0, bg_enabled: false })}
                   >
@@ -607,8 +876,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Đổ bóng */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, shadow_width: 5, shadow_color: '#000000', outline_width: 0, bg_enabled: false })}
                   >
@@ -617,8 +886,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Phát sáng */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, shadow_width: 10, shadow_color: '#a855f7', outline_width: 0, bg_enabled: false })}
                   >
@@ -627,8 +896,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Lặp bóng */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, shadow_width: 6, shadow_color: '#c084fc', outline_width: 0, bg_enabled: false })}
                   >
@@ -637,8 +906,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Viền */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, outline_width: 2, outline_color: '#7d2ae8', shadow_width: 0, bg_enabled: false })}
                   >
@@ -647,8 +916,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Nền */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, bg_enabled: true, bg_color: '#d8b4fe', bg_opacity: 0.8, outline_width: 0, shadow_width: 0 })}
                   >
@@ -657,8 +926,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Bóng rỗng */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, outline_width: 2, outline_color: '#7d2ae8', shadow_width: 4, shadow_color: '#e9d5ff', bg_enabled: false })}
                   >
@@ -667,8 +936,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Rỗng */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, outline_width: 2, outline_color: '#7d2ae8', shadow_width: 0, bg_enabled: false })}
                   >
@@ -677,8 +946,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Neon */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, shadow_width: 12, shadow_color: '#f472b6', font_color: '#ffffff', outline_width: 1, outline_color: '#ec4899', bg_enabled: false })}
                   >
@@ -687,8 +956,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Nhiễu */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, shadow_width: 4, shadow_color: '#06b6d4', outline_width: 2, outline_color: '#ec4899', bg_enabled: false })}
                   >
@@ -703,8 +972,8 @@ export function SubtitleStudio() {
                 <div className="canva-effects-section-title">Nâng cao</div>
                 <div className="canva-effects-grid">
                   {/* Đèn neon */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#f472b6', shadow_width: 12, shadow_color: '#ec4899' })}
                   >
@@ -713,8 +982,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Nhiễu TV */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#38bdf8', shadow_width: 6, shadow_color: '#c084fc', outline_width: 2, outline_color: '#f43f5e' })}
                   >
@@ -723,8 +992,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Thập niên 70 */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#fbbf24', shadow_width: 5, shadow_color: '#b45309', outline_width: 1, outline_color: '#78350f' })}
                   >
@@ -733,8 +1002,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Khoa học viễn tưởng */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#4ade80', shadow_width: 10, shadow_color: '#22c55e', outline_width: 1, outline_color: '#15803d' })}
                   >
@@ -743,8 +1012,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* In lụa */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#f472b6', shadow_width: 6, shadow_color: '#db2777', outline_width: 1, outline_color: '#9d174d' })}
                   >
@@ -753,8 +1022,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Phương Tây */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#f97316', shadow_width: 4, shadow_color: '#9a3412', outline_width: 2, outline_color: '#7c2d12' })}
                   >
@@ -763,8 +1032,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Graffiti */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#10b981', shadow_width: 6, shadow_color: '#047857', outline_width: 3, outline_color: '#064e3b' })}
                   >
@@ -773,8 +1042,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Bong bóng */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#06b6d4', shadow_width: 5, shadow_color: '#0e7490', outline_width: 2, outline_color: '#164e63' })}
                   >
@@ -783,8 +1052,8 @@ export function SubtitleStudio() {
                   </button>
 
                   {/* Thể dục nhịp điệu */}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, font_color: '#e879f9', shadow_width: 10, shadow_color: '#c084fc', outline_width: 1, outline_color: '#a855f7' })}
                   >
@@ -798,8 +1067,8 @@ export function SubtitleStudio() {
               <div className="canva-effects-section">
                 <div className="canva-effects-section-title">Hình dạng</div>
                 <div className="canva-effects-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className="canva-effect-card"
                     onClick={() => setOptions({ ...options, spacing: options.spacing === 2 ? 0 : 2 })}
                   >
@@ -896,39 +1165,39 @@ export function SubtitleStudio() {
                   <Volume2 size={16} />
                   Âm lượng: {Math.round((options.volume || 1.0) * 100)}%
                 </label>
-                <input 
-                  type="range" 
-                  className="canva-slider" 
-                  min={0.0} 
-                  max={2.0} 
-                  step={0.1} 
-                  value={options.volume || 1.0} 
-                  onChange={(e) => setOptions({ ...options, volume: Number(e.target.value) })} 
+                <input
+                  type="range"
+                  className="canva-slider"
+                  min={0.0}
+                  max={2.0}
+                  step={0.1}
+                  value={options.volume || 1.0}
+                  onChange={(e) => setOptions({ ...options, volume: Number(e.target.value) })}
                 />
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
                   <div>
                     <label className="canva-label" style={{ fontSize: 12 }}>Tăng âm đầu (Fade-in): {(options.fade_in || 0).toFixed(1)}s</label>
-                    <input 
-                      type="range" 
-                      className="canva-slider" 
-                      min={0.0} 
-                      max={3.0} 
-                      step={0.5} 
-                      value={options.fade_in || 0} 
-                      onChange={(e) => setOptions({ ...options, fade_in: Number(e.target.value) })} 
+                    <input
+                      type="range"
+                      className="canva-slider"
+                      min={0.0}
+                      max={3.0}
+                      step={0.5}
+                      value={options.fade_in || 0}
+                      onChange={(e) => setOptions({ ...options, fade_in: Number(e.target.value) })}
                     />
                   </div>
                   <div>
                     <label className="canva-label" style={{ fontSize: 12 }}>Giảm âm cuối (Fade-out): {(options.fade_out || 0).toFixed(1)}s</label>
-                    <input 
-                      type="range" 
-                      className="canva-slider" 
-                      min={0.0} 
-                      max={3.0} 
-                      step={0.5} 
-                      value={options.fade_out || 0} 
-                      onChange={(e) => setOptions({ ...options, fade_out: Number(e.target.value) })} 
+                    <input
+                      type="range"
+                      className="canva-slider"
+                      min={0.0}
+                      max={3.0}
+                      step={0.5}
+                      value={options.fade_out || 0}
+                      onChange={(e) => setOptions({ ...options, fade_out: Number(e.target.value) })}
                     />
                   </div>
                 </div>
@@ -998,9 +1267,9 @@ export function SubtitleStudio() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 8 }}>
                   <div>
                     <label className="canva-label" style={{ fontSize: 12 }}>Thời điểm bắt đầu (s)</label>
-                    <input 
-                      type="number" 
-                      className="canva-toolbar-input" 
+                    <input
+                      type="number"
+                      className="canva-toolbar-input"
                       style={{ width: '100%' }}
                       min={0}
                       max={duration || 100}
@@ -1011,9 +1280,9 @@ export function SubtitleStudio() {
                   </div>
                   <div>
                     <label className="canva-label" style={{ fontSize: 12 }}>Thời điểm kết thúc (s)</label>
-                    <input 
-                      type="number" 
-                      className="canva-toolbar-input" 
+                    <input
+                      type="number"
+                      className="canva-toolbar-input"
                       style={{ width: '100%' }}
                       min={options.trim_start || 0}
                       max={duration || 100}
@@ -1027,6 +1296,135 @@ export function SubtitleStudio() {
               </div>
             </div>
           )}
+
+          {/* TAB: POSITION (Vị trí) */}
+          {activeTab === "position" && (
+            <div className="canva-panel-content" style={{ padding: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #e5e7eb', paddingBottom: 12 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#111827' }}>Vị trí</h3>
+                <button type="button" className="canva-toolbar-btn canva-toolbar-btn-icon" onClick={() => setActiveTab("text")} title="Đóng">
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="canva-tool-group">
+                <label className="canva-label" style={{ fontWeight: 700 }}>Căn chỉnh vị trí trên trang</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="canva-btn canva-btn-outline"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setOptions({ ...options, position: "custom", pos_x: 10, pos_y: options.pos_y })}
+                  >
+                    Trái
+                  </button>
+                  <button
+                    type="button"
+                    className="canva-btn canva-btn-outline"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setOptions({ ...options, position: "custom", pos_x: 50, pos_y: options.pos_y })}
+                  >
+                    Giữa (Ngang)
+                  </button>
+                  <button
+                    type="button"
+                    className="canva-btn canva-btn-outline"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setOptions({ ...options, position: "custom", pos_x: 90, pos_y: options.pos_y })}
+                  >
+                    Phải
+                  </button>
+
+                  <button
+                    type="button"
+                    className="canva-btn canva-btn-outline"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setOptions({ ...options, position: "custom", pos_x: options.pos_x, pos_y: 15 })}
+                  >
+                    Trên
+                  </button>
+                  <button
+                    type="button"
+                    className="canva-btn canva-btn-outline"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setOptions({ ...options, position: "custom", pos_x: options.pos_x, pos_y: 50 })}
+                  >
+                    Giữa (Dọc)
+                  </button>
+                  <button
+                    type="button"
+                    className="canva-btn canva-btn-outline"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setOptions({ ...options, position: "custom", pos_x: options.pos_x, pos_y: 85 })}
+                  >
+                    Dưới
+                  </button>
+                </div>
+              </div>
+
+              <div className="canva-tool-group" style={{ marginTop: 24 }}>
+                <label className="canva-label" style={{ fontWeight: 700 }}>Tọa độ tùy chỉnh (%)</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <label className="canva-label" style={{ fontSize: 12 }}>X: {options.pos_x}%</label>
+                    <input
+                      type="range"
+                      className="canva-slider"
+                      min={0}
+                      max={100}
+                      value={options.pos_x}
+                      onChange={(e) => setOptions({ ...options, position: "custom", pos_x: Number(e.target.value) })}
+                    />
+                  </div>
+                  <div>
+                    <label className="canva-label" style={{ fontSize: 12 }}>Y: {options.pos_y}%</label>
+                    <input
+                      type="range"
+                      className="canva-slider"
+                      min={0}
+                      max={100}
+                      value={options.pos_y}
+                      onChange={(e) => setOptions({ ...options, position: "custom", pos_y: Number(e.target.value) })}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: ANIMATE (Chuyển động) */}
+          {activeTab === "animate" && (
+            <div className="canva-panel-content" style={{ padding: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #e5e7eb', paddingBottom: 12 }}>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#111827' }}>Chuyển động phụ đề</h3>
+                <button type="button" className="canva-toolbar-btn canva-toolbar-btn-icon" onClick={() => setActiveTab("text")} title="Đóng">
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="canva-effects-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
+                {[
+                  { id: "none", label: "Không có", icon: "✨" },
+                  { id: "fade", label: "Mờ dần", icon: "🌫️" },
+                  { id: "rise", label: "Trồi lên", icon: "⬆️" },
+                  { id: "pan", label: "Gạt sang", icon: "➡️" },
+                  { id: "typewriter", label: "Máy đánh chữ", icon: "⌨️" },
+                ].map((anim) => (
+                  <button
+                    key={anim.id}
+                    type="button"
+                    className={`canva-effect-card ${options.animation === anim.id ? "active" : ""}`}
+                    onClick={() => setOptions({ ...options, animation: anim.id as SubtitleBurnOptions["animation"] })}
+                  >
+                    <div className="effect-card-preview" style={{ fontSize: 24 }}>
+                      {anim.icon}
+                    </div>
+                    <span className="effect-card-label">{anim.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* MAIN CANVAS & TIMELINE */}
@@ -1034,19 +1432,26 @@ export function SubtitleStudio() {
           {/* TOP TOOLBAR AREA */}
           <div className="canva-top-toolbar-area">
             {selectedSub ? (
-              <div className="canva-floating-pill-toolbar">
-                {/* 1. Duration pill */}
-                <div className="canva-pill-item duration-pill">
-                  <Clock size={14} />
-                  <span>{(selectedSub.end_seconds - selectedSub.start_seconds).toFixed(1)} giây</span>
-                </div>
+              <div className="canva-floating-pill-toolbar" style={{ position: "relative" }}>
+                {/* 1. Subtitle / Caption Label Pill */}
+                <button
+                  type="button"
+                  className={`canva-pill-item ${activeTab === "text" ? "active" : ""}`}
+                  onClick={() => setActiveTab("text")}
+                  title="Chú thích phụ đề"
+                  style={{ background: "#f0e7fe", color: "#7d2ae8", border: "1px solid #c084fc", fontWeight: 600 }}
+                >
+                  <Subtitles size={15} />
+                  <span>Chú thích</span>
+                </button>
 
                 {/* 2. Font family select */}
-                <select 
+                <select
                   className="canva-pill-select"
-                  value={options.font_name} 
+                  value={options.font_name}
                   onChange={(e) => setOptions({ ...options, font_name: e.target.value })}
                 >
+                  <option value="Arimo">Arimo</option>
                   <option value="Arial">Arial</option>
                   <option value="Roboto">Roboto</option>
                   <option value="Montserrat">Montserrat</option>
@@ -1065,20 +1470,20 @@ export function SubtitleStudio() {
 
                 {/* 4. Text color with Rainbow bar */}
                 <div className="canva-pill-color-btn" title="Màu chữ">
-                  <span className="color-letter">A</span>
-                  <div className="rainbow-bar" />
-                  <input 
-                    type="color" 
+                  <span className="color-letter" style={{ color: options.font_color !== "#FFFFFF" ? options.font_color : "#0f172a" }}>A</span>
+                  <div className="rainbow-bar" style={{ background: options.font_color !== "#FFFFFF" ? options.font_color : undefined }} />
+                  <input
+                    type="color"
                     className="hidden-color-input"
-                    value={options.font_color} 
-                    onChange={(e) => setOptions({ ...options, font_color: e.target.value })} 
+                    value={options.font_color}
+                    onChange={(e) => setOptions({ ...options, font_color: e.target.value })}
                   />
                 </div>
 
                 {/* 5. Bold B */}
-                <button 
-                  type="button" 
-                  className={`canva-pill-btn ${options.bold ? "active" : ""}`} 
+                <button
+                  type="button"
+                  className={`canva-pill-btn ${options.bold ? "active" : ""}`}
                   onClick={() => setOptions({ ...options, bold: !options.bold })}
                   title="In đậm"
                 >
@@ -1086,9 +1491,9 @@ export function SubtitleStudio() {
                 </button>
 
                 {/* 6. Italic I */}
-                <button 
-                  type="button" 
-                  className={`canva-pill-btn ${options.italic ? "active" : ""}`} 
+                <button
+                  type="button"
+                  className={`canva-pill-btn ${options.italic ? "active" : ""}`}
                   onClick={() => setOptions({ ...options, italic: !options.italic })}
                   title="In nghiêng"
                 >
@@ -1096,90 +1501,138 @@ export function SubtitleStudio() {
                 </button>
 
                 {/* 7. Underline U */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn" 
+                <button
+                  type="button"
+                  className={`canva-pill-btn ${options.underline ? "active" : ""}`}
+                  onClick={() => setOptions({ ...options, underline: !options.underline })}
                   title="Gạch chân"
                 >
                   <Underline size={15} />
                 </button>
 
                 {/* 8. Strikethrough S */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn" 
+                <button
+                  type="button"
+                  className={`canva-pill-btn ${options.strikethrough ? "active" : ""}`}
+                  onClick={() => setOptions({ ...options, strikethrough: !options.strikethrough })}
                   title="Gạch ngang"
                 >
                   <Strikethrough size={15} />
                 </button>
 
                 {/* 9. Uppercase aA */}
-                <button 
-                  type="button" 
-                  className={`canva-pill-btn ${options.uppercase ? "active" : ""}`} 
+                <button
+                  type="button"
+                  className={`canva-pill-btn ${options.uppercase ? "active" : ""}`}
                   onClick={() => setOptions({ ...options, uppercase: !options.uppercase })}
-                  title="Đổi kiểu chữ"
+                  title="Đổi kiểu chữ hoa/thường"
                 >
                   aA
                 </button>
 
-                {/* 10. Align */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn" 
-                  title="Căn chỉnh"
+                {/* 10. Align Toggle */}
+                <button
+                  type="button"
+                  className="canva-pill-btn"
+                  title="Căn chỉnh dòng"
+                  onClick={() => {
+                    const nextAlign = options.alignment_type === "center" ? "left" : options.alignment_type === "left" ? "right" : "center";
+                    setOptions({ ...options, alignment_type: nextAlign });
+                  }}
                 >
-                  <AlignCenter size={15} />
+                  {options.alignment_type === "left" ? <AlignLeft size={15} /> : options.alignment_type === "right" ? <AlignRight size={15} /> : <AlignCenter size={15} />}
                 </button>
 
                 {/* 11. List */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn" 
+                <button
+                  type="button"
+                  className="canva-pill-btn"
                   title="Danh sách"
                 >
                   <List size={15} />
                 </button>
 
-                {/* 12. Spacing */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn" 
-                  title="Khoảng cách chữ"
+                {/* 12. Spacing Button with Popover */}
+                <button
+                  type="button"
+                  className={`canva-pill-btn ${showSpacingPopover ? "active" : ""}`}
+                  title="Khoảng cách chữ & dòng"
+                  onClick={() => setShowSpacingPopover(!showSpacingPopover)}
                 >
                   <ArrowUpDown size={15} />
                 </button>
 
-                {/* 13. Transparency / Grid */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn" 
-                  title="Độ trong suốt"
+                {/* Spacing Popover Floating Container */}
+                {showSpacingPopover && (
+                  <div className="canva-popover-menu">
+                    <div className="canva-popover-row">
+                      <label className="canva-label" style={{ fontSize: 12 }}>Khoảng cách chữ: {options.spacing}px</label>
+                      <input
+                        type="range"
+                        className="canva-slider"
+                        min={-5}
+                        max={15}
+                        value={options.spacing}
+                        onChange={(e) => setOptions({ ...options, spacing: Number(e.target.value) })}
+                      />
+                    </div>
+                    <div className="canva-popover-row">
+                      <label className="canva-label" style={{ fontSize: 12 }}>Khoảng cách dòng: {(options.line_spacing || 1.2).toFixed(1)}</label>
+                      <input
+                        type="range"
+                        className="canva-slider"
+                        min={0.8}
+                        max={2.5}
+                        step={0.1}
+                        value={options.line_spacing || 1.2}
+                        onChange={(e) => setOptions({ ...options, line_spacing: Number(e.target.value) })}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* 13. Format Painter */}
+                <button
+                  type="button"
+                  className={`canva-pill-btn ${copiedStyleBuffer ? "active" : ""}`}
+                  title="Sao chép định dạng"
+                  onClick={() => {
+                    if (!copiedStyleBuffer) {
+                      setCopiedStyleBuffer({ ...options });
+                    } else {
+                      setOptions({ ...options, ...copiedStyleBuffer });
+                    }
+                  }}
                 >
-                  <Grid size={15} />
+                  <Paintbrush size={15} />
                 </button>
 
                 {/* 14. Hiệu ứng */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn text-btn" 
+                <button
+                  type="button"
+                  className={`canva-pill-btn text-btn ${activeTab === "style" ? "active" : ""}`}
+                  style={activeTab === "style" ? { background: "#f0e7fe", color: "#7d2ae8", fontWeight: 700 } : undefined}
                   onClick={() => setActiveTab("style")}
                 >
                   Hiệu ứng
                 </button>
 
                 {/* 15. Chuyển động */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn text-btn"
+                <button
+                  type="button"
+                  className={`canva-pill-btn text-btn ${activeTab === "animate" ? "active" : ""}`}
+                  style={activeTab === "animate" ? { background: "#f0e7fe", color: "#7d2ae8", fontWeight: 700 } : undefined}
+                  onClick={() => setActiveTab("animate")}
                 >
                   Chuyển động
                 </button>
 
                 {/* 16. Vị trí */}
-                <button 
-                  type="button" 
-                  className="canva-pill-btn text-btn"
+                <button
+                  type="button"
+                  className={`canva-pill-btn text-btn ${activeTab === "position" ? "active" : ""}`}
+                  style={activeTab === "position" ? { background: "#f0e7fe", color: "#7d2ae8", fontWeight: 700 } : undefined}
+                  onClick={() => setActiveTab("position")}
                 >
                   Vị trí
                 </button>
@@ -1188,32 +1641,33 @@ export function SubtitleStudio() {
           </div>
 
           <div className="canva-canvas">
-            {originalVideoUrl ? (
-              <div 
-                className="player-wrapper" 
-                style={{ 
-                  display: "flex", 
-                  justifyContent: "center", 
-                  alignItems: "center",
-                  width: "100%",
-                  height: "100%",
-                  padding: "20px"
+            <div
+              className="player-wrapper"
+              style={{
+                display: "flex",
+                justifyContent: "center",
+                alignItems: "center",
+                width: "100%",
+                height: "100%",
+                padding: "20px"
+              }}
+            >
+              <div
+                className="video-aspect-container"
+                ref={playerWrapperRef}
+                style={{
+                  position: "relative",
+                  width: videoSize.width && videoSize.height ? `min(100%, calc(100vh * ${videoSize.width / videoSize.height}))` : "800px",
+                  height: videoSize.width && videoSize.height ? `min(100%, calc(100vw * ${videoSize.height / videoSize.width}))` : "450px",
+                  maxHeight: "100%",
+                  maxWidth: "100%",
+                  aspectRatio: videoSize.width && videoSize.height ? `${videoSize.width}/${videoSize.height}` : "16/9",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+                  background: originalVideoUrl ? "#000" : "#1e293b",
+                  overflow: "hidden"
                 }}
               >
-                <div 
-                  className="video-aspect-container"
-                  ref={playerWrapperRef}
-                  style={{
-                    position: "relative",
-                    width: videoSize.width && videoSize.height ? `min(100%, calc(100vh * ${videoSize.width / videoSize.height}))` : "100%",
-                    height: videoSize.width && videoSize.height ? `min(100%, calc(100vw * ${videoSize.height / videoSize.width}))` : "100%",
-                    maxHeight: "100%",
-                    maxWidth: "100%",
-                    aspectRatio: videoSize.width && videoSize.height ? `${videoSize.width}/${videoSize.height}` : undefined,
-                    boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
-                    background: "#000"
-                  }}
-                >
+                {originalVideoUrl ? (
                   <video
                     ref={videoRef}
                     src={previewMode === "rendered" && subtitledVideoUrl ? subtitledVideoUrl : originalVideoUrl}
@@ -1225,157 +1679,387 @@ export function SubtitleStudio() {
                     onEnded={() => setIsPlaying(false)}
                     onClick={togglePlay}
                     onLoadedMetadata={(e) => {
+                      const dur = e.currentTarget.duration || 40;
                       setVideoSize({
                         width: e.currentTarget.videoWidth,
                         height: e.currentTarget.videoHeight,
                       });
+                      if (originalVideoUrl) {
+                        extractVideoThumbnails(originalVideoUrl, dur);
+                      }
                     }}
                   />
+                ) : (
+                  <div
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      backgroundColor: "#ffffff",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      position: "relative"
+                    }}
+                  />
+                )}
 
-                  {/* Canva Drag-Drop Interactive Live CSS Subtitle Overlay */}
-                  {previewMode === "live" && activeSub && (
+                {/* Magenta Alignment Guidelines */}
+                {(isDragging || Math.abs(options.pos_x - 50) < 1.5) && (
+                  <div className="canva-snap-line-v" style={{ left: `${options.pos_x}%` }} />
+                )}
+                {(isDragging || Math.abs(options.pos_y - 50) < 1.5) && (
+                  <div className="canva-snap-line-h" style={{ top: `${options.pos_y}%` }} />
+                )}
+
+                {/* User-uploaded Logo Overlay Image */}
+                {overlayImage && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 16,
+                      left: 16,
+                      zIndex: 40,
+                      pointerEvents: "none",
+                    }}
+                  >
+                    <img src={overlayImage} alt="Logo overlay" style={{ maxHeight: 40, maxWidth: 160, objectFit: "contain" }} />
+                  </div>
+                )}
+
+                {/* Canva Drag-Drop Interactive Live Subtitle Overlay */}
+                {previewMode === "live" && activeSub && (
+                  <div
+                    className={`live-sub-overlay canva-box ${selectedSub && selectedSub === activeSub ? "selected" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Chọn lớp phụ đề đang hiển thị"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const idx = subtitles.indexOf(activeSub);
+                      setSelectedSubIndex(idx >= 0 ? idx : 0);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        const idx = subtitles.indexOf(activeSub);
+                        setSelectedSubIndex(idx >= 0 ? idx : 0);
+                      }
+                    }}
+                    style={{
+                      fontFamily: options.font_name,
+                      fontSize: `${Math.max(14, options.font_size)}px`,
+                      color: options.font_color,
+                      fontWeight: options.bold ? "bold" : "normal",
+                      fontStyle: options.italic ? "italic" : "normal",
+                      textDecoration: `${options.underline ? "underline" : ""} ${options.strikethrough ? "line-through" : ""}`.trim() || "none",
+                      textAlign: options.alignment_type || "center",
+                      lineHeight: options.line_spacing || 1.2,
+                      textTransform: options.uppercase ? "uppercase" : "none",
+                      letterSpacing: `${options.spacing}px`,
+                      left: `${options.pos_x}%`,
+                      top: `${options.pos_y}%`,
+                      transform: "translate(-50%, -50%)",
+                      WebkitPaintOrder: "stroke fill",
+                      paintOrder: "stroke fill",
+                      WebkitTextStroke: options.outline_width > 0 ? `${options.outline_width}px ${options.outline_color}` : "none",
+                      textShadow: options.shadow_width > 0
+                        ? `${options.shadow_width}px ${options.shadow_width}px 4px ${options.shadow_color}`
+                        : (options.outline_width > 0 ? "none" : "0 2px 4px rgba(0,0,0,0.9)"),
+                      backgroundColor: options.bg_enabled ? hexToRgba(options.bg_color, options.bg_opacity) : "transparent",
+                      padding: options.bg_enabled ? "8px 16px" : "4px 12px",
+                      borderRadius: "8px",
+                      maxWidth: "85%",
+                    } as CSSProperties}
+                  >
+                    {/* Bounding box drag border area */}
                     <div
-                      className={`live-sub-overlay canva-box ${isDragging ? "is-dragging" : ""} ${selectedSub && selectedSub === activeSub ? "selected" : ""}`}
+                      className="canva-border-drag-area"
+                      onMouseDown={handleStartDrag}
+                      title="Bấm và kéo đường viền để di chuyển vị trí phụ đề"
+                    />
+
+                    {/* Corner Handles */}
+                    <div className="canva-handle handle-tl" onMouseDown={handleStartResizeText} title="Kéo để thay đổi cỡ chữ" />
+                    <div className="canva-handle handle-tr" onMouseDown={handleStartResizeText} title="Kéo để thay đổi cỡ chữ" />
+                    <div className="canva-handle handle-bl" onMouseDown={handleStartResizeText} title="Kéo để thay đổi cỡ chữ" />
+                    <div className="canva-handle handle-br" onMouseDown={handleStartResizeText} title="Kéo để thay đổi cỡ chữ" />
+
+                    {/* Drag Move handle (+) */}
+                    <div
+                      className={`canva-move-handle ${isDragging ? "is-dragging" : ""}`}
+                      onMouseDown={handleStartDrag}
+                      title="Tóm vào đây để di chuyển phụ đề"
+                    >
+                      +
+                    </div>
+
+                    {/* Subtitle text area (Bấm và kéo để di chuyển, nhấp kép để sửa chữ) */}
+                    <div
+                      className="sub-text-content"
+                      contentEditable={isEditingInline}
+                      suppressContentEditableWarning
                       onMouseDown={(e) => {
-                        handleMouseDown(e);
-                        const idx = subtitles.indexOf(activeSub);
-                        setSelectedSubIndex(idx >= 0 ? idx : 0);
+                        if (!isEditingInline) {
+                          handleStartDrag(e);
+                        } else {
+                          e.stopPropagation();
+                        }
                       }}
-                      onClick={(e) => {
+                      onDoubleClick={(e) => {
                         e.stopPropagation();
-                        const idx = subtitles.indexOf(activeSub);
-                        setSelectedSubIndex(idx >= 0 ? idx : 0);
+                        setIsEditingInline(true);
+                      }}
+                      onBlur={(e) => {
+                        setIsEditingInline(false);
+                        const updatedText = e.currentTarget.innerText.trim();
+                        if (updatedText && activeSub && selectedSubIndex !== null) {
+                          handleUpdateSubText(selectedSubIndex, updatedText);
+                        }
                       }}
                       style={{
-                        fontFamily: options.font_name,
-                        fontSize: `${Math.max(14, options.font_size)}px`,
-                        color: options.font_color,
-                        fontWeight: options.bold ? "bold" : "normal",
-                        fontStyle: options.italic ? "italic" : "normal",
-                        textTransform: options.uppercase ? "uppercase" : "none",
-                        letterSpacing: `${options.spacing}px`,
-                        left: options.position === "custom" ? `${options.pos_x}%` : undefined,
-                        top: options.position === "custom" ? `${options.pos_y}%` : undefined,
-                        transform: options.position === "custom" ? "none" : undefined,
-                        WebkitPaintOrder: "stroke fill",
-                        paintOrder: "stroke fill",
-                        WebkitTextStroke: options.outline_width > 0 ? `${options.outline_width}px ${options.outline_color}` : "none",
-                        textShadow: options.shadow_width > 0 
-                          ? `${options.shadow_width}px ${options.shadow_width}px 4px ${options.shadow_color}` 
-                          : (options.outline_width > 0 ? "none" : "0 2px 4px rgba(0,0,0,0.9)"),
-                        backgroundColor: options.bg_enabled ? hexToRgba(options.bg_color, options.bg_opacity) : "transparent",
-                        padding: options.bg_enabled ? "8px 16px" : "0 8px",
-                        borderRadius: "8px",
-                      } as any}
-                      title="Kéo thả để di chuyển vị trí phụ đề"
+                        outline: isEditingInline ? "1px dashed #7d2ae8" : "none",
+                        backgroundColor: isEditingInline ? "rgba(255,255,255,0.2)" : undefined,
+                        cursor: isEditingInline ? "text" : "move",
+                      }}
                     >
-                      <div className="canva-handle handle-tl" />
-                      <div className="canva-handle handle-tr" />
-                      <div className="canva-handle handle-bl" />
-                      <div className="canva-handle handle-br" />
                       {options.uppercase ? activeSub.text.toUpperCase() : activeSub.text}
                     </div>
-                  )}
-                </div>
+
+                    {activeSub.secondary_text && (
+                      <span className="sub-secondary-line">
+                        {activeSub.secondary_text}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="canva-player-placeholder">
-                <Film size={64} style={{ opacity: 0.5 }} />
-                <p>Khu vực Canvas. Hãy tải video lên để bắt đầu.</p>
-              </div>
-            )}
+            </div>
           </div>
 
-          {/* TIMELINE */}
+          {/* TIMELINE CENTER PLAYBACK BAR */}
+          <div className="canva-timeline-center-controls">
+            <span className="time-display">{formatTime(currentTime)}</span>
+            <button className="btn-play-circle-lg" onClick={togglePlay} disabled={!originalVideoUrl} title={isPlaying ? "Tạm dừng" : "Phát"}>
+              {isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" style={{ marginLeft: 2 }} />}
+            </button>
+            <span className="time-display">{formatTime(duration || 40)}</span>
+          </div>
+
+          {/* TIMELINE MULTI-TRACK AREA */}
           <div className="canva-timeline">
-            <div className="timeline-controls">
-              <span className="time-display">{formatTime(currentTime)}</span>
-              <button className="btn-play-circle" onClick={togglePlay} disabled={!originalVideoUrl}>
-                {isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" style={{ marginLeft: 2 }} />}
-              </button>
-              <span className="time-display">{formatTime(duration)}</span>
-            </div>
-            
             <div className="timeline-tracks-area">
-              {/* Ruler */}
-              <div className="timeline-ruler">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="ruler-mark-group">
-                    <span className="ruler-label">| {i * 10} giây</span>
-                    <div className="ruler-ticks">
-                      <span />
-                      <span />
-                      <span />
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Playhead line */}
-              <div 
-                className="canva-playhead" 
-                style={{ left: duration > 0 ? `${(currentTime / duration) * 100}%` : "0%" }}
-              >
-                <div className="playhead-head">▼</div>
-                <div className="playhead-line" />
-              </div>
-              
-              <div className="timeline-tracks-container">
-                {/* Track 1: Elements / Subtitles */}
-                <div className="canva-track track-elements">
-                  {subtitles.length > 0 ? (
-                    <div className="subtitles-timeline-row">
-                      {subtitles.map((sub, i) => {
-                        const left = (sub.start_seconds / Math.max(duration, 1)) * 100;
-                        const width = ((sub.end_seconds - sub.start_seconds) / Math.max(duration, 1)) * 100;
-                        return (
-                          <div 
-                            key={i} 
-                            className={`sub-block ${activeSub === sub ? "active" : ""} ${selectedSubIndex === i ? "selected" : ""}`}
-                            style={{ left: `${left}%`, width: `${width}%` }}
-                            onClick={() => {
-                              handleSeek(sub.start_seconds);
-                              setSelectedSubIndex(i);
-                            }}
-                            title={sub.text}
-                          >
-                            {sub.text}
-                          </div>
-                        );
-                      })}
-                    </div>
+              <div className="timeline-body">
+                {/* Left Track Control Rail */}
+                <div className="timeline-track-controls">
+                  {!originalVideoUrl ? (
+                    <>
+                      <button className="btn-track-toggle" title="Thành phần">
+                        <Shapes size={16} />
+                      </button>
+                      <button className="btn-track-toggle" title="Phương tiện">
+                        <Film size={16} />
+                      </button>
+                      <button className="btn-track-toggle" title="Âm thanh">
+                        <Music size={16} />
+                      </button>
+                    </>
                   ) : (
-                    <div className="track-empty-bar">
-                      <Shapes size={14} />
-                      <span>Thêm thành phần</span>
-                    </div>
+                    <>
+                      <button className="btn-track-toggle active" title="Phụ đề">
+                        <Subtitles size={16} />
+                        <div className="btn-track-badge" />
+                      </button>
+                      {overlayImage && (
+                        <button className="btn-track-toggle active" title="Ảnh Logo đè">
+                          <Shapes size={16} />
+                          <div className="btn-track-badge" />
+                        </button>
+                      )}
+                      <button className="btn-track-toggle" title="Video Clip">
+                        <Film size={16} />
+                      </button>
+                    </>
                   )}
                 </div>
 
-                {/* Track 2: Video / Media */}
-                <div className="canva-track track-media">
-                  {originalVideoUrl ? (
-                    <div className="track-placeholder">
-                      <span>🎬 Video Track ({formatTime(duration)})</span>
-                    </div>
-                  ) : (
-                    <div className="track-empty-media">
-                      <div className="plus-box">
-                        <Plus size={16} />
+                <div className="timeline-scale" ref={timelineTracksAreaRef} onMouseDown={handleStartScrubbing}>
+                  {/* Time Ruler */}
+                  <div className="timeline-ruler">
+                    {Array.from({ length: 7 }).map((_, i) => (
+                      <div key={i} className="ruler-mark-group">
+                        <span className="ruler-label">{i === 6 ? "1:00" : `${i * 10} giây`}</span>
+                        <div className="ruler-ticks">
+                          <span />
+                          <span />
+                          <span />
+                        </div>
                       </div>
-                      <span>hoặc kéo và thả phương tiện</span>
-                    </div>
-                  )}
-                </div>
+                    ))}
+                  </div>
 
-                {/* Track 3: Audio */}
-                <div className="canva-track track-audio">
-                  <div className="track-empty-bar">
-                    <Music size={14} />
-                    <span>Thêm âm thanh</span>
+                  <div className="timeline-tracks-container">
+                    {/* Canva Playhead Line */}
+                    <div
+                      className="canva-playhead"
+                      style={{ left: (duration || 40) > 0 ? `${(currentTime / (duration || 40)) * 100}%` : "0%" }}
+                    >
+                      <div className="playhead-head">▼</div>
+                      <div className="playhead-line" />
+                    </div>
+
+                    <div className="timeline-track-lanes">
+                  {!originalVideoUrl ? (
+                    <>
+                      {/* Empty State Track 1: Thêm thành phần */}
+                      <div className="canva-track track-empty-placeholder" style={{ height: 32 }}>
+                        <Shapes size={14} />
+                        <span>Thêm thành phần</span>
+                      </div>
+                      {/* Empty State Track 2: Kéo và thả phương tiện */}
+                      <div className="canva-track track-empty-placeholder" style={{ height: 64, backgroundColor: "#f3f4f6" }}>
+                        <div className="empty-add-btn">
+                          <Plus size={16} />
+                        </div>
+                        <span>hoặc kéo và thả phương tiện</span>
+                      </div>
+                      {/* Empty State Track 3: Thêm âm thanh */}
+                      <div className="canva-track track-empty-placeholder" style={{ height: 32 }}>
+                        <Music size={14} />
+                        <span>Thêm âm thanh</span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      {/* Track 1: Subtitles (Canva Bright Green Capsules) */}
+                      <div className="canva-track track-elements">
+                        {subtitles.length > 0 ? (
+                          <div className="subtitles-timeline-row">
+                            {subtitles.map((sub, i) => {
+                              const totalSec = duration || 40;
+                              const left = (sub.start_seconds / Math.max(totalSec, 1)) * 100;
+                              const width = Math.max(1, ((sub.end_seconds - sub.start_seconds) / Math.max(totalSec, 1)) * 100);
+                              const isAct = activeSub === sub;
+                              const isSel = selectedSubIndex === i;
+                              return (
+                                <div
+                                  key={i}
+                                  className={`sub-block-pill ${isAct ? "active" : ""} ${isSel ? "selected" : ""}`}
+                                  style={{ left: `${left}%`, width: `${width}%` }}
+                                  onMouseDown={(e) => handleStartPillDrag(e, i, "move")}
+                                  onClick={() => {
+                                    handleSeek(sub.start_seconds);
+                                    setSelectedSubIndex(i);
+                                  }}
+                                  title={`${sub.text} (${sub.start_seconds.toFixed(1)}s - ${sub.end_seconds.toFixed(1)}s)`}
+                                >
+                                  <div
+                                    className="pill-handle-l"
+                                    onMouseDown={(e) => handleStartPillDrag(e, i, "trim_start")}
+                                    title="Kéo để chỉnh mốc thời gian bắt đầu"
+                                  />
+                                  <div className="sub-track-indicator-top" />
+                                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{sub.text}</span>
+                                  <div
+                                    className="pill-handle-r"
+                                    onMouseDown={(e) => handleStartPillDrag(e, i, "trim_end")}
+                                    title="Kéo để chỉnh mốc thời gian kết thúc"
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="track-empty-bar">
+                            <Shapes size={14} />
+                            <span>Thêm phụ đề</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Track 2: Overlay Logo Track (Only rendered if user uploaded a logo image!) */}
+                      {overlayImage && (
+                        <div className="canva-track track-elements">
+                          <div className="subtitles-timeline-row">
+                            <div
+                              className="watermark-block-pill"
+                              style={{ left: "0%", width: "100%" }}
+                              title={overlayName || "Logo Overlay"}
+                            >
+                              <img src={overlayImage} alt="Logo" style={{ width: 16, height: 16, objectFit: "contain", borderRadius: 2 }} />
+                              <span>{overlayName || "Logo Overlay"}</span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Track 3: Video Clips Filmstrip with Real Extracted Thumbnails */}
+                      <div className="canva-track track-media" style={{ height: 48 }}>
+                        <div className="video-thumbnails-strip">
+                          {videoThumbnails.length > 0 ? (
+                            videoThumbnails.map((thumb, idx) => (
+                              <div key={idx} className="video-thumb-clip">
+                                <img src={thumb} alt={`Clip frame ${idx}`} />
+                              </div>
+                            ))
+                          ) : (
+                            <div className="track-empty-bar">
+                              <Film size={14} />
+                              <span>Đang tải video...</span>
+                            </div>
+                          )}
+                          <div className="plus-box" style={{ borderRadius: 0, height: "100%", width: 36, cursor: "pointer" }}>
+                            <Plus size={16} />
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                    </div>
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* BOTTOM STATUS BAR (Matching Canva exactly) */}
+          <div className="canva-status-bar">
+            <div className="canva-status-left">
+              <span>Trang 1 / 1</span>
+            </div>
+
+            <div className="canva-status-right">
+              {/* Zoom Controls */}
+              <div className="canva-zoom-control">
+                <button className="canva-status-btn" onClick={() => setZoomLevel(Math.max(10, zoomLevel - 5))}>-</button>
+                <input
+                  type="range"
+                  className="canva-zoom-slider"
+                  min={10}
+                  max={200}
+                  value={zoomLevel}
+                  onChange={(e) => setZoomLevel(Number(e.target.value))}
+                />
+                <button className="canva-status-btn" onClick={() => setZoomLevel(Math.min(200, zoomLevel + 5))}>+</button>
+                <span style={{ minWidth: 32, textAlign: "right" }}>{zoomLevel}%</span>
+              </div>
+
+              {/* Trang grid button */}
+              <button className="canva-status-btn">
+                <Grid size={14} />
+                <span>Trang</span>
+                <span style={{ opacity: 0.7, marginLeft: 4 }}>{formatTime(currentTime)} / {formatTime(duration || 40)}</span>
+              </button>
+
+              {/* Fullscreen button */}
+              <button className="canva-status-btn" title="Toàn màn hình">
+                <Maximize2 size={14} />
+              </button>
+
+              {/* Help button */}
+              <button className="canva-status-btn" title="Trợ giúp">
+                <HelpCircle size={14} />
+              </button>
             </div>
           </div>
         </div>
