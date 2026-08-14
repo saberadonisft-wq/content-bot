@@ -618,6 +618,9 @@ def _ass_animation_tag(
     position: str,
     pos_x: float,
     pos_y: float,
+    *,
+    play_res_x: int = 1280,
+    play_res_y: int = SUBTITLE_DESIGN_HEIGHT,
 ) -> str:
     if animation == "fade":
         return r"{\fad(450,450)}"
@@ -626,28 +629,28 @@ def _ass_animation_tag(
         return r"{\fad(120,0)}"
 
     anchors = {
-        "left": 80,
-        "center": 640,
-        "right": 1200,
+        "left": round(play_res_x * 0.0625),
+        "center": round(play_res_x * 0.5),
+        "right": round(play_res_x * 0.9375),
     }
     x = (
-        int(pos_x / 100 * 1280)
+        int(pos_x / 100 * play_res_x)
         if position == "custom"
-        else anchors.get(alignment_type, 640)
+        else anchors.get(alignment_type, round(play_res_x * 0.5))
     )
     y = (
-        int(pos_y / 100 * 720)
+        int(pos_y / 100 * play_res_y)
         if position == "custom"
         else {
-            "top": 80,
-            "middle": 360,
-            "bottom": 640,
-        }.get(position, 640)
+            "top": round(play_res_y / 9),
+            "middle": round(play_res_y * 0.5),
+            "bottom": round(play_res_y * 8 / 9),
+        }.get(position, round(play_res_y * 8 / 9))
     )
     if animation == "rise":
-        return f"{{\\move({x},{y + 80},{x},{y},0,450)}}"
+        return f"{{\\move({x},{y + round(play_res_y / 9)},{x},{y},0,450)}}"
     if animation == "pan":
-        return f"{{\\move({x - 120},{y},{x},{y},0,450)}}"
+        return f"{{\\move({x - round(play_res_x * 0.09375)},{y},{x},{y},0,450)}}"
     return ""
 
 
@@ -670,13 +673,28 @@ def css_font_size_to_ass(font_size: float, play_res_y: int) -> float:
     )
 
 
-def subtitles_to_ass(subtitles: list[dict[str, Any]], options: dict[str, Any]) -> str:
+def subtitles_to_ass(
+    subtitles: list[dict[str, Any]],
+    options: dict[str, Any],
+    *,
+    play_res_x: int = 1280,
+    play_res_y: int = SUBTITLE_DESIGN_HEIGHT,
+) -> str:
+    """Build the canonical ASS track used by both browser preview and export.
+
+    All authoring sizes are 720p-relative design units. ASS PlayRes performs one
+    uniform scale at render time, so fonts, borders, shadows and positions keep
+    the same visual percentage at every preview and output resolution.
+    """
+    play_res_x = max(1, int(play_res_x))
+    play_res_y = max(1, int(play_res_y))
+    design_scale = play_res_y / SUBTITLE_DESIGN_HEIGHT
     font_name = (
         re.sub(r"[^A-Za-z0-9 ._-]", "", str(options.get("font_name", "Arial")))
         or "Arial"
     )
     design_font_size = int(options.get("font_size", 24))
-    ass_font_size = css_font_size_to_ass(design_font_size, SUBTITLE_DESIGN_HEIGHT)
+    ass_font_size = css_font_size_to_ass(design_font_size, play_res_y)
     font_color = hex_to_ass_color(str(options.get("font_color", "#FFFFFF")))
     outline_color = hex_to_ass_color(str(options.get("outline_color", "#000000")))
     shadow_color = hex_to_ass_color(str(options.get("shadow_color", "#000000")))
@@ -703,25 +721,38 @@ def subtitles_to_ass(subtitles: list[dict[str, Any]], options: dict[str, Any]) -
     line_spacing = max(0.8, min(3.0, float(options.get("line_spacing", 1.2))))
     # Event positions use browser/design pixels, not ASS's corrected nominal
     # font size, so multiline anchors stay identical to the live preview.
-    line_height = design_font_size * line_spacing
+    line_height = design_font_size * line_spacing * design_scale
     if position == "custom":
-        base_x = int(float(options.get("pos_x", 50.0)) / 100 * 1280)
-        base_y = int(float(options.get("pos_y", 50.0)) / 100 * 720)
+        base_x = int(float(options.get("pos_x", 50.0)) / 100 * play_res_x)
+        base_y = int(float(options.get("pos_y", 50.0)) / 100 * play_res_y)
     else:
-        base_x = {"left": 80, "center": 640, "right": 1200}.get(alignment_type, 640)
-        base_y = {"top": 80, "middle": 360, "bottom": 640}[position]
+        base_x = {
+            "left": round(play_res_x * 0.0625),
+            "center": round(play_res_x * 0.5),
+            "right": round(play_res_x * 0.9375),
+        }.get(alignment_type, round(play_res_x * 0.5))
+        base_y = {
+            "top": round(play_res_y / 9),
+            "middle": round(play_res_y * 0.5),
+            "bottom": round(play_res_y * 8 / 9),
+        }[position]
+
+    spacing = round(float(options.get("spacing", 0)) * design_scale, 2)
+    outline_width = round(float(options.get("outline_width", 2)) * design_scale, 2)
+    shadow_width = round(float(options.get("shadow_width", 0)) * design_scale, 2)
+    margin = max(1, round(20 * design_scale))
 
     header = "\n".join(
         [
             "[Script Info]",
             "ScriptType: v4.00+",
-            "PlayResX: 1280",
-            "PlayResY: 720",
+            f"PlayResX: {play_res_x}",
+            f"PlayResY: {play_res_y}",
             "ScaledBorderAndShadow: yes",
             "",
             "[V4+ Styles]",
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-            f"Style: Default,{font_name},{ass_font_size},{font_color},{font_color},{outline_color},{back_color},{bold},{italic},{underline},{strikethrough},100,100,{int(options.get('spacing', 0))},0,{border_style},{int(options.get('outline_width', 2))},{int(options.get('shadow_width', 0))},{alignment},20,20,20,1",
+            f"Style: Default,{font_name},{ass_font_size},{font_color},{font_color},{outline_color},{back_color},{bold},{italic},{underline},{strikethrough},100,100,{spacing},0,{border_style},{outline_width},{shadow_width},{alignment},{margin},{margin},{margin},1",
             "",
             "[Events]",
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -730,24 +761,22 @@ def subtitles_to_ass(subtitles: list[dict[str, Any]], options: dict[str, Any]) -
     events: list[str] = []
     animation = str(options.get("animation", "none"))
     for subtitle in subtitles:
-        start_value = subtitle.get("start_seconds")
-        end_value = subtitle.get("end_seconds")
-        start = (
-            float(start_value)
-            if start_value is not None
-            else parse_timestamp_to_seconds(str(subtitle["start_time"]))
-        )
-        end = (
-            float(end_value)
-            if end_value is not None
-            else parse_timestamp_to_seconds(str(subtitle["end_time"]))
-        )
-        text_lines = str(subtitle.get("text", "")).replace("\r\n", "\n").splitlines()
-        if subtitle.get("secondary_text"):
-            text_lines.extend(
-                str(subtitle["secondary_text"]).replace("\r\n", "\n").splitlines()
-            )
-        text_lines = [line.strip() for line in text_lines if line.strip()]
+        start_ms, end_ms = cue_times_ms(subtitle)
+        start = start_ms / 1000
+        end = end_ms / 1000
+        primary_lines = [
+            (line.strip(), False)
+            for line in str(subtitle.get("text", "")).replace("\r\n", "\n").splitlines()
+            if line.strip()
+        ]
+        secondary_lines = [
+            (line.strip(), True)
+            for line in str(subtitle.get("secondary_text") or "")
+            .replace("\r\n", "\n")
+            .splitlines()
+            if line.strip()
+        ]
+        text_lines = primary_lines + secondary_lines
         if not text_lines:
             continue
         for index, line in enumerate(text_lines):
@@ -761,8 +790,10 @@ def subtitles_to_ass(subtitles: list[dict[str, Any]], options: dict[str, Any]) -
                 animation,
                 alignment_type,
                 position,
-                base_x / 1280 * 100,
-                y / 720 * 100,
+                base_x / play_res_x * 100,
+                y / play_res_y * 100,
+                play_res_x=play_res_x,
+                play_res_y=play_res_y,
             )
             animation_inner = animation_tag[1:-1] if animation_tag else ""
             override = (
@@ -770,9 +801,18 @@ def subtitles_to_ass(subtitles: list[dict[str, Any]], options: dict[str, Any]) -
                 if animation in {"rise", "pan"} and animation_inner
                 else f"{{\\pos({base_x},{round(y)}){animation_inner}}}"
             )
-            safe_line = line.replace("{", "\\{").replace("}", "\\}")
+            line, is_secondary = line
+            secondary_size = round(ass_font_size * 0.82, 2)
+            secondary_tag = f"\\fs{secondary_size}\\b0" if is_secondary else ""
+            formatting_override = f"{{{secondary_tag}}}" if secondary_tag else ""
+            safe_line = (
+                line.replace("\\", r"\\")
+                .replace("{", "\\{")
+                .replace("}", "\\}")
+            )
             events.append(
-                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{override}{safe_line}"
+                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,"
+                f"{override}{formatting_override}{safe_line}"
             )
     return header + ("\n" + "\n".join(events) if events else "") + "\n"
 

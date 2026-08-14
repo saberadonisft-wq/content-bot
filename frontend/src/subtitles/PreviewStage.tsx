@@ -10,6 +10,8 @@ import {
 } from "react";
 import type { SubtitleBurnOptions } from "../api";
 import { fitOverlayLayout } from "./overlay";
+import { SubtitleMaskLayer } from "./SubtitleMaskLayer";
+import { previewSubtitleMetrics } from "./preview-scale";
 import { hexToRgba } from "./style";
 import { SubtitleIntervalIndex, sortCues } from "./time";
 import type { PlaybackClockStore } from "./playback-store";
@@ -17,19 +19,25 @@ import type {
   OverlayLayout,
   PreviewMode,
   SubtitleCueV2,
+  SubtitleMaskRegion,
   VideoDimensions,
 } from "./types";
 import { useActiveCueId } from "./useActiveCue";
 
 type PreviewStageProps = {
+  videoElement: HTMLVideoElement | null;
   videoUrl: string | null;
   previewMode: PreviewMode;
+  libassActive: boolean;
+  onLibassHostElementChange: (host: HTMLDivElement | null) => void;
   cues: readonly SubtitleCueV2[];
   selectedCueId: string | null;
   options: SubtitleBurnOptions;
   overlayImage: string | null;
   overlayName: string;
   overlayLayout: OverlayLayout;
+  subtitleMasks: readonly SubtitleMaskRegion[];
+  selectedMaskId: string | null;
   clock: PlaybackClockStore;
   onVideoElementChange: (video: HTMLVideoElement | null) => void;
   onTogglePlay: () => void;
@@ -37,6 +45,9 @@ type PreviewStageProps = {
   onUpdateCueText: (cueId: string, text: string) => void;
   onOptionsCommit: (options: SubtitleBurnOptions) => void;
   onOverlayLayoutCommit: (layout: OverlayLayout) => void;
+  onSelectMask: (maskId: string | null) => void;
+  onMaskChange: (maskId: string, patch: Partial<SubtitleMaskRegion>) => void;
+  onMaskDelete: (maskId: string) => void;
 };
 
 type PositionDrag = {
@@ -84,14 +95,19 @@ type PreviewFrameBox = {
 };
 
 export function PreviewStage({
+  videoElement,
   videoUrl,
   previewMode,
+  libassActive,
+  onLibassHostElementChange,
   cues,
   selectedCueId,
   options,
   overlayImage,
   overlayName,
   overlayLayout,
+  subtitleMasks,
+  selectedMaskId,
   clock,
   onVideoElementChange,
   onTogglePlay,
@@ -99,6 +115,9 @@ export function PreviewStage({
   onUpdateCueText,
   onOptionsCommit,
   onOverlayLayoutCommit,
+  onSelectMask,
+  onMaskChange,
+  onMaskDelete,
 }: PreviewStageProps) {
   const [dimensions, setDimensions] = useState<VideoDimensions>({ width: 16, height: 9 });
   const [frameBox, setFrameBox] = useState<PreviewFrameBox>({ width: 16, height: 9 });
@@ -129,7 +148,13 @@ export function PreviewStage({
     () => sortedCues.find((cue) => cue.id === activeCueId) ?? null,
     [activeCueId, sortedCues],
   );
-  const previewScale = Math.max(0.2, frameBox.height / 720);
+  const previewMetrics = previewSubtitleMetrics(
+    frameBox.height,
+    options.font_size,
+    options.outline_width,
+    options.shadow_width,
+  );
+  const previewScale = previewMetrics.scale;
 
   const fitImageLayout = useCallback((layout: OverlayLayout) => {
     const frame = mediaFrameRef.current;
@@ -415,6 +440,7 @@ export function PreviewStage({
   const selectImageOverlay = () => {
     setIsOverlaySelected(true);
     onSelectCue(null);
+    onSelectMask(null);
   };
 
   const startImagePositionDrag = (event: PointerEvent<HTMLElement>) => {
@@ -483,7 +509,7 @@ export function PreviewStage({
 
   const overlayStyle: CSSProperties = {
     fontFamily: options.font_name,
-    fontSize: `${Math.max(10, options.font_size * previewScale)}px`,
+    fontSize: `${previewMetrics.fontSize}px`,
     color: options.font_color,
     fontWeight: options.bold ? 700 : 400,
     fontStyle: options.italic ? "italic" : "normal",
@@ -498,17 +524,27 @@ export function PreviewStage({
     paintOrder: "stroke fill",
     WebkitTextStroke:
       options.outline_width > 0
-        ? `${Math.max(0.5, options.outline_width * previewScale)}px ${options.outline_color}`
+        ? `${previewMetrics.outlineWidth}px ${options.outline_color}`
         : "none",
     textShadow:
       options.shadow_width > 0
-        ? `${options.shadow_width * previewScale}px ${options.shadow_width * previewScale}px ${Math.max(1, 4 * previewScale)}px ${options.shadow_color}`
+        ? `${previewMetrics.shadowWidth}px ${previewMetrics.shadowWidth}px ${previewMetrics.shadowBlur}px ${options.shadow_color}`
         : "none",
     backgroundColor: options.bg_enabled
       ? hexToRgba(options.bg_color, options.bg_opacity)
       : "transparent",
-    padding: `${Math.max(2, 4 * previewScale)}px ${Math.max(6, 12 * previewScale)}px`,
+    padding: `${previewMetrics.paddingY}px ${previewMetrics.paddingX}px`,
   };
+  const interactiveOverlayStyle: CSSProperties =
+    libassActive && !isEditing
+      ? {
+          ...overlayStyle,
+          color: "transparent",
+          backgroundColor: "transparent",
+          WebkitTextStroke: "0 transparent",
+          textShadow: "none",
+        }
+      : overlayStyle;
 
   return (
     <section className="preview-stage" aria-label="Khung xem trước video">
@@ -525,6 +561,7 @@ export function PreviewStage({
           {videoUrl ? (
             <video
               ref={onVideoElementChange}
+              crossOrigin="anonymous"
               src={videoUrl}
               preload="metadata"
               playsInline
@@ -542,6 +579,26 @@ export function PreviewStage({
               <p>Tải video lên để kiểm tra timing và bố cục phụ đề.</p>
             </div>
           )}
+
+          <SubtitleMaskLayer
+            video={videoElement}
+            masks={subtitleMasks}
+            selectedMaskId={selectedMaskId}
+            enabled={previewMode === "live"}
+            onSelectMask={(maskId) => {
+              setIsOverlaySelected(false);
+              onSelectCue(null);
+              onSelectMask(maskId);
+            }}
+            onChangeMask={onMaskChange}
+            onDeleteMask={onMaskDelete}
+          />
+
+          <div
+            ref={onLibassHostElementChange}
+            className="preview-libass-host"
+            aria-hidden="true"
+          />
 
           {previewMode === "live" && overlayImage && (
             <div
@@ -616,13 +673,14 @@ export function PreviewStage({
             <div
               ref={overlayRef}
               className={`preview-subtitle-overlay ${selectedCueId === activeCue.id ? "is-selected" : ""} ${isDragging ? "is-dragging" : ""}`}
-              style={overlayStyle}
+              style={interactiveOverlayStyle}
               role="button"
               tabIndex={0}
               aria-label="Chọn phụ đề đang hiển thị; nhấp đúp để sửa"
               onClick={(event) => {
                 event.stopPropagation();
                 setIsOverlaySelected(false);
+                onSelectMask(null);
                 onSelectCue(activeCue.id);
               }}
               onDoubleClick={(event) => {

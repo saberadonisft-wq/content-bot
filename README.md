@@ -11,27 +11,42 @@ Local-first game social-listening workbench. It discovers public game content by
 
 ## Run locally
 
-On Windows with Python 3.11+ and Node.js 20+, open PowerShell in this repository and run:
+On Windows with Python 3.11+ and Node.js 20+, open the repository in VS Code, run **Tasks: Run Task**, then choose **Content Bot: Start**. VS Code starts both services at the same time in separate foreground terminals:
 
-```powershell
-.\scripts\launcher.ps1
-```
+- **Content Bot: Backend** — FastAPI/Uvicorn at `http://127.0.0.1:8000`.
+- **Content Bot: Frontend** — Vite at `http://127.0.0.1:5173`.
 
-Running `./scripts/launcher.ps1` directly installs missing local dependencies, starts the API in the background, and starts the dashboard at `http://127.0.0.1:5173` without showing a menu. Game news and Steam reviews work without a key. Copy `backend/.env.example` to `backend/.env` only when you want to add options such as `YOUTUBE_API_KEY`.
+Both processes remain attached to their VS Code terminals, so logs and startup failures are visible immediately. Terminate the compound task, or press `Ctrl+C` in each terminal, to stop them. No API process is launched in the background. To run only one service outside VS Code, use `./scripts/launcher.ps1 -Action backend` or `./scripts/launcher.ps1 -Action frontend`; missing local dependencies are installed on first use. Game news and Steam reviews work without a key. Copy `backend/.env.example` to `backend/.env` only when you want to add options such as `YOUTUBE_API_KEY`.
 
 ## V1 test configuration
 
-Your local configuration file is [`backend/.env`](backend/.env). It is ignored by Git and is read explicitly by the API, so it works whether you start from the repository root or from `backend/`. Do not paste its values into chat. Game News, Steam reviews and Bluesky need no key. Reddit uses `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`; X uses `X_BEARER_TOKEN` with Recent Search access. `WEB_FEED_URLS` is an optional public RSS override. MediaCrawler sources use a visible QR/phone login and a local browser profile—do not add social passwords or cookies to `.env`.
+Your local configuration file is [`backend/.env`](backend/.env). It is ignored by Git and is read explicitly by the API, so it works whether you start from the repository root or from `backend/`. Do not paste its values into chat. Game News, Steam reviews and Bluesky need no key. Reddit uses `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`; X channel pages always retain the public view-only embed, while `X_BEARER_TOKEN` additionally enables manual official-API ingestion for saved creator timelines and recent search. `WEB_FEED_URLS` is an optional public RSS override. MediaCrawler sources use a visible QR/phone login and a local browser profile—do not add social passwords or cookies to `.env`.
 
-If a scan or setup step is unclear, inspect `data/logs/api-stdout.log` and `data/logs/api-stderr.log`. The API also exposes `/api/v1/health` and `/api/v1/ready`; credential values are never written to those logs.
+## Gemini subtitle generation
 
-When the dashboard is no longer needed, close the frontend terminal. The API PID is recorded in `data/content-bot-api.json`; stopping it does not modify MongoDB data.
+Subtitle Studio can send a video through the official Gemini CLI, ask Gemini to use audio, visible captions and scene context, then import the returned Vietnamese cues directly into the timeline. The automated worker uses a Gemini API key or Vertex AI credentials; consumer Google-account OAuth for Gemini CLI is no longer supported.
+
+Install the CLI and configure a key from Google AI Studio in `backend/.env`:
+
+```powershell
+npm install -g @google/gemini-cli@latest
+# backend/.env
+GEMINI_API_KEY=your-google-ai-studio-key
+```
+
+Restart Content Bot after editing `.env`. The app creates a temporary workspace auth setting for the child process, so it does not change your global Gemini CLI profile. Vertex AI can be used instead by configuring the CLI's Vertex AI auth and project. Because Gemini CLI accepts at most 20 MB per attached local file, Content Bot automatically creates a temporary MP4 proxy below 19 MB. Videos longer than three minutes are processed in sequential chunks and their timestamps are joined automatically. Temporary proxy files are removed after success, failure or cancellation.
+
+Set `CONTENT_BOT_GEMINI_CLI_MODEL` in `backend/.env` only when a specific CLI model is required; `auto` lets Gemini CLI choose its current route. Quota, service availability and data handling follow the configured Google project/key.
+
+If a scan or setup step is unclear, inspect the **Content Bot: Backend** terminal. The API also exposes `/api/v1/health` and `/api/v1/ready`; credential values are never written to terminal output.
+
+When the dashboard is no longer needed, terminate both VS Code tasks. Stopping either process does not modify MongoDB data.
 
 MongoDB Atlas is the active application database. Set `MONGODB_URI` and optionally `MONGODB_DATABASE` (default `content_bot`) in `backend/.env`. The API verifies the connection and creates its required indexes during startup.
 
-To import a legacy SQLite database into MongoDB, stop the API and run `backend/.venv/Scripts/python.exe backend/scripts/migrate_sqlite_to_mongodb.py`. The migration preserves existing IDs, creates indexes, and is idempotent; add `--replace` only when MongoDB documents with matching IDs should be overwritten from SQLite.
+To import a legacy SQLite database into MongoDB during the migration support window, stop the API and run `backend/.venv/Scripts/python.exe backend/scripts/migrate_sqlite_to_mongodb.py --source data/content-bot.db`. The migration preserves existing IDs, creates indexes, and is idempotent; add `--replace` only when MongoDB documents with matching IDs should be overwritten from SQLite.
 
-The launcher starts the dashboard only. To scan one connector, select a tracked game in the dashboard, open **Sources**, and use **Scan source** or **Login & scan**. Login-gated sources open a visible Cốc Cốc window; the dashboard reports phase, progress, fetched/stored counts and cancellation state.
+To scan one connector, select a tracked game in the dashboard, open **Sources**, and use **Scan source** or **Login & scan**. Login-gated sources open a visible Cốc Cốc window; the dashboard reports phase, progress, fetched/stored counts and cancellation state.
 
 For maintenance, stop the API before restore or apply-prune operations:
 
@@ -55,14 +70,40 @@ The API binds to `127.0.0.1` by default. Browser profiles and raw crawl data rem
 
 | Source | Activation | Scope |
 | --- | --- | --- |
-| YouTube | Set `YOUTUBE_API_KEY` | Official video search and public engagement counts. |
+| YouTube | Set `YOUTUBE_API_KEY` | Official newest-first search and saved-channel uploads with frontier-safe checkpoints, explicit per-run quota budgets, and optional deep health via `/api/v1/sources?deep=true`. |
 | Xiaohongshu, Douyin, Kuaishou, Bilibili, Weibo, Tieba, Zhihu | MediaCrawler runtime and Cốc Cốc must be installed | Direct submodule integration; a visible browser opens for QR login when required. |
-| Game news | Ready by default | Public keyword RSS feed; override with `WEB_FEED_URLS` when desired. |
-| Steam reviews | Ready by default | Searches matching games and ingests recent public reviews without retaining Steam account IDs. |
-| Bluesky | Ready by default | Official public keyword search with engagement counts; no account or key required. |
-| Reddit | Set `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` | Official OAuth submission search with score and comment counts. |
-| X | Set `X_BEARER_TOKEN` | Official Recent Search with public interaction metrics. |
-| TikTok / Facebook / Instagram | Approved API or a future user-visible browser flow | API access is preferred; no credential scraping. |
+| Game news | Ready by default | Validated HTTPS RSS/Atom discovery with conditional requests and feed-level warnings; override with a JSON-array `WEB_FEED_URLS` allowlist when desired. |
+| Steam reviews | Ready by default | Exact-title public discovery with ambiguity warnings, or pin a game by saving its `/app/<id>` URL; newest-first pagination never retains Steam account IDs. |
+| Bluesky | Ready by default | Public AppView keyword/author discovery plus manual bounded public reply-tree scans for stored posts; stable AT-URI-derived identities, HMAC authors, best effort, no account or key required. |
+| Mastodon | Ready by default | Hashtag/saved-account discovery plus manual bounded status-context reply scans across the exact `MASTODON_INSTANCES` allowlist. Not Fediverse-wide full-text search. |
+| Reddit | Set `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` | Official OAuth keyword and saved subreddit/user scans plus manual bounded comment-tree scans for stored posts; application token is cached in memory and authors are pseudonymized. |
+| X | Public view-only embed; optional `X_BEARER_TOKEN` for official recent search and saved creator timelines | Embed remains independent. API ingestion is read-only, pay/access-gated, checkpointed per query/account, and manual by default. |
+| TikTok | Approved Login Kit + Display API app; set client key/secret and the exact static HTTPS callback | Dashboard OAuth requests `user.info.basic`, `user.info.profile`, and `video.list`, verifies the consenting creator handle, stores tokens in the encrypted local vault, and reads only that account's public videos. No global search or browser scraping. |
+| Instagram | Set pinned `META_GRAPH_API_VERSION`, approved `META_ACCESS_TOKEN`, and `INSTAGRAM_PROFESSIONAL_USER_ID` | Official best-effort hashtag discovery with a persistent rolling unique-hashtag budget; no browser fallback. |
+| Facebook | Set pinned `META_GRAPH_API_VERSION`, approved `FACEBOOK_PAGE_ACCESS_TOKEN`, `FACEBOOK_PAGE_ID`, and `FACEBOOK_PAGE_USERNAME` | Official bounded feed scan for that one explicitly authorized Page through a saved channel. No global search, profiles, Groups, arbitrary public Pages, or browser/cookie fallback. |
+
+For TikTok Web Login Kit, register `https://<public-api-origin>/api/v1/auth/tiktok/callback` in the TikTok developer portal, set the same URL as `TIKTOK_REDIRECT_URI`, and access Content Bot's OAuth start route through that same HTTPS origin. The dashboard returns only a connection outcome; authorization codes and tokens remain server-side. `CONTENT_BOT_FRONTEND_URL` selects the dashboard destination after callback.
+
+Crawler observations expire after `CONTENT_BOT_CRAWLER_RETENTION_DAYS` (default 90) and are cleaned on the configured interval. Deleting one source's crawler data requires an exact confirmation through `POST /api/v1/crawler-data/{source_id}/delete`; application-owned browser profiles are excluded from automatic retention and require the stronger `DELETE <source_id> DATA AND PROFILES` confirmation while no crawler holds the profile lock.
+
+Before cutting an individual provider operation over, operators can run the
+manual aggregate-only canary documented in
+[`docs/crawler-provenance/LIVE_CANARY.md`](docs/crawler-provenance/LIVE_CANARY.md).
+It requires `--live`, accepts the query/target only on stdin, enforces tiny
+budgets, never writes production crawler data and never includes raw content or
+credentials in its report.
+
+The read-only Phase 11 gate is documented in
+[`docs/crawler-provenance/CUTOVER_AUDIT.md`](docs/crawler-provenance/CUTOVER_AUDIT.md).
+It reports per-source provider/canary/provenance blockers and legacy runtime
+artifacts; it never removes them automatically.
+
+Clean-room browser search for XHS, Douyin, Kuaishou, Weibo and Zhihu requires a
+separately observed and reviewed DOM artifact; no selectors are bundled or
+copied from MediaCrawler. See
+[`docs/crawler-provenance/OBSERVED_DOM_CONTRACTS.md`](docs/crawler-provenance/OBSERVED_DOM_CONTRACTS.md).
+Missing/invalid contracts remain `setup_required`, and switching providers
+requires an explicit per-source operation override.
 
 The MediaCrawler repository is included as a Git submodule at `vendor/mediacrawler`. Its isolated runtime must be installed before using login-gated sources.
 

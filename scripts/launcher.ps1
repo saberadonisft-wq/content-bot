@@ -1,16 +1,20 @@
 #requires -Version 5.1
 
 <##
-    Standalone Content Bot launcher.
-    Run with: .\scripts\launcher.ps1
+    Foreground Content Bot process launcher.
+    Use the "Content Bot: Start" VS Code task to run backend and frontend together.
 ##>
 
 param(
-    [ValidateSet("start", "setup-mediacrawler", "setup-subtitles")]
-    [string]$Action = "start",
+    [ValidateSet("backend", "frontend", "doctor", "setup-mediacrawler", "setup-subtitles")]
+    [string]$Action = "backend",
     [ValidateSet("tiny", "base", "small", "medium", "large-v3")]
     [string]$SubtitleModel = "small",
-    [switch]$DownloadSubtitleModel
+    [switch]$DownloadSubtitleModel,
+    [ValidateRange(1024, 65535)]
+    [int]$BackendPort = 8000,
+    [ValidateRange(1024, 65535)]
+    [int]$FrontendPort = 5173
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,183 +25,75 @@ function Test-LocalListener([int]$Port) {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
-function Test-ApiReady {
-    try {
-        $ready = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/ready" -TimeoutSec 3
-        return $ready.status -eq "ready"
-    } catch {
-        return $false
+function Initialize-BackendEnvironment {
+    $python = "backend\.venv\Scripts\python.exe"
+    $dependencyFile = "backend\pyproject.toml"
+    $stampFile = "backend\.venv\.content-bot-dependencies"
+    $dependencyHash = (Get-FileHash -LiteralPath $dependencyFile -Algorithm SHA256).Hash
+    $installedHash = if (Test-Path -LiteralPath $stampFile) {
+        (Get-Content -LiteralPath $stampFile -Raw).Trim()
+    } else {
+        ""
     }
-}
-
-function Get-ManagedApiProcesses([int[]]$RootPids) {
-    $processTable = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $knownPids = [System.Collections.Generic.HashSet[int]]::new()
-    $pendingPids = [System.Collections.Generic.Queue[int]]::new()
-
-    foreach ($rootPid in $RootPids | Where-Object { $_ -gt 0 } | Select-Object -Unique) {
-        $pendingPids.Enqueue($rootPid)
-    }
-
-    while ($pendingPids.Count -gt 0) {
-        $parentPid = $pendingPids.Dequeue()
-        foreach ($process in $processTable | Where-Object { $_.ParentProcessId -eq $parentPid }) {
-            if ($knownPids.Add([int]$process.ProcessId)) {
-                $pendingPids.Enqueue([int]$process.ProcessId)
-            }
-        }
-    }
-
-    $allPids = @($RootPids + @($knownPids)) | Where-Object { $_ -gt 0 } | Select-Object -Unique
-    @($processTable | Where-Object { $_.ProcessId -in $allPids })
-}
-
-function Stop-ManagedApi([int[]]$RootPids) {
-    $processes = @(Get-ManagedApiProcesses $RootPids)
-    foreach ($process in $processes | Sort-Object ProcessId -Descending) {
-        $commandLine = [string]$process.CommandLine
-        if ($commandLine.Contains("uvicorn app.main:app", [StringComparison]::OrdinalIgnoreCase)) {
-            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function Get-BackendPython {
-    $python = Join-Path $taskRoot "backend\.venv\Scripts\python.exe"
-    if (-not (Test-Path -LiteralPath $python)) {
-        throw "Backend environment is missing. Start Content Bot first."
-    }
-    return $python
-}
-
-function Invoke-Start([switch]$ApiOnly) {
-    $apiStateFile = Join-Path $taskRoot "data\content-bot-api.json"
-
-    if (-not (Test-Path "backend\.venv\Scripts\python.exe")) {
+    if (-not (Test-Path $python)) {
+        Write-Host "Creating the backend virtual environment..."
         python -m venv backend\.venv
-        & backend\.venv\Scripts\python.exe -m pip install -e backend
-        if ($LASTEXITCODE -ne 0) { throw "Unable to install backend dependencies." }
+        if ($LASTEXITCODE -ne 0) { throw "Unable to create the backend environment." }
     }
+    if ($installedHash -ne $dependencyHash) {
+        Write-Host "Installing changed backend dependencies..."
+        & $python -m pip install -e backend
+        if ($LASTEXITCODE -ne 0) { throw "Unable to install backend dependencies." }
+        Set-Content -LiteralPath $stampFile -Value $dependencyHash -Encoding ascii
+    }
+}
 
-    if (-not $ApiOnly -and -not (Test-Path "frontend\node_modules")) {
+function Initialize-FrontendEnvironment {
+    $dependencyFile = "frontend\package-lock.json"
+    $stampFile = "frontend\node_modules\.content-bot-dependencies"
+    $dependencyHash = (Get-FileHash -LiteralPath $dependencyFile -Algorithm SHA256).Hash
+    $installedHash = if (Test-Path -LiteralPath $stampFile) {
+        (Get-Content -LiteralPath $stampFile -Raw).Trim()
+    } else {
+        ""
+    }
+    if (-not (Test-Path "frontend\node_modules") -or $installedHash -ne $dependencyHash) {
+        Write-Host "Installing changed frontend dependencies..."
         Push-Location frontend
-        npm install
+        npm ci
         $installExitCode = $LASTEXITCODE
         Pop-Location
         if ($installExitCode -ne 0) { throw "Unable to install frontend dependencies." }
+        Set-Content -LiteralPath $stampFile -Value $dependencyHash -Encoding ascii
     }
+}
 
-    if ($ApiOnly) {
-        if (Test-ApiReady) {
-            Write-Host "Content Bot API is already listening at http://127.0.0.1:8000"
-            return
-        }
-        if (Test-LocalListener 8000) {
-            throw "Port 8000 is occupied but the Content Bot API is not healthy. Check data\logs\api-stderr.log."
-        }
-        & backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend
-        return
+function Invoke-Backend {
+    if (Test-LocalListener $BackendPort) {
+        throw "Port $BackendPort is already in use. Stop the existing backend before starting this VS Code task."
     }
+    Initialize-BackendEnvironment
+    Write-Host "Starting Content Bot backend in the foreground at http://127.0.0.1:$BackendPort"
+    & backend\.venv\Scripts\python.exe -u -m uvicorn app.main:app `
+        --app-dir backend `
+        --host 127.0.0.1 `
+        --port $BackendPort `
+        --reload `
+        --reload-dir backend\app
+    if ($LASTEXITCODE -ne 0) { throw "Backend stopped with code $LASTEXITCODE." }
+}
 
-    if (-not (Test-ApiReady)) {
-        if (Test-LocalListener 8000) {
-            throw "Port 8000 is occupied but the Content Bot API is not healthy. Check data\logs\api-stderr.log."
-        }
-        New-Item -ItemType Directory -Path (Split-Path -Parent $apiStateFile) -Force | Out-Null
-        $logRoot = Join-Path $taskRoot "data\logs"
-        New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-        $apiProcess = Start-Process -FilePath "$taskRoot\backend\.venv\Scripts\python.exe" -ArgumentList "-u", "-m", "uvicorn", "app.main:app", "--app-dir", "backend" -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logRoot "api-stdout.log") -RedirectStandardError (Join-Path $logRoot "api-stderr.log") -PassThru
-        [pscustomobject]@{
-            launcher_pid = $apiProcess.Id
-            listener_pid = $null
-            started_at = [DateTimeOffset]::Now.ToString("o")
-        } | ConvertTo-Json | Set-Content -LiteralPath $apiStateFile
-
-        $deadline = (Get-Date).AddSeconds(30)
-        do {
-            Start-Sleep -Milliseconds 250
-            $apiReady = Test-ApiReady
-            $apiProcess.Refresh()
-        } while (-not $apiReady -and -not $apiProcess.HasExited -and (Get-Date) -lt $deadline)
-
-        if (-not $apiReady) {
-            if (-not $apiProcess.HasExited) {
-                Stop-ManagedApi @($apiProcess.Id)
-            }
-            Remove-Item -LiteralPath $apiStateFile -Force -ErrorAction SilentlyContinue
-            throw "Content Bot API did not become healthy. Read data\logs\api-stderr.log and api-stdout.log."
-        }
-
-        $listenerPid = (Get-NetTCPConnection -LocalPort 8000 -State Listen | Select-Object -First 1).OwningProcess
-        [pscustomobject]@{
-            launcher_pid = $apiProcess.Id
-            listener_pid = $listenerPid
-            started_at = [DateTimeOffset]::Now.ToString("o")
-        } | ConvertTo-Json | Set-Content -LiteralPath $apiStateFile
-        Remove-Item -LiteralPath (Join-Path $taskRoot "data\content-bot-api.pid") -Force -ErrorAction SilentlyContinue
-        Write-Host "Content Bot API started at http://127.0.0.1:8000 (listener PID $listenerPid)"
-    } else {
-        Write-Host "Content Bot API is already listening at http://127.0.0.1:8000"
+function Invoke-Frontend {
+    if (Test-LocalListener $FrontendPort) {
+        throw "Port $FrontendPort is already in use. Stop the existing frontend before starting this VS Code task."
     }
-
-    if (Test-LocalListener 5173) {
-        Write-Host "Content Bot dashboard is already running at http://127.0.0.1:5173"
-        return
-    }
-
+    Initialize-FrontendEnvironment
+    Write-Host "Starting Content Bot frontend in the foreground at http://127.0.0.1:$FrontendPort"
     Push-Location frontend
-    npm run dev
+    npm run dev -- --host 127.0.0.1 --port $FrontendPort --strictPort
     $frontendExitCode = $LASTEXITCODE
     Pop-Location
     if ($frontendExitCode -ne 0) { throw "Frontend stopped with code $frontendExitCode." }
-}
-
-function Invoke-Stop {
-    $apiStateFile = Join-Path $taskRoot "data\content-bot-api.json"
-
-    if (-not (Test-Path -LiteralPath $apiStateFile)) {
-        Write-Host "No managed Content Bot API state file was found."
-        return
-    }
-
-    try {
-        $apiState = Get-Content -LiteralPath $apiStateFile -Raw | ConvertFrom-Json
-        $launcherPid = [int]$apiState.launcher_pid
-        $listenerPid = [int]$apiState.listener_pid
-    } catch {
-        throw "The Content Bot API state file is invalid; refusing to stop any process."
-    }
-
-    $managedPids = @($listenerPid, $launcherPid) | Where-Object { $_ -gt 0 } | Select-Object -Unique
-    $processes = @($managedPids | ForEach-Object {
-        Get-CimInstance Win32_Process -Filter "ProcessId = $_" -ErrorAction SilentlyContinue
-    })
-    if (-not $processes) {
-        Remove-Item -LiteralPath $apiStateFile -Force
-        Write-Host "Removed stale API state; no process was running."
-        return
-    }
-
-    foreach ($process in $processes) {
-        $commandLine = [string]$process.CommandLine
-        $isWorkspaceApi = $commandLine.Contains($taskRoot, [StringComparison]::OrdinalIgnoreCase) -and
-            $commandLine.Contains("uvicorn app.main:app", [StringComparison]::OrdinalIgnoreCase)
-        if (-not $isWorkspaceApi) {
-            throw "PID $($process.ProcessId) does not match this workspace API; refusing to stop it."
-        }
-    }
-
-    Stop-ManagedApi $managedPids
-
-    $deadline = (Get-Date).AddSeconds(10)
-    do {
-        Start-Sleep -Milliseconds 200
-        $stillRunning = @($managedPids | ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-    } while ($stillRunning -and (Get-Date) -lt $deadline)
-
-    if ($stillRunning) { throw "Content Bot API did not stop within 10 seconds." }
-    Remove-Item -LiteralPath $apiStateFile -Force
-    Write-Host "Content Bot API stopped. SQLite data was not changed."
 }
 
 function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
@@ -268,26 +164,12 @@ function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
         Add-Check "Port $port" $(if ($listener) { "pass" } else { "idle" }) $(if ($listener) { "Listening locally (PID $($listener.OwningProcess))." } else { "Available." })
     }
 
-    $managedStateFile = "data\content-bot-api.json"
-    if (Test-Path -LiteralPath $managedStateFile) {
-        try {
-            $managedState = Get-Content -LiteralPath $managedStateFile -Raw | ConvertFrom-Json
-            $managedPid = [int]$managedState.listener_pid
-            $managedProcess = Get-Process -Id $managedPid -ErrorAction SilentlyContinue
-            Add-Check "Managed API process" $(if ($managedProcess) { "pass" } else { "setup" }) $(if ($managedProcess) { "Listener PID $managedPid can be stopped from this launcher." } else { "API state file is stale." })
-        } catch {
-            Add-Check "Managed API process" "setup" "API state file is invalid."
-        }
-    } else {
-        Add-Check "Managed API process" "optional" "API was not started by this launcher, or is not running."
-    }
-
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/health" -TimeoutSec 3
         $null = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/ready" -TimeoutSec 3
         Add-Check "API health" "pass" "Healthy and ready; $($health.sources) sources registered."
     } catch {
-        Add-Check "API health" "fail" "API is not healthy or MongoDB is not ready; read data\logs\api-stderr.log." $true
+        Add-Check "API health" "fail" "API is not healthy or MongoDB is not ready; inspect the Backend task terminal." $true
     }
 
     if ($Save) {
@@ -363,106 +245,13 @@ function Invoke-SetupSubtitles([string]$Model, [switch]$DownloadModel) {
     }
 }
 
-function Invoke-ScanSource([string]$Keyword, [string]$SourceId, [int]$TimeoutSeconds = 660, [switch]$Json) {
-    $apiBase = "http://127.0.0.1:8000/api/v1"
-    try { Invoke-RestMethod -Uri "$apiBase/ready" -TimeoutSec 3 | Out-Null } catch { throw "Content Bot API is not ready; check MongoDB and data\logs\api-stderr.log." }
-
-    $keywords = Invoke-RestMethod -Uri "$apiBase/keywords" -TimeoutSec 10
-    $trackedKeyword = $keywords | Where-Object { $_.name -ieq $Keyword } | Select-Object -First 1
-    if (-not $trackedKeyword) { throw "Tracked keyword '$Keyword' was not found." }
-
-    $sources = Invoke-RestMethod -Uri "$apiBase/sources" -TimeoutSec 15
-    $source = $sources | Where-Object { $_.id -ieq $SourceId } | Select-Object -First 1
-    if (-not $source) { throw "Source '$SourceId' was not found." }
-    if ($source.state -ne "ready") { throw "Source '$($source.label)' is $($source.state): $($source.detail)" }
-    if ($source.requires_login -and -not $Json) { Write-Host "A visible browser may open for $($source.label)." }
-
-    $body = @{ keyword_id = $trackedKeyword.id; source_ids = @($source.id); trigger = "manual" } | ConvertTo-Json
-    $batch = Invoke-RestMethod -Method Post -Uri "$apiBase/runs" -ContentType "application/json" -Body $body
-    if (-not $Json) { Write-Host "Batch $($batch.id) started: '$($trackedKeyword.name)' on $($source.label)." }
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    $lastProgress = ""
-    do {
-        Start-Sleep -Seconds 1
-        $batch = Invoke-RestMethod -Uri "$apiBase/runs/$($batch.id)" -TimeoutSec 10
-        $sourceRun = $batch.source_runs | Select-Object -First 1
-        $percent = if ($null -ne $sourceRun.progress_percent) { " $([math]::Round($sourceRun.progress_percent))%" } else { "" }
-        $phase = if ($sourceRun.phase) { $sourceRun.phase } else { $sourceRun.state }
-        $message = if ($sourceRun.message) { " — $($sourceRun.message)" } else { "" }
-        $progress = "$phase$($percent): fetched $($sourceRun.fetched_count), stored $($sourceRun.ingested_count)$message"
-        if (-not $Json -and $progress -ne $lastProgress) { Write-Host $progress; $lastProgress = $progress }
-    } while ($batch.state -in @("queued", "running") -and (Get-Date) -lt $deadline)
-
-    if ($batch.state -in @("queued", "running")) {
-        Invoke-RestMethod -Method Post -Uri "$apiBase/runs/$($batch.id)/cancel" | Out-Null
-        throw "Batch timed out after $TimeoutSeconds seconds."
-    }
-
-    $result = [pscustomobject]@{
-        batch_id = $batch.id
-        keyword = $trackedKeyword.name
-        source_id = $source.id
-        source = $source.label
-        state = $batch.state
-        fetched = $sourceRun.fetched_count
-        stored = $sourceRun.ingested_count
-        error = $sourceRun.error_message
-    }
-    if ($Json) { $result | ConvertTo-Json -Depth 3 } else { $result | Format-List }
-    if ($batch.state -ne "succeeded") { throw "Scan ended as '$($batch.state)'." }
-}
-
-function Invoke-Backup([string]$DestinationDirectory = "data\backups") {
-    $python = Get-BackendPython
-    $backupRoot = [IO.Path]::GetFullPath((Join-Path $taskRoot $DestinationDirectory))
-    $timestamp = [DateTimeOffset]::Now.ToString("yyyyMMdd-HHmmss-fff")
-    $destination = Join-Path $backupRoot "content-bot-$timestamp.json"
-    & $python "backend\scripts\backup_mongodb.py" --destination $destination
-    if ($LASTEXITCODE -ne 0) { throw "Backup failed." }
-    Write-Host "Backup saved to $destination"
-}
-
-function Invoke-Restore([string]$Backup) {
-    $python = Get-BackendPython
-    if (Test-LocalListener 8000) { throw "Stop the API before restoring." }
-    $backupPath = [IO.Path]::GetFullPath((Join-Path $taskRoot $Backup))
-    if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) { throw "Backup file was not found: $backupPath" }
-    & $python "backend\scripts\restore_mongodb.py" --source $backupPath --replace-current
-    if ($LASTEXITCODE -ne 0) { throw "Restore failed." }
-    Write-Host "Database restored."
-}
-
-function Invoke-Prune([int]$Days = 90, [switch]$Apply) {
-    $python = Get-BackendPython
-    if ($Apply -and (Test-LocalListener 8000)) { throw "Stop the API before pruning." }
-    if ($Apply) {
-        & $python "backend\scripts\prune_mongodb.py" --days $Days --apply
-    } else {
-        & $python "backend\scripts\prune_mongodb.py" --days $Days
-    }
-    if ($LASTEXITCODE -ne 0) { throw "Prune failed." }
-}
-
-function Invoke-DeleteLocalData {
-    $python = Get-BackendPython
-    if (Test-LocalListener 8000) { throw "Stop the API before deleting local data." }
-    & $python "backend\scripts\delete_local_data.py" --confirm-delete-local-data
-    if ($LASTEXITCODE -ne 0) { throw "Delete local data failed." }
-}
-
-function Read-RequiredValue([string]$Prompt) {
-    do { $value = (Read-Host $Prompt).Trim() } while ([string]::IsNullOrWhiteSpace($value))
-    return $value
-}
-
 try {
-    if ($Action -eq "setup-mediacrawler") {
-        Invoke-SetupMediaCrawler
-    } elseif ($Action -eq "setup-subtitles") {
-        Invoke-SetupSubtitles -Model $SubtitleModel -DownloadModel:$DownloadSubtitleModel
-    } else {
-        Invoke-Start
+    switch ($Action) {
+        "backend" { Invoke-Backend }
+        "frontend" { Invoke-Frontend }
+        "doctor" { Invoke-Doctor }
+        "setup-mediacrawler" { Invoke-SetupMediaCrawler }
+        "setup-subtitles" { Invoke-SetupSubtitles -Model $SubtitleModel -DownloadModel:$DownloadSubtitleModel }
     }
 } catch {
     Write-Error "Content Bot could not start: $($_.Exception.Message)"

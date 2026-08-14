@@ -1,6 +1,8 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+from app.crawlers.runtime import CrawlerErrorCode, CrawlerFailure
+from app.schemas import SourceRunOutput
 from app.services.connectors import (
     ConnectorCapabilities,
     ConnectorStatus,
@@ -89,6 +91,36 @@ class ClosedLoginConnector(SourceConnector):
         raise RuntimeError("playwright TargetClosedError: BrowserContext has been closed")
         if False:
             yield RawContentItem("", "", "")
+
+
+class ParserDriftConnector(SourceConnector):
+    source_id = "parser-drift-source"
+    label = "Parser drift source"
+    group = "Test"
+    capabilities = ConnectorCapabilities(True)
+
+    async def healthcheck(self) -> ConnectorStatus:
+        return ConnectorStatus("ready", "ready")
+
+    async def search(self, query: SearchQuery, checkpoint=None):
+        del query, checkpoint
+        raise CrawlerFailure(
+            CrawlerErrorCode.PARSE_CHANGED,
+            "Provider response contract changed safely.",
+            details={"raw_provider_payload": "must-not-be-persisted"},
+        )
+        if False:
+            yield RawContentItem("", "", "")
+
+
+class CapturingEventBus(EventBus):
+    def __init__(self) -> None:
+        super().__init__()
+        self.published: list[dict] = []
+
+    async def publish(self, event: dict) -> None:
+        self.published.append(dict(event))
+        await super().publish(event)
 
 
 def add_keyword(storage, name: str, source_id: str, *, enabled: bool, next_run_at=None) -> int:
@@ -213,6 +245,48 @@ def test_closed_login_browser_is_reported_as_a_recoverable_source_error(mongo_st
     assert source_run["state"] == "failed"
     assert source_run["phase"] == "browser_closed"
     assert source_run["message"] == "Cốc Cốc was closed before the scan finished."
+
+
+def test_parser_drift_is_structured_persisted_and_emitted_without_raw_payload(
+    mongo_store,
+) -> None:
+    connector = ParserDriftConnector()
+    events = CapturingEventBus()
+    manager = RunManager({connector.source_id: connector}, events, mongo_store)
+    keyword_id = add_keyword(
+        mongo_store,
+        "Parser drift",
+        connector.source_id,
+        enabled=False,
+    )
+
+    async def run_batch() -> str:
+        batch_id = await manager.start_batch(keyword_id)
+        await manager._tasks[batch_id]
+        return batch_id
+
+    batch_id = asyncio.run(run_batch())
+    source_run = mongo_store.batch(batch_id)["source_runs"][0]
+    assert source_run["state"] == "failed"
+    assert source_run["phase"] == "parser_drift"
+    assert source_run["error_code"] == "PARSE_CHANGED"
+    assert source_run["provider_id"] == "legacy_connector"
+    assert source_run["operation"] == "search"
+    assert source_run["retryable"] is False
+    serialized = SourceRunOutput.model_validate(source_run).model_dump()
+    assert serialized["error_code"] == "PARSE_CHANGED"
+    assert serialized["provider_id"] == "legacy_connector"
+    assert serialized["operation"] == "search"
+    alerts = [
+        event
+        for event in events.published
+        if event.get("type") == "parser-drift-alert"
+    ]
+    assert len(alerts) == 1
+    assert alerts[0]["source_id"] == connector.source_id
+    assert alerts[0]["error_code"] == "PARSE_CHANGED"
+    assert "must-not-be-persisted" not in repr(source_run)
+    assert "must-not-be-persisted" not in repr(events.published)
 
 
 def test_startup_closes_interrupted_batches(mongo_store) -> None:

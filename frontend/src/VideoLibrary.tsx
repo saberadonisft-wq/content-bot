@@ -5,7 +5,7 @@ import { API_BASE, api, VideoLibraryItem } from "./api";
 const getErrorMessage = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
 
-export function VideoLibrary() {
+export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
   const [videos, setVideos] = useState<VideoLibraryItem[]>([]);
   const [filterType, setFilterType] = useState<string>("all");
   const [loading, setLoading] = useState(true);
@@ -69,13 +69,15 @@ export function VideoLibrary() {
 
   return (
     <>
-      <div className="canva-home-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
-        <div>
-          <h1>Quản lý Video</h1>
-          <p className="canva-text-muted" style={{ fontSize: 15, marginTop: 8 }}>
-            Quản lý các video bạn đã tải lên, video ghép phụ đề và video từ các bài đăng quét được.
-          </p>
-        </div>
+      <div className={`canva-home-header ${embedded ? "video-library-embedded-head" : ""}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+        {!embedded && (
+          <div>
+            <h1>Quản lý Video</h1>
+            <p className="canva-text-muted" style={{ fontSize: 15, marginTop: 8 }}>
+              Quản lý các video bạn đã tải lên, video ghép phụ đề và video từ các bài đăng quét được.
+            </p>
+          </div>
+        )}
         
         <div style={{ paddingBottom: 8 }}>
           <select 

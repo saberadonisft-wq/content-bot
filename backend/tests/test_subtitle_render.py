@@ -75,6 +75,8 @@ def test_render_cache_key_changes_for_timing_style_and_profile() -> None:
         )
         != precision_render_cache_key(_document(), media, _options(), overlay)
     )
+    masks = [{"id": "mask-1", "shape": "rectangle", "effect": "blur"}]
+    assert precision_render_cache_key(_document(), media, _options(), None, masks) != base
 
 
 def test_encoder_selection_has_runtime_fallback_order() -> None:
@@ -140,6 +142,176 @@ def test_precision_style_matches_browser_font_metrics_and_custom_anchor() -> Non
     assert "Alignment=2" in style
     assert "MarginL=4" in style
     assert "MarginR=196" in style
+
+
+def test_mask_filter_graph_supports_all_shapes_and_effects(tmp_path: Path) -> None:
+    width, height = 320, 180
+    subtitle_path = tmp_path / "mask.srt"
+    subtitle_path.write_text(
+        "1\n00:00:00,000 --> 00:00:00,900\nKiểm thử\n",
+        encoding="utf-8",
+    )
+    fonts_dir = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo"
+    masks = [
+        {
+            "id": "mask-rectangle",
+            "shape": "rectangle",
+            "effect": "blur",
+            "x": 10,
+            "y": 10,
+            "width": 25,
+            "height": 15,
+            "strength": 8,
+            "opacity": 0.85,
+            "feather": 2,
+            "corner_radius": 14,
+            "color": "#000000",
+        },
+        {
+            "id": "mask-rounded",
+            "shape": "rounded",
+            "effect": "pixelate",
+            "x": 40,
+            "y": 10,
+            "width": 25,
+            "height": 15,
+            "strength": 12,
+            "opacity": 1,
+            "feather": 0,
+            "corner_radius": 20,
+            "color": "#000000",
+        },
+        {
+            "id": "mask-ellipse",
+            "shape": "ellipse",
+            "effect": "solid",
+            "x": 10,
+            "y": 40,
+            "width": 25,
+            "height": 15,
+            "strength": 8,
+            "opacity": 0.7,
+            "feather": 1,
+            "corner_radius": 14,
+            "color": "#123456",
+        },
+        {
+            "id": "mask-band",
+            "shape": "band",
+            "effect": "darken",
+            "x": 0,
+            "y": 75,
+            "width": 100,
+            "height": 10,
+            "strength": 8,
+            "opacity": 0.6,
+            "feather": 0,
+            "corner_radius": 14,
+            "color": "#000000",
+        },
+    ]
+    graph, output_label = _video_filter_graph(
+        subtitle_path,
+        fonts_dir,
+        {"width": width, "height": height},
+        _options(),
+        masks=masks,
+    )
+
+    assert graph.index("subtitle_mask_0") < graph.index("subtitles=filename")
+    assert graph.count("255*1.0000") == 2
+    assert "255*0.7000" in graph
+    assert "color=0x000000@0.6000" in graph
+    assert "crop=96:44:24:10" in graph
+    assert "scale=320:180:flags=neighbor" not in graph
+    rendered = subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc2=s={width}x{height}:r=1:d=1",
+            "-filter_complex",
+            graph,
+            "-map",
+            output_label,
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+
+
+def test_mask_filter_preserves_source_color(tmp_path: Path) -> None:
+    width, height = 160, 90
+    subtitle_path = tmp_path / "color.srt"
+    subtitle_path.write_text(
+        "1\n00:00:02,000 --> 00:00:03,000\nKhông hiện ở frame kiểm thử\n",
+        encoding="utf-8",
+    )
+    fonts_dir = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo"
+    graph, output_label = _video_filter_graph(
+        subtitle_path,
+        fonts_dir,
+        {"width": width, "height": height},
+        _options(),
+        masks=[{
+            "id": "mask-color",
+            "shape": "rectangle",
+            "effect": "blur",
+            "x": 0,
+            "y": 0,
+            "width": 100,
+            "height": 100,
+            "strength": 20,
+            "opacity": 1,
+            "feather": 0,
+            "corner_radius": 0,
+            "color": "#000000",
+        }],
+    )
+    rendered = subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=red:s={width}x{height}:r=1:d=1",
+            "-filter_complex",
+            graph,
+            "-map",
+            output_label,
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert rendered.returncode == 0, rendered.stderr.decode(errors="replace")
+    center_offset = ((height // 2) * width + width // 2) * 3
+    red, green, blue = rendered.stdout[center_offset : center_offset + 3]
+    assert red > 220
+    assert green < 40
+    assert blue < 40
 
 
 def _changed_pixel_bounds(
@@ -286,6 +458,76 @@ def test_render_geometry_matches_desktop_live_preview(
     # tighter than the background-box tolerance because this is perceived size.
     assert normalized_text_width == pytest.approx(0.5885, abs=0.007)
     assert normalized_text_height == pytest.approx(0.0591, abs=0.003)
+
+
+def test_libass_preview_matches_precision_export_at_minimum_font_size(
+    tmp_path: Path,
+) -> None:
+    width, height = 1280, 720
+    options = _options(
+        font_size=14,
+        bold=True,
+        bg_enabled=True,
+        outline_width=2,
+        shadow_width=1,
+        pos_x=50,
+        pos_y=78,
+    )
+    cue = {
+        "start_ms": 0,
+        "end_ms": 5000,
+        "text": "Em muốn trở thành con rồng mạnh nhất thế giới.",
+    }
+    fonts_dir = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo"
+    bounds: list[tuple[int, int, int, int]] = []
+
+    for subtitle_format in ("srt", "ass"):
+        subtitle_path = tmp_path / f"minimum-font.{subtitle_format}"
+        subtitle_path.write_text(
+            subtitles_to_srt([cue])
+            if subtitle_format == "srt"
+            else subtitles_to_ass([cue], options),
+            encoding="utf-8",
+        )
+        graph, output_label = _video_filter_graph(
+            subtitle_path,
+            fonts_dir,
+            {"width": width, "height": height},
+            options,
+        )
+        frame = subprocess.run(
+            [
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=0x808080:s={width}x{height}:r=1:d=1",
+                "-filter_complex",
+                graph,
+                "-map",
+                output_label,
+                "-frames:v",
+                "1",
+                "-pix_fmt",
+                "rgb24",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+        bounds.append(
+            _changed_pixel_bounds(frame, width=width, height=height)
+        )
+
+    for preview_value, export_value in zip(bounds[1], bounds[0], strict=True):
+        assert preview_value == pytest.approx(export_value, abs=2)
 
 
 def test_aspect_targets_keep_even_display_dimensions() -> None:

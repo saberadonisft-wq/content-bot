@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-JobKind = Literal["alignment", "render"]
+JobKind = Literal["alignment", "generation", "render"]
 JobState = Literal["queued", "running", "succeeded", "failed", "canceled"]
 JobRunner = Callable[["SubtitleJobContext"], dict[str, Any]]
 

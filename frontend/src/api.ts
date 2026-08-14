@@ -2,6 +2,7 @@ import { cueToLegacySubtitle } from "./subtitles/model";
 import type {
   MediaMetadata,
   OverlayLayout,
+  SubtitleMaskRegion,
   SubtitleCueV2,
   SubtitleParseResultV2,
   SubtitleWarning,
@@ -13,6 +14,7 @@ export type {
   MediaMetadata,
   SubtitleParseResultV2,
   SubtitleTimingSource,
+  SubtitleMaskRegion,
   SubtitleWarning,
   SubtitleWordV2,
 } from "./subtitles/types";
@@ -23,16 +25,99 @@ export const API_BASE =
 export const runEventsUrl = (batchId: string) =>
   `${API_BASE}/runs/${batchId}/events`;
 
+export type SourceOperation = {
+  id: string;
+  provider_id: string;
+  coverage: "full" | "partial" | "unsupported";
+  implementation: "implemented" | "planned";
+  availability: string | null;
+  enabled: boolean;
+  reason_code: string | null;
+  detail: string;
+  auth_modes: string[];
+  schedule_policy: string;
+  target_kinds: string[];
+};
+
+export type SourceMetric = {
+  id: string;
+  label: string;
+  semantics: string;
+  legacy_key: string | null;
+};
+
 export type Source = {
+  schema_version: string;
   id: string;
   label: string;
   group: string;
+  order: number;
+  primary_operation: string;
   state: string;
   detail: string;
   global_search: boolean;
   watchlist_filter: boolean;
   requires_login: boolean;
   interaction_fields: string[];
+  metrics: SourceMetric[];
+  legacy_aliases: string[];
+  provider_selection: string[];
+  operations: SourceOperation[];
+  health_summary: {
+    state: string;
+    detail: string;
+    checked_at: string;
+    probe: string;
+  };
+  coverage_disclaimer: string | null;
+};
+export type TikTokOAuthStatus = {
+  state:
+    | "setup_required"
+    | "disconnected"
+    | "connected"
+    | "refresh_required"
+    | "permission_required"
+    | "authorization_expired"
+    | "invalid_vault";
+  configured: boolean;
+  connected: boolean;
+  detail: string;
+  authorized_username: string;
+  scopes: string[];
+  access_expires_at: string | null;
+  refresh_expires_at: string | null;
+};
+export type CrawlerLoginStatus = {
+  source_id: string;
+  state:
+    | "idle"
+    | "opening"
+    | "waiting_for_user"
+    | "verifying"
+    | "completed"
+    | "cancelled"
+    | "failed";
+  started_at: string | null;
+  finished_at: string | null;
+  reason_code: string | null;
+  detail: string;
+  observation_ready: boolean;
+  observation_digest: string | null;
+};
+export type ChannelSubscription = {
+  id: string | null;
+  url: string;
+  normalized_url: string | null;
+  label: string;
+  source_id: string | null;
+  mode: string | null;
+  enabled: boolean;
+  include_replies: boolean;
+  include_reposts: boolean;
+  last_scanned_at: string | null;
+  last_status: string | null;
+  last_error: string | null;
 };
 export type Keyword = {
   id: number;
@@ -40,6 +125,7 @@ export type Keyword = {
   include_terms: string[];
   exclude_terms: string[];
   source_ids: string[];
+  channels: ChannelSubscription[];
   enabled: boolean;
   interval_minutes: number;
   max_items_per_source: number;
@@ -79,6 +165,7 @@ export type Item = {
 };
 export type ItemFilters = {
   source?: string;
+  session?: string;
   language?: string;
   sentiment?: string;
   topic?: string;
@@ -160,6 +247,8 @@ export type Batch = {
   id: string;
   keyword_id: number;
   trigger: string;
+  session_number: number;
+  new_item_count: number;
   state: string;
   started_at: string | null;
   finished_at: string | null;
@@ -169,6 +258,9 @@ export type Batch = {
 export type SourceRun = {
   id: string;
   source_id: string;
+  channel_id: string | null;
+  channel_url: string | null;
+  channel_label: string | null;
   state: string;
   phase: string;
   progress_mode: "determinate" | "indeterminate";
@@ -177,6 +269,11 @@ export type SourceRun = {
   progress_percent: number | null;
   message: string | null;
   browser_state: string | null;
+  provider_id: string | null;
+  operation: string | null;
+  error_code: string | null;
+  retryable: boolean | null;
+  retry_after_seconds: number | null;
   fetched_count: number;
   ingested_count: number;
   started_at: string | null;
@@ -186,7 +283,13 @@ export type SourceRun = {
 };
 
 export type RunProgressEvent = {
-  type: "connected" | "batch" | "source-progress" | "source-run" | "item";
+  type:
+    | "connected"
+    | "batch"
+    | "source-progress"
+    | "source-run"
+    | "parser-drift-alert"
+    | "item";
   batch_id?: string;
   source_run_id?: string;
   state?: string;
@@ -200,6 +303,9 @@ export type RunProgressEvent = {
   message?: string | null;
   browser_state?: string | null;
   error_message?: string | null;
+  error_code?: string | null;
+  provider_id?: string | null;
+  operation?: string | null;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -304,9 +410,31 @@ export type SubtitleAlignmentResult = {
   aligned_cue_count: number;
 };
 
+export type GeminiSubtitleOptions = {
+  bilingual?: boolean;
+};
+
+export type GeminiCliStatus = {
+  installed: boolean;
+  authenticated: boolean;
+  auth_method?: string | null;
+  issue?: string | null;
+};
+
+export type GeminiSubtitleResult = {
+  document: SubtitleParseResultV2["document"];
+  warnings: SubtitleParseResultV2["warnings"];
+  srt: string;
+  segment_count: number;
+  processing_seconds?: number | null;
+  provider: "gemini_cli";
+  model: string;
+  chunk_count: number;
+};
+
 export type SubtitleJob = {
   id: string;
-  kind: "alignment" | "render";
+  kind: "alignment" | "generation" | "render";
   dedupe_key: string;
   state: "queued" | "running" | "succeeded" | "failed" | "canceled";
   progress: number;
@@ -319,6 +447,10 @@ export type SubtitleJob = {
   finished_at?: string | null;
   error?: string | null;
   result?: SubtitleAlignmentResult | null;
+};
+
+export type GeminiSubtitleJob = Omit<SubtitleJob, "result"> & {
+  result?: GeminiSubtitleResult | null;
 };
 
 export type SubtitleRenderOptionsV2 = Omit<
@@ -350,6 +482,13 @@ export type SubtitleRenderResult = {
   overlay_applied?: boolean;
 };
 
+export type SubtitleAssPreviewResult = {
+  ass: string;
+  play_res_x: number;
+  play_res_y: number;
+  timing_precision_ms: 10;
+};
+
 export type SubtitleRenderJob = Omit<SubtitleJob, "result"> & {
   result?: SubtitleRenderResult | null;
 };
@@ -368,6 +507,31 @@ export type VideoLibraryItem = {
 export const api = {
   videos: () => request<VideoLibraryItem[]>("/videos"),
   sources: () => request<Source[]>("/sources"),
+  tiktokOAuthStatus: () =>
+    request<TikTokOAuthStatus>("/auth/tiktok/status"),
+  tiktokOAuthStartUrl: (username: string) =>
+    `${API_BASE}/auth/tiktok/start?${new URLSearchParams({ username })}`,
+  refreshTikTokOAuth: () =>
+    request<TikTokOAuthStatus>("/auth/tiktok/refresh", { method: "POST" }),
+  disconnectTikTokOAuth: () =>
+    request<void>("/auth/tiktok/connection", { method: "DELETE" }),
+  crawlerLoginStatus: (sourceId: string) =>
+    request<CrawlerLoginStatus>(
+      `/crawler/profiles/${encodeURIComponent(sourceId)}/login`,
+    ),
+  startCrawlerLogin: (sourceId: string, timeoutSeconds = 1200) =>
+    request<CrawlerLoginStatus>(
+      `/crawler/profiles/${encodeURIComponent(sourceId)}/login`,
+      {
+        method: "POST",
+        body: JSON.stringify({ timeout_seconds: timeoutSeconds }),
+      },
+    ),
+  stopCrawlerLogin: (sourceId: string) =>
+    request<CrawlerLoginStatus>(
+      `/crawler/profiles/${encodeURIComponent(sourceId)}/login`,
+      { method: "DELETE" },
+    ),
   keywords: () => request<Keyword[]>("/keywords"),
   createKeyword: (
     payload: Omit<Keyword, "id" | "created_at" | "updated_at" | "next_run_at">,
@@ -386,52 +550,56 @@ export const api = {
     }),
   deleteKeyword: (id: number) =>
     request<void>(`/keywords/${id}`, { method: "DELETE" }),
-  items: (keywordId: number, filters: ItemFilters = {}) => {
+  items: (keywordId: number, filters: ItemFilters = {}, signal?: AbortSignal) => {
     const params = new URLSearchParams({
       keyword_id: String(keywordId),
       limit: "200",
     });
     if (filters.source) params.set("source_id", filters.source);
+    if (filters.session) params.set("session_id", filters.session);
     if (filters.language) params.set("language", filters.language);
     if (filters.sentiment) params.set("sentiment", filters.sentiment);
     if (filters.topic) params.set("topic", filters.topic);
-    return request<{ total: number; items: Item[] }>(`/items?${params}`);
+    return request<{ total: number; items: Item[] }>(`/items?${params}`, { signal });
   },
-  insightSummary: (keywordId: number, filters: ItemFilters = {}) => {
+  insightSummary: (keywordId: number, filters: ItemFilters = {}, signal?: AbortSignal) => {
     const params = new URLSearchParams({
       keyword_id: String(keywordId),
       top_limit: "5",
     });
     if (filters.source) params.set("source_id", filters.source);
+    if (filters.session) params.set("session_id", filters.session);
     if (filters.language) params.set("language", filters.language);
     if (filters.sentiment) params.set("sentiment", filters.sentiment);
     if (filters.topic) params.set("topic", filters.topic);
-    return request<InsightSummary>(`/insights/summary?${params}`);
+    return request<InsightSummary>(`/insights/summary?${params}`, { signal });
   },
-  insightClusters: (keywordId: number, filters: ItemFilters = {}) => {
+  insightClusters: (keywordId: number, filters: ItemFilters = {}, signal?: AbortSignal) => {
     const params = new URLSearchParams({
       keyword_id: String(keywordId),
       min_items: "2",
       limit: "10",
     });
     if (filters.source) params.set("source_id", filters.source);
+    if (filters.session) params.set("session_id", filters.session);
     if (filters.language) params.set("language", filters.language);
     if (filters.sentiment) params.set("sentiment", filters.sentiment);
     if (filters.topic) params.set("topic", filters.topic);
-    return request<TrendClusters>(`/insights/clusters?${params}`);
+    return request<TrendClusters>(`/insights/clusters?${params}`, { signal });
   },
-  startRun: (keywordId: number, sourceIds?: string[]) =>
+  startRun: (keywordId: number, sourceIds?: string[], channelIds?: string[]) =>
     request<Batch>("/runs", {
       method: "POST",
       body: JSON.stringify({
         keyword_id: keywordId,
         trigger: "manual",
         source_ids: sourceIds,
+        channel_ids: channelIds,
       }),
     }),
-  runs: (keywordId: number) =>
-    request<Batch[]>(`/runs?keyword_id=${keywordId}&limit=5`),
-  run: (id: string) => request<Batch>(`/runs/${id}`),
+  runs: (keywordId: number, signal?: AbortSignal) =>
+    request<Batch[]>(`/runs?keyword_id=${keywordId}&limit=5`, { signal }),
+  run: (id: string, signal?: AbortSignal) => request<Batch>(`/runs/${id}`, { signal }),
   cancelRun: (id: string) =>
     request<{ id: string; state: string }>(`/runs/${id}/cancel`, {
       method: "POST",
@@ -501,6 +669,25 @@ export const api = {
       }),
       signal,
     }),
+  generateSubtitlesWithGemini: (
+    videoId: string,
+    options: GeminiSubtitleOptions = {},
+    signal?: AbortSignal,
+  ) =>
+    request<GeminiSubtitleJob>("/subtitles/v2/generate/gemini", {
+      method: "POST",
+      body: JSON.stringify({ video_id: videoId, options }),
+      signal,
+    }),
+  geminiCliStatus: (signal?: AbortSignal) =>
+    request<GeminiCliStatus>("/subtitles/gemini/status", { signal }),
+  geminiSubtitleJob: (jobId: string, signal?: AbortSignal) =>
+    request<GeminiSubtitleJob>(`/subtitles/gemini/jobs/${jobId}`, { signal }),
+  cancelGeminiSubtitleJob: (jobId: string, signal?: AbortSignal) =>
+    request<GeminiSubtitleJob>(`/subtitles/gemini/jobs/${jobId}/cancel`, {
+      method: "POST",
+      signal,
+    }),
   subtitleJob: (jobId: string, signal?: AbortSignal) =>
     request<SubtitleJob>(`/subtitles/jobs/${jobId}`, { signal }),
   cancelSubtitleJob: (jobId: string, signal?: AbortSignal) =>
@@ -513,6 +700,7 @@ export const api = {
     document: SubtitleParseResultV2["document"],
     options: SubtitleRenderOptionsV2,
     overlay?: SubtitleOverlayRenderOptions | null,
+    masks?: readonly SubtitleMaskRegion[],
     signal?: AbortSignal,
   ) =>
     request<SubtitleRenderJob>("/subtitles/v2/render", {
@@ -522,7 +710,19 @@ export const api = {
         document,
         options,
         ...(overlay ? { overlay } : {}),
+        ...(masks?.length ? { masks } : {}),
       }),
+      signal,
+    }),
+  previewSubtitleDocument: (
+    videoId: string,
+    document: SubtitleParseResultV2["document"],
+    options: SubtitleRenderOptionsV2,
+    signal?: AbortSignal,
+  ) =>
+    request<SubtitleAssPreviewResult>("/subtitles/v2/preview-ass", {
+      method: "POST",
+      body: JSON.stringify({ video_id: videoId, document, options }),
       signal,
     }),
   subtitleRenderJob: (jobId: string, signal?: AbortSignal) =>

@@ -67,7 +67,7 @@ def test_ingest_rejects_zero_relevance_and_deduplicates(mongo_store) -> None:
 
     source_run = mongo_store.source_run(source_run_id)
     assert source_run["fetched_count"] == 4
-    assert source_run["ingested_count"] == 2
+    assert source_run["ingested_count"] == 1
     assert mongo_store.db.content_items.count_documents({}) == 1
     assert mongo_store.db.item_keyword_matches.count_documents({}) == 1
     assert mongo_store.db.metric_snapshots.count_documents({}) == 2
@@ -75,7 +75,7 @@ def test_ingest_rejects_zero_relevance_and_deduplicates(mongo_store) -> None:
     asyncio.run(ingest(RawContentItem("accepted", "https://example.test/3", "NTE giveaway")))
     source_run = mongo_store.source_run(source_run_id)
     assert source_run["fetched_count"] == 5
-    assert source_run["ingested_count"] == 2
+    assert source_run["ingested_count"] == 1
     assert mongo_store.db.content_items.count_documents({}) == 0
     assert mongo_store.db.item_keyword_matches.count_documents({}) == 0
     assert mongo_store.db.metric_snapshots.count_documents({}) == 0

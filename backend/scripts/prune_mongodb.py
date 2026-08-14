@@ -29,6 +29,7 @@ def main() -> int:
     args = parser.parse_args()
     if not 1 <= args.days <= 3650:
         raise ValueError("--days must be between 1 and 3650")
+    store.initialize()
     if not settings.mongodb_uri or not store.is_available:
         raise RuntimeError("MongoDB is not available; refusing to prune data.")
     if args.apply and local_api_is_running():
@@ -44,9 +45,9 @@ def main() -> int:
     ]
     deleted = 0
     if args.apply and expired_ids:
-        store.db.item_keyword_matches.delete_many({"content_item_id": {"$in": expired_ids}})
-        store.db.metric_snapshots.delete_many({"content_item_id": {"$in": expired_ids}})
-        deleted = store.db.content_items.delete_many({"_id": {"$in": expired_ids}}).deleted_count
+        for content_item_id in expired_ids:
+            store.delete_item(content_item_id)
+            deleted += 1
 
     print(
         json.dumps(

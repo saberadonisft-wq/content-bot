@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import re
+import tempfile
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -19,20 +20,27 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+from .api.catalog import build_catalog_router
+from .api.comments import build_comments_router
+from .api.crawler_data import build_crawler_data_router
+from .api.crawler_profiles import build_crawler_profiles_router
+from .api.health import build_health_router
+from .api.tiktok_auth import build_tiktok_auth_router
 from .config import settings
+from .crawlers.adapters.tiktok import TikTokOAuthConfig, TikTokTokenVault
 from .mongo import store
 from .schemas import (
     BatchOutput,
+    GeminiSubtitleRequest,
     InsightSummaryOutput,
     ItemOutput,
-    KeywordInput,
-    KeywordOutput,
     MediaMetadata,
     PagedItems,
     RunRequest,
-    SourceOutput,
     SourceRunOutput,
     SubtitleAlignmentRequest,
+    SubtitleAssPreviewRequestV2,
+    SubtitleAssPreviewResponse,
     SubtitleBurnRequest,
     SubtitleBurnResponse,
     SubtitleDocumentV2,
@@ -53,10 +61,13 @@ from .schemas import (
     VideoLibraryItem,
 )
 from .services.clusters import cluster_items
-from .services.connectors import (
-    UnconfiguredConnector,
-    YouTubeConnector,
-    default_connectors,
+from .services.connectors import default_connectors
+from .services.crawler_login import CrawlerLoginManager
+from .services.gemini_subtitles import (
+    GeminiSubtitleCanceled,
+    GeminiSubtitleService,
+    GeminiSubtitleSettings,
+    gemini_generation_cache_key,
 )
 from .services.insights import summarize_items
 from .services.media_probe import MediaProbeError, probe_media_cached
@@ -83,6 +94,7 @@ from .services.subtitle_render import (
     SubtitleRenderCanceled,
     precision_render_cache_key,
     render_precision_video,
+    subtitle_play_resolution,
 )
 from .services.subtitle_thumbnail import ThumbnailSpriteError, generate_thumbnail_sprite
 from .services.subtitle_timing import transform_project_cues, validate_cues
@@ -90,9 +102,11 @@ from .services.subtitles import (
     burn_subtitles_to_video,
     parse_subtitles_text,
     parse_subtitles_v2,
+    subtitles_to_ass,
     subtitles_to_srt,
 )
-from .services.text import content_insights, insights_match, normalized
+from .services.text import content_insights, insights_match
+from .services.tiktok_oauth import TikTokOAuthService
 
 logger = logging.getLogger(__name__)
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv"}
@@ -114,14 +128,52 @@ MONGO_REQUIRED_PREFIXES = (
 connectors = default_connectors()
 events = EventBus()
 run_manager = RunManager(connectors, events)
+crawler_login_manager = CrawlerLoginManager()
+tiktok_oauth_service = TikTokOAuthService(
+    TikTokTokenVault(settings.data_dir / "crawler-secrets" / "tiktok"),
+    lambda: TikTokOAuthConfig(
+        settings.tiktok_client_key,
+        settings.tiktok_client_secret or "",
+        settings.tiktok_redirect_uri,
+    ),
+    settings.content_bot_frontend_url,
+)
 subtitle_jobs = SubtitleJobManager(
     settings.data_dir / "subtitle-jobs",
     max_workers=settings.content_bot_subtitle_job_concurrency,
 )
+gemini_subtitle_jobs = SubtitleJobManager(
+    settings.data_dir / "gemini-subtitle-jobs",
+    max_workers=1,
+)
+gemini_subtitle_service = GeminiSubtitleService(
+    GeminiSubtitleSettings(
+        job_root=Path(tempfile.gettempdir()) / "content-bot-gemini-jobs",
+        cli_path=settings.content_bot_gemini_cli_path,
+        model=settings.content_bot_gemini_cli_model,
+        api_key=settings.gemini_api_key,
+        timeout_seconds=settings.content_bot_gemini_cli_timeout_seconds,
+        chunk_seconds=settings.content_bot_gemini_cli_chunk_seconds,
+        max_input_mb=settings.content_bot_gemini_cli_max_input_mb,
+    )
+)
 
 
 async def scheduler_loop() -> None:
+    retention_interval = timedelta(
+        hours=max(1, settings.content_bot_crawler_retention_interval_hours)
+    )
+    next_retention_at = utcnow()
     while True:
+        now = utcnow()
+        if now >= next_retention_at:
+            deleted = await asyncio.to_thread(
+                run_manager.cleanup_retention,
+                max(1, settings.content_bot_crawler_retention_days),
+            )
+            if deleted:
+                logger.info("Crawler retention removed %s expired items", deleted)
+            next_retention_at = now + retention_interval
         await run_manager.scheduler_tick()
         await asyncio.sleep(30)
 
@@ -133,7 +185,14 @@ async def lifespan(app: FastAPI):
     task = None
     if store.is_available:
         await asyncio.to_thread(run_manager.cleanup_interrupted)
-        await asyncio.to_thread(run_manager.cleanup_irrelevant)
+        cleanup_migration = store.db.app_metadata.find_one({"_id": "cleanup-irrelevant-v1"})
+        if cleanup_migration is None:
+            await asyncio.to_thread(run_manager.cleanup_irrelevant)
+            store.db.app_metadata.update_one(
+                {"_id": "cleanup-irrelevant-v1"},
+                {"$set": {"completed": True, "completed_at": utcnow()}},
+                upsert=True,
+            )
         task = asyncio.create_task(scheduler_loop(), name="content-bot-scheduler")
     else:
         logger.warning(
@@ -142,6 +201,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await crawler_login_manager.shutdown()
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -149,6 +209,32 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Content Bot API", version="0.1.0", lifespan=lifespan)
+app.include_router(build_health_router(lambda: store, lambda: len(connectors)))
+app.include_router(build_catalog_router(lambda: store, connectors, run_manager))
+app.include_router(build_crawler_data_router(lambda: store))
+app.include_router(build_comments_router(lambda: store, lambda: connectors))
+app.include_router(build_crawler_profiles_router(crawler_login_manager))
+app.include_router(build_tiktok_auth_router(tiktok_oauth_service))
+
+
+@app.middleware("http")
+async def require_mongo_for_persistence(request, call_next):
+    if (
+        request.method != "OPTIONS"
+        and
+        any(
+            request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
+            for prefix in MONGO_REQUIRED_PREFIXES
+        )
+        and not store.is_available
+    ):
+        return JSONResponse(status_code=503, content={"detail": "MongoDB is not ready"})
+    return await call_next(request)
+
+
+# Register CORS after the persistence guard so it also decorates locally
+# generated 503 responses. Otherwise browsers hide the JSON detail behind a
+# generic "Failed to fetch" network error.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -156,6 +242,10 @@ app.add_middleware(
         for origin in settings.content_bot_cors_origins.split(",")
         if origin.strip()
     ],
+    # Vite may move to the next local port when 5173 is occupied. Keep the
+    # local-only API usable from that preview/dev port without allowing remote
+    # browser origins.
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type"],
@@ -168,44 +258,16 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def require_mongo_for_persistence(request, call_next):
-    if (
-        any(
-            request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
-            for prefix in MONGO_REQUIRED_PREFIXES
-        )
-        and not store.is_available
-    ):
-        return JSONResponse(status_code=503, content={"detail": "MongoDB is not ready"})
-    return await call_next(request)
-
-
-def keyword_output(keyword: dict) -> KeywordOutput:
-    return KeywordOutput(
-        id=keyword["id"],
-        name=keyword["name"],
-        include_terms=keyword.get("include_terms", []),
-        exclude_terms=keyword.get("exclude_terms", []),
-        source_ids=keyword.get("source_ids", []),
-        enabled=keyword.get("enabled", True),
-        interval_minutes=keyword.get("interval_minutes", 360),
-        max_items_per_source=keyword.get("max_items_per_source", 500),
-        next_run_at=keyword.get("next_run_at"),
-        created_at=keyword["created_at"],
-        updated_at=keyword["updated_at"],
-    )
-
-
-def keyword_name_exists(name: str, exclude_id: int | None = None) -> bool:
-    return store.keyword_name_exists(normalized(name), exclude_id)
-
-
 def batch_output(batch: dict) -> BatchOutput:
     return BatchOutput(
         id=batch["id"],
         keyword_id=batch["keyword_id"],
         trigger=batch["trigger"],
+        session_number=batch.get("session_number", 1),
+        new_item_count=batch.get(
+            "new_item_count",
+            sum(row.get("ingested_count", 0) for row in batch.get("source_runs", [])),
+        ),
         state=batch["state"],
         started_at=batch.get("started_at"),
         finished_at=batch.get("finished_at"),
@@ -214,6 +276,9 @@ def batch_output(batch: dict) -> BatchOutput:
             SourceRunOutput(
                 id=row["id"],
                 source_id=row["source_id"],
+                channel_id=row.get("channel_id"),
+                channel_url=row.get("channel_url"),
+                channel_label=row.get("channel_label"),
                 state=row["state"],
                 phase=row.get("phase", row["state"]),
                 progress_mode=row.get("progress_mode", "determinate"),
@@ -288,12 +353,14 @@ def filtered_item_outputs(
     sentiment: str | None = None,
     topic: str | None = None,
     min_relevance: float = 0,
+    session_id: str | None = None,
 ) -> list[ItemOutput]:
     rows = store.item_matches(
         keyword_id,
         positive_only=True,
         source_id=source_id,
         min_relevance=min_relevance,
+        session_id=session_id,
     )
     rows = [
         (item, match)
@@ -328,20 +395,6 @@ def filtered_item_outputs(
         output
         for output in outputs
         if insights_match(output.insights.model_dump(), language, sentiment, topic)
-    ]
-
-
-def default_keyword_sources() -> list[str]:
-    """Return sources that can run immediately without opening a login flow."""
-    return [
-        source_id
-        for source_id, connector in connectors.items()
-        if not connector.capabilities.requires_login
-        and not isinstance(connector, UnconfiguredConnector)
-        and (
-            not isinstance(connector, YouTubeConnector)
-            or bool(settings.youtube_api_key)
-        )
     ]
 
 
@@ -382,115 +435,16 @@ def _as_utc_datetime(value: object) -> datetime:
     return utcnow()
 
 
-@app.get("/api/v1/health")
-async def health():
-    return {"status": "ok", "time": utcnow().isoformat(), "sources": len(connectors)}
-
-
-@app.get("/api/v1/ready")
-async def ready():
-    if not await asyncio.to_thread(store.ping):
-        raise HTTPException(status_code=503, detail="MongoDB is not ready")
-    return {"status": "ready", "time": utcnow().isoformat(), "mongo_ready": True}
-
-
-@app.get("/api/v1/sources", response_model=list[SourceOutput])
-async def list_sources():
-    outputs: list[SourceOutput] = []
-    for connector in connectors.values():
-        status = await connector.healthcheck()
-        outputs.append(
-            SourceOutput(
-                id=connector.source_id,
-                label=connector.label,
-                group=connector.group,
-                state=status.state,
-                detail=status.detail,
-                global_search=connector.capabilities.global_search,
-                watchlist_filter=connector.capabilities.watchlist_filter,
-                requires_login=connector.capabilities.requires_login,
-                interaction_fields=list(connector.capabilities.interaction_fields),
-            )
-        )
-    return outputs
-
-
-@app.get("/api/v1/keywords", response_model=list[KeywordOutput])
-def list_keywords():
-    return [keyword_output(row) for row in store.keywords()]
-
-
-@app.post("/api/v1/keywords", response_model=KeywordOutput, status_code=201)
-def create_keyword(payload: KeywordInput):
-    if keyword_name_exists(payload.name):
-        raise HTTPException(409, "A keyword with that name already exists")
-    source_ids = payload.source_ids or default_keyword_sources()
-    invalid = set(source_ids).difference(connectors)
-    if invalid:
-        raise HTTPException(422, f"Unknown sources: {', '.join(sorted(invalid))}")
-    now = utcnow()
-    row = store.create_keyword(
-        {
-            "name": payload.name.strip(),
-            "normalized_name": normalized(payload.name),
-            "include_terms": payload.include_terms,
-            "exclude_terms": payload.exclude_terms,
-            "source_ids": source_ids,
-            "enabled": payload.enabled,
-            "interval_minutes": payload.interval_minutes,
-            "max_items_per_source": payload.max_items_per_source,
-            "next_run_at": now + timedelta(minutes=payload.interval_minutes)
-            if payload.enabled
-            else None,
-            "created_at": now,
-            "updated_at": now,
-        }
-    )
-    return keyword_output(row)
-
-
-@app.patch("/api/v1/keywords/{keyword_id}", response_model=KeywordOutput)
-def update_keyword(keyword_id: int, payload: KeywordInput):
-    row = store.keyword(keyword_id)
-    if not row:
-        raise HTTPException(404, "Keyword not found")
-    if keyword_name_exists(payload.name, exclude_id=keyword_id):
-        raise HTTPException(409, "A keyword with that name already exists")
-    now = utcnow()
-    row = store.update_keyword(
-        keyword_id,
-        {
-            "name": payload.name.strip(),
-            "normalized_name": normalized(payload.name),
-            "include_terms": payload.include_terms,
-            "exclude_terms": payload.exclude_terms,
-            "source_ids": payload.source_ids or default_keyword_sources(),
-            "enabled": payload.enabled,
-            "interval_minutes": payload.interval_minutes,
-            "max_items_per_source": payload.max_items_per_source,
-            "next_run_at": now + timedelta(minutes=payload.interval_minutes)
-            if payload.enabled
-            else None,
-            "updated_at": now,
-        },
-    )
-    run_manager.rescore_keyword(keyword_id)
-    return keyword_output(row)
-
-
-@app.delete("/api/v1/keywords/{keyword_id}", status_code=204)
-async def delete_keyword(keyword_id: int):
-    if not await asyncio.to_thread(store.delete_keyword, keyword_id):
-        raise HTTPException(404, "Keyword not found")
-
-
 @app.post("/api/v1/runs", response_model=BatchOutput, status_code=202)
 async def create_run(payload: RunRequest):
     if not await asyncio.to_thread(store.keyword, payload.keyword_id):
         raise HTTPException(404, "Keyword not found")
     try:
         batch_id = await run_manager.start_batch(
-            payload.keyword_id, payload.trigger, payload.source_ids
+            payload.keyword_id,
+            payload.trigger,
+            payload.source_ids,
+            payload.channel_ids,
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -531,6 +485,7 @@ def list_items(
     sentiment: Literal["positive", "negative", "mixed", "neutral"] | None = None,
     topic: str | None = None,
     min_relevance: float = Query(default=0, ge=0, le=100),
+    session_id: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
@@ -542,6 +497,7 @@ def list_items(
         sentiment,
         topic,
         min_relevance,
+        session_id,
     )
     return PagedItems(
         total=len(outputs),
@@ -558,6 +514,7 @@ def insight_summary(
     sentiment: Literal["positive", "negative", "mixed", "neutral"] | None = None,
     topic: str | None = None,
     min_relevance: float = Query(default=0, ge=0, le=100),
+    session_id: str | None = None,
     top_limit: int = Query(default=5, ge=1, le=20),
 ):
     outputs = filtered_item_outputs(
@@ -568,6 +525,7 @@ def insight_summary(
         sentiment,
         topic,
         min_relevance,
+        session_id,
     )
     filters = {
         key: str(value)
@@ -578,6 +536,7 @@ def insight_summary(
             "sentiment": sentiment,
             "topic": topic,
             "min_relevance": min_relevance if min_relevance else None,
+            "session_id": session_id,
         }.items()
         if value is not None
     }
@@ -600,6 +559,7 @@ def insight_clusters(
     sentiment: Literal["positive", "negative", "mixed", "neutral"] | None = None,
     topic: str | None = None,
     min_relevance: float = Query(default=0, ge=0, le=100),
+    session_id: str | None = None,
     min_items: int = Query(default=2, ge=2, le=10),
     limit: int = Query(default=20, ge=1, le=50),
 ):
@@ -614,6 +574,7 @@ def insight_clusters(
         sentiment,
         topic,
         min_relevance,
+        session_id,
     )
     filters = {
         key: str(value)
@@ -624,6 +585,7 @@ def insight_clusters(
             "sentiment": sentiment,
             "topic": topic,
             "min_relevance": min_relevance if min_relevance else None,
+            "session_id": session_id,
             "min_items": min_items if min_items != 2 else None,
         }.items()
         if value is not None
@@ -675,6 +637,7 @@ def trends(keyword_id: int, limit: int = Query(default=10, ge=1, le=50)):
 def export_csv(
     keyword_id: int,
     source_id: str | None = None,
+    session_id: str | None = None,
     language: str | None = None,
     sentiment: Literal["positive", "negative", "mixed", "neutral"] | None = None,
     topic: str | None = None,
@@ -682,6 +645,7 @@ def export_csv(
     outputs = filtered_item_outputs(
         keyword_id,
         source_id=source_id,
+        session_id=session_id,
         language=language,
         sentiment=sentiment,
         topic=topic,
@@ -750,6 +714,7 @@ def export_csv(
 def export_json(
     keyword_id: int,
     source_id: str | None = None,
+    session_id: str | None = None,
     language: str | None = None,
     sentiment: Literal["positive", "negative", "mixed", "neutral"] | None = None,
     topic: str | None = None,
@@ -757,6 +722,7 @@ def export_json(
     outputs = filtered_item_outputs(
         keyword_id,
         source_id=source_id,
+        session_id=session_id,
         language=language,
         sentiment=sentiment,
         topic=topic,
@@ -1047,6 +1013,74 @@ def transform_subtitle_timeline_v2_endpoint(req: SubtitleTransformRequestV2):
     )
 
 
+@app.post(
+    "/api/v1/subtitles/v2/generate/gemini",
+    response_model=SubtitleJobResponse,
+)
+def generate_subtitles_with_gemini_endpoint(req: GeminiSubtitleRequest):
+    if not settings.content_bot_gemini_cli_enabled:
+        raise HTTPException(status_code=503, detail="Gemini CLI subtitle worker is disabled")
+    input_path = _uploaded_video_path(req.video_id)
+    try:
+        media = probe_media_cached(
+            input_path,
+            settings.data_dir / "cache" / "media-probes",
+            timeout_seconds=settings.content_bot_media_probe_timeout_seconds,
+        )
+    except MediaProbeError as exc:
+        raise HTTPException(status_code=422, detail="Could not probe video metadata") from exc
+    if not media.get("has_audio"):
+        raise HTTPException(status_code=422, detail="Video has no audio track")
+
+    options = req.options.model_dump(mode="json")
+    dedupe_key = gemini_generation_cache_key(
+        media,
+        options,
+        model=settings.content_bot_gemini_cli_model,
+    )
+
+    def run_generation_job(context):
+        try:
+            return gemini_subtitle_service.generate(input_path, media, options, context)
+        except GeminiSubtitleCanceled as exc:
+            raise SubtitleJobCanceled(str(exc)) from exc
+
+    return gemini_subtitle_jobs.submit("generation", dedupe_key, run_generation_job)
+
+
+@app.get("/api/v1/subtitles/gemini/status")
+def get_gemini_cli_status():
+    if not settings.content_bot_gemini_cli_enabled:
+        return {"installed": False, "authenticated": False}
+    return gemini_subtitle_service.status()
+
+
+@app.get(
+    "/api/v1/subtitles/gemini/jobs/{job_id}",
+    response_model=SubtitleJobResponse,
+)
+def get_gemini_subtitle_job(job_id: str):
+    if not re.fullmatch(r"[a-f0-9]{20}", job_id):
+        raise HTTPException(status_code=422, detail="Invalid subtitle job id")
+    job = gemini_subtitle_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Gemini subtitle job not found")
+    return job
+
+
+@app.post(
+    "/api/v1/subtitles/gemini/jobs/{job_id}/cancel",
+    response_model=SubtitleJobResponse,
+)
+def cancel_gemini_subtitle_job(job_id: str):
+    if not re.fullmatch(r"[a-f0-9]{20}", job_id):
+        raise HTTPException(status_code=422, detail="Invalid subtitle job id")
+    job = gemini_subtitle_jobs.cancel(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Gemini subtitle job not found")
+    return job
+
+
 @app.post("/api/v1/subtitles/v2/align", response_model=SubtitleJobResponse)
 def align_subtitle_timeline_v2_endpoint(req: SubtitleAlignmentRequest):
     input_path = _uploaded_video_path(req.video_id)
@@ -1119,6 +1153,41 @@ def align_subtitle_timeline_v2_endpoint(req: SubtitleAlignmentRequest):
     return subtitle_jobs.submit("alignment", dedupe_key, run_alignment_job)
 
 
+@app.post(
+    "/api/v1/subtitles/v2/preview-ass",
+    response_model=SubtitleAssPreviewResponse,
+)
+def preview_subtitle_timeline_v2_endpoint(req: SubtitleAssPreviewRequestV2):
+    input_path = _uploaded_video_path(req.video_id)
+    try:
+        media = probe_media_cached(
+            input_path,
+            settings.data_dir / "cache" / "media-probes",
+            timeout_seconds=settings.content_bot_media_probe_timeout_seconds,
+        )
+    except MediaProbeError as exc:
+        raise HTTPException(status_code=422, detail="Could not probe video metadata") from exc
+
+    options = req.options.model_dump(mode="json")
+    cues = [segment.model_dump(mode="json") for segment in req.document.segments]
+    if options.get("uppercase"):
+        for cue in cues:
+            cue["text"] = str(cue["text"]).upper()
+            if cue.get("secondary_text"):
+                cue["secondary_text"] = str(cue["secondary_text"]).upper()
+    play_res_x, play_res_y = subtitle_play_resolution(media, options)
+    return SubtitleAssPreviewResponse(
+        ass=subtitles_to_ass(
+            cues,
+            options,
+            play_res_x=play_res_x,
+            play_res_y=play_res_y,
+        ),
+        play_res_x=play_res_x,
+        play_res_y=play_res_y,
+    )
+
+
 @app.post("/api/v1/subtitles/v2/render", response_model=SubtitleJobResponse)
 def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
     input_path = _uploaded_video_path(req.video_id)
@@ -1134,6 +1203,7 @@ def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
     document_data = req.document.model_dump(mode="json")
     options_data = req.options.model_dump(mode="json")
     overlay_data = req.overlay.model_dump(mode="json") if req.overlay else None
+    masks_data = [mask.model_dump(mode="json") for mask in req.masks]
     overlay_path = None
     if req.overlay:
         try:
@@ -1148,6 +1218,7 @@ def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
         media,
         options_data,
         overlay_data,
+        masks_data,
     )
     fonts_dir = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo"
 
@@ -1163,6 +1234,7 @@ def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
                 fonts_dir=fonts_dir,
                 overlay_path=overlay_path,
                 overlay=overlay_data,
+                masks=masks_data,
                 cancel_event=context.cancel_event,
                 progress=context.update,
                 timeout_seconds=settings.content_bot_subtitle_render_timeout_seconds,
@@ -1315,7 +1387,20 @@ def list_videos():
         # We only look for known video sources
         scraped = (
             store.db.content_items.find(
-                {"source_id": {"$in": ["youtube", "dy", "xhs", "ks", "bili"]}}
+                {
+                    "source_id": {
+                        "$in": [
+                            "youtube",
+                            "douyin",
+                            "dy",
+                            "xhs",
+                            "kuaishou",
+                            "ks",
+                            "bilibili",
+                            "bili",
+                        ]
+                    }
+                }
             )
             .sort("published_at", -1)
             .limit(50)
@@ -1340,9 +1425,9 @@ def list_videos():
                 thumb_url = medium.get("url", "") if isinstance(medium, dict) else ""
                 if not thumb_url:
                     thumb_url = f"https://i.ytimg.com/vi/{ext_id}/hqdefault.jpg"
-            elif source == "bili":
+            elif source in {"bilibili", "bili"}:
                 thumb_url = raw_payload.get("pic", "")
-            elif source == "dy" or source == "ks" or source == "xhs":
+            elif source in {"douyin", "dy", "kuaishou", "ks", "xhs"}:
                 # MediaCrawler saves cover URLs in raw_payload
                 video_payload = raw_payload.get("video")
                 cover_payload = (

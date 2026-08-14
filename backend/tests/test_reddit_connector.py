@@ -1,7 +1,9 @@
 import asyncio
 
-from app.services import connectors
+from app.crawlers.runtime import IdentityPseudonymizer
+from app.services import channel_scans, connectors
 from app.services.connectors import RedditConnector, SearchQuery
+from app.services.reddit_oauth import reddit_token_cache
 
 
 class FakeResponse:
@@ -61,10 +63,16 @@ class FakeRedditClient:
 
 
 def test_reddit_search_parses_public_submission(monkeypatch) -> None:
+    reddit_token_cache.invalidate()
     client = FakeRedditClient()
     monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
     monkeypatch.setattr(connectors.settings, "reddit_client_id", "client-id")
     monkeypatch.setattr(connectors.settings, "reddit_client_secret", "client-secret")
+    monkeypatch.setattr(
+        RedditConnector,
+        "_pseudonymizer",
+        staticmethod(lambda: IdentityPseudonymizer(b"k" * 32)),
+    )
 
     async def collect():
         return [
@@ -81,9 +89,63 @@ def test_reddit_search_parses_public_submission(monkeypatch) -> None:
     assert rows[0].canonical_url == "https://www.reddit.com/r/gaming/comments/abc123/hades_ii_is_excellent/"
     assert rows[0].metrics == {"like_count": 42, "comment_count": 7}
     assert rows[0].hashtags == ["#Discussion"]
+    assert rows[0].author.startswith("reddit_")
+    assert "player_one" not in repr(rows[0])
     assert rows[0].raw_payload["subreddit"] == "gaming"
-    assert client.calls[0][0] == "https://api.reddit.com/api/v1/access_token"
+    assert rows[0].raw_payload["score"] == 42
+    assert client.calls[0][0] == "https://www.reddit.com/api/v1/access_token"
     assert client.calls[1][0] == "https://oauth.reddit.com/search"
     assert client.calls[1][1]["q"] == "Hades II"
     assert client.calls[1][1]["type"] == "link"
     assert client.headers["Authorization"] == "Bearer reddit-test-token"
+
+
+def test_reddit_keyword_and_channel_share_token_cache_and_privacy(monkeypatch) -> None:
+    reddit_token_cache.invalidate()
+    client = FakeRedditClient()
+    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors.settings, "reddit_client_id", "client-id")
+    monkeypatch.setattr(connectors.settings, "reddit_client_secret", "client-secret")
+    monkeypatch.setattr(
+        RedditConnector,
+        "_pseudonymizer",
+        staticmethod(lambda: IdentityPseudonymizer(b"k" * 32)),
+    )
+
+    async def collect():
+        keyword_rows = [
+            item
+            async for item in RedditConnector().search(
+                SearchQuery(
+                    keyword_id=1,
+                    name="Hades II",
+                    include_terms=[],
+                    max_items=1,
+                )
+            )
+        ]
+        channel_rows = [
+            item
+            async for item in channel_scans._scan_reddit(
+                {"url": "https://www.reddit.com/r/gaming/"},
+                SearchQuery(
+                    keyword_id=1,
+                    name="Hades II",
+                    include_terms=[],
+                    max_items=1,
+                ),
+            )
+        ]
+        return keyword_rows, channel_rows
+
+    keyword_rows, channel_rows = asyncio.run(collect())
+
+    assert len(keyword_rows) == len(channel_rows) == 1
+    assert keyword_rows[0].author == channel_rows[0].author
+    assert keyword_rows[0].metrics == channel_rows[0].metrics
+    assert channel_rows[0].raw_payload["score"] == 42
+    assert "player_one" not in repr(channel_rows[0])
+    assert [call[0] for call in client.calls].count(
+        "https://www.reddit.com/api/v1/access_token"
+    ) == 1
+    assert client.calls[-1][0] == "https://oauth.reddit.com/r/gaming/new"

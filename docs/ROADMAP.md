@@ -21,8 +21,8 @@ This roadmap separates code presence from verified collection. A source is only 
 | Filtered insight summary | Dashboard live verified | The API and workbench show source/language/sentiment/topic/signal distributions and top rising items from exactly the same filtered sample as the item table; Vietnamese + negative returned 3 items in both views. |
 | Cross-source story clusters | Dashboard baseline live verified | Conservative title/link grouping is exposed through the filtered insight API and the Workbench. The UI presents member-level sources, item hosts and match reasons, with accessible loading, empty and retry states. Specific article links and strong cross-origin title evidence qualify; homepages/product links do not. Current stored Wukong and Hades II samples correctly return no unsupported clusters, including repeated generic Steam review titles; a positive live-source story remains to be accepted without relaxing those controls. |
 | CSV / JSON export | Implemented | Exports use the same filtered items stored in the active MongoDB backend. |
-| MongoDB backup, restore and retention pruning | Implemented | Launcher commands use JSON backup/restore and preview/apply retention pruning; legacy SQLite scripts refuse to run when MongoDB is configured. |
-| Delete all local data | Implemented | The launcher requires explicit confirmation and a stopped API, then deletes only the validated workspace data directory (including browser profiles and backups). |
+| MongoDB backup, restore and retention pruning | Implemented | Dedicated MongoDB scripts provide JSON backup/restore and preview/apply retention pruning. |
+| Delete all local data | Implemented | The maintenance script requires explicit confirmation and a stopped API, then deletes only the validated workspace data directory (including browser profiles and backups). |
 
 ## Next milestones
 
@@ -30,7 +30,7 @@ This roadmap separates code presence from verified collection. A source is only 
 
 - Run one platform at a time; never launch seven login flows together.
 - From the dashboard, select the game, open **Sources**, and click **Login & scan** on exactly one platform. **Run now** intentionally submits public sources only.
-- Use the launcher's **Scan one source** action so the acceptance run is isolated, reports progress and cancels on timeout.
+- Use the dashboard's **Scan source** action so the acceptance run is isolated, reports progress and cancels on timeout.
 - Do not configure Chrome remote debugging or port 9222; Content Bot owns a separate visible profile under `data/browser-profile/<platform>`.
 - Persist only the local browser profile selected by the user.
 - Verify QR/phone login, keyword results, cap enforcement, cancellation and a second run using the saved session.
@@ -42,7 +42,7 @@ Done when every enabled MediaCrawler source has a real stored-item batch and a r
 
 - TikTok: use an approved Research/Display API capability if it supports the requested discovery scope; otherwise keep the source disabled.
 - Facebook and Instagram: use Graph API access owned or authorized by the user. Do not promise global keyword search when the granted API only supports owned pages/accounts or hashtag discovery.
-- Add credentials only through local environment variables; never store tokens in SQLite or browser-visible responses.
+- Add credentials only through local environment variables; never store tokens in MongoDB or browser-visible responses.
 - Add contract tests, rate-limit handling and a live acceptance batch per connector.
 
 Done when the registry truthfully reports the granted scope and each `ready` source has live evidence.
@@ -64,7 +64,7 @@ Done when a user can answer “what is trending around this game, where, and why
 - Add bounded retries with exponential backoff for 429 and transient 5xx responses.
 - Add per-source concurrency/rate budgets and a global run queue.
 - Add transactional MongoDB restore when the deployment supports replica-set transactions.
-- Remove legacy SQLite maintenance tooling after the MongoDB migration path is no longer needed.
+- Remove the final one-time SQLite import script after the migration support window ends.
 - Add structured logs and a diagnostics download with secrets and account identifiers redacted.
 
 Done when interrupted scans resume safely, failure causes are actionable and local data can be audited or removed.
@@ -72,9 +72,9 @@ Done when interrupted scans resume safely, failure causes are actionable and loc
 ### 5. Packaging
 
 - Keep the setup doctor current as dependencies change; Python, Node, MediaCrawler, active Chromium launch, ports, optional keys, API health and source states are covered.
-- Package the production frontend and API behind one local command; the development launcher already avoids reload workers and duplicate listeners.
+- Package the production frontend and API behind one local command; the VS Code compound task already starts both foreground development processes in parallel.
 - Automate Windows clean-install smoke tests; second launch and scoped shutdown have been manually verified.
-- Keep the workspace-scoped API state/stop workflow covered as the launcher evolves.
+- Keep task cancellation and orphan-free shutdown covered as the launcher evolves.
 - Document upgrade steps for the MediaCrawler submodule and its isolated environment.
 
 Done when a clean Windows machine can install, scan a public source and export results from one documented workflow.

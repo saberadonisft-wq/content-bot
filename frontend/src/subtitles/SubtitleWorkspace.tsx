@@ -15,6 +15,7 @@ import {
   useState,
 } from "react";
 import type { SubtitleBurnOptions } from "../api";
+import { LibassPreview } from "./LibassPreview";
 import { PlaybackClock } from "./PlaybackClock";
 import { usePlaybackDuration, usePlaybackSnapshot } from "./playback-hooks";
 import { PreviewStage } from "./PreviewStage";
@@ -27,6 +28,7 @@ import {
   type OverlayLayout,
   type PreviewMode,
   type SubtitleCueV2,
+  type SubtitleMaskRegion,
 } from "./types";
 
 type SubtitleTransportProps = {
@@ -207,18 +209,24 @@ type SubtitleWorkspaceProps = {
   renderedVideoUrl: string | null;
   thumbnailCacheKey: string | null;
   media: MediaMetadata | null;
+  liveAssContent: string | null;
   cues: readonly SubtitleCueV2[];
   selectedCueId: string | null;
   options: SubtitleBurnOptions;
   overlayImage: string | null;
   overlayName: string;
   overlayLayout: OverlayLayout;
+  subtitleMasks: readonly SubtitleMaskRegion[];
+  selectedMaskId: string | null;
   onDurationChange: (durationMs: number) => void;
   onSelectCue: (cueId: string | null) => void;
   onUpdateCueText: (cueId: string, text: string) => void;
   onCueTimingCommit: (cueId: string, startMs: number, endMs: number) => void;
   onOptionsChange: (options: SubtitleBurnOptions) => void;
   onOverlayLayoutChange: (layout: OverlayLayout) => void;
+  onSelectMask: (maskId: string | null) => void;
+  onMaskChange: (maskId: string, patch: Partial<SubtitleMaskRegion>) => void;
+  onMaskDelete: (maskId: string) => void;
 };
 
 const seekVideo = (video: HTMLVideoElement, seconds: number) => {
@@ -239,23 +247,31 @@ export const SubtitleWorkspace = forwardRef<
   renderedVideoUrl,
   thumbnailCacheKey,
   media,
+  liveAssContent,
   cues,
   selectedCueId,
   options,
   overlayImage,
   overlayName,
   overlayLayout,
+  subtitleMasks,
+  selectedMaskId,
   onDurationChange,
   onSelectCue,
   onUpdateCueText,
   onCueTimingCommit,
   onOptionsChange,
   onOverlayLayoutChange,
+  onSelectMask,
+  onMaskChange,
+  onMaskDelete,
 }: SubtitleWorkspaceProps, ref) {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [clock] = useState(() => new PlaybackClockStore());
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
+  const [libassHost, setLibassHost] = useState<HTMLDivElement | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("live");
+  const [libassReady, setLibassReady] = useState(false);
   const [pixelsPerSecond, setPixelsPerSecond] = useState(42);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const durationMs = usePlaybackDuration(clock);
@@ -318,15 +334,27 @@ export const SubtitleWorkspace = forwardRef<
         store={clock}
         onDurationChange={handleDurationChange}
       />
+      <LibassPreview
+        video={videoElement}
+        host={libassHost}
+        assContent={liveAssContent}
+        enabled={effectivePreviewMode === "live"}
+        onReadyChange={setLibassReady}
+      />
       <PreviewStage
+        videoElement={videoElement}
         videoUrl={activeVideoUrl}
         previewMode={effectivePreviewMode}
+        libassActive={Boolean(liveAssContent) && libassReady}
+        onLibassHostElementChange={setLibassHost}
         cues={cues}
         selectedCueId={selectedCueId}
         options={options}
         overlayImage={overlayImage}
         overlayName={overlayName}
         overlayLayout={overlayLayout}
+        subtitleMasks={subtitleMasks}
+        selectedMaskId={selectedMaskId}
         clock={clock}
         onVideoElementChange={handleVideoElementChange}
         onTogglePlay={handleTogglePlay}
@@ -334,6 +362,9 @@ export const SubtitleWorkspace = forwardRef<
         onUpdateCueText={onUpdateCueText}
         onOptionsCommit={onOptionsChange}
         onOverlayLayoutCommit={onOverlayLayoutChange}
+        onSelectMask={onSelectMask}
+        onMaskChange={onMaskChange}
+        onMaskDelete={onMaskDelete}
       />
       <SubtitleTransport
         clock={clock}

@@ -70,6 +70,8 @@ def test_source_registry_discloses_setup_state() -> None:
     assert {"youtube", "web", "steam", "bluesky", "xhs", "tiktok"}.issubset(sources)
     assert sources["bluesky"]["state"] == "ready"
     assert sources["xhs"]["state"] in {"ready", "setup_required", "not_configured"}
+    assert sources["tiktok"]["primary_operation"] == "scan_channel"
+    assert sources["x"]["primary_operation"] == "render_embed"
 
 
 def test_empty_source_selection_defaults_to_public_no_login_sources() -> None:

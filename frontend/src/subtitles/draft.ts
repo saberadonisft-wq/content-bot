@@ -1,6 +1,7 @@
 import type { SubtitleBurnOptions, SubtitleCueV2 } from "../api";
 import { normalizeOverlayLayout } from "./overlay";
-import type { OverlayLayout } from "./types";
+import { normalizeSubtitleMasks } from "./masks";
+import type { OverlayLayout, SubtitleMaskRegion } from "./types";
 
 export type SavedSubtitleDraft = {
   version: 2;
@@ -10,12 +11,14 @@ export type SavedSubtitleDraft = {
   rawText: string;
   cues: SubtitleCueV2[];
   selectedCueId: string | null;
+  activeGeminiJobId: string | null;
   activeAlignmentJobId: string | null;
   activeRenderJobId: string | null;
   options: SubtitleBurnOptions;
   overlayId: string | null;
   overlayName: string;
   overlayLayout: OverlayLayout;
+  subtitleMasks: SubtitleMaskRegion[];
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -153,6 +156,8 @@ export const normalizeSavedDraft = (
     rawText: typeof value.rawText === "string" ? value.rawText.slice(0, 500_000) : "",
     cues,
     selectedCueId,
+    activeGeminiJobId:
+      typeof value.activeGeminiJobId === "string" ? value.activeGeminiJobId : null,
     activeAlignmentJobId:
       typeof value.activeAlignmentJobId === "string" ? value.activeAlignmentJobId : null,
     activeRenderJobId:
@@ -167,6 +172,7 @@ export const normalizeSavedDraft = (
         ? value.overlayName.trim().slice(0, 255)
         : "",
     overlayLayout: normalizeOverlayLayout(value.overlayLayout),
+    subtitleMasks: normalizeSubtitleMasks(value.subtitleMasks),
   };
 };
 

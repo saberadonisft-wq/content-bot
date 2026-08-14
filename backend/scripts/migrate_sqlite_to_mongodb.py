@@ -9,7 +9,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import settings
 from app.mongo import store
 from app.services.text import normalized
 
@@ -47,16 +46,6 @@ JSON_FIELDS = {
 }
 
 
-def sqlite_path() -> Path:
-    prefix = "sqlite:///"
-    if not settings.content_bot_database_url.startswith(prefix):
-        raise RuntimeError("CONTENT_BOT_DATABASE_URL must point to the source SQLite database")
-    path = Path(settings.content_bot_database_url[len(prefix) :])
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[1] / path
-    return path.resolve()
-
-
 def parse_datetime(value):
     if not value or isinstance(value, datetime):
         return value
@@ -80,10 +69,16 @@ def transform(table: str, raw: sqlite3.Row) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Copy the configured SQLite data into MongoDB Atlas")
+    parser = argparse.ArgumentParser(description="One-time import of a legacy SQLite database into MongoDB Atlas")
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=Path(__file__).resolve().parents[2] / "data" / "content-bot.db",
+        help="Legacy SQLite file (default: data/content-bot.db)",
+    )
     parser.add_argument("--replace", action="store_true", help="Replace existing documents with the same IDs")
     args = parser.parse_args()
-    source = sqlite_path()
+    source = args.source.resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
     store.initialize()

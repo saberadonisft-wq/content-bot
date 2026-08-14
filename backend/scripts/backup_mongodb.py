@@ -19,6 +19,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Create a Content Bot MongoDB backup.")
     parser.add_argument("--destination", required=True, type=Path, help="Destination JSON backup file")
     args = parser.parse_args()
+    store.initialize()
     if not settings.mongodb_uri or not store.is_available:
         raise RuntimeError("MongoDB is not available; refusing to create an incomplete backup.")
 

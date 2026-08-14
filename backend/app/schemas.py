@@ -7,11 +7,27 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, StrictInt, model_validator
 
 
+class ChannelSubscription(BaseModel):
+    id: str | None = None
+    url: str = Field(min_length=8, max_length=2048)
+    normalized_url: str | None = None
+    label: str = Field(default="", max_length=120)
+    source_id: str | None = None
+    mode: str | None = None
+    enabled: bool = True
+    include_replies: bool = False
+    include_reposts: bool = False
+    last_scanned_at: datetime | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+
+
 class KeywordInput(BaseModel):
     name: str = Field(min_length=2, max_length=180)
     include_terms: list[str] = Field(default_factory=list, max_length=50)
     exclude_terms: list[str] = Field(default_factory=list, max_length=50)
     source_ids: list[str] = Field(default_factory=list, max_length=20)
+    channels: list[ChannelSubscription] = Field(default_factory=list, max_length=100)
     enabled: bool = True
     interval_minutes: int = Field(default=360, ge=30, le=10080)
     max_items_per_source: int = Field(default=500, ge=1, le=500)
@@ -27,24 +43,37 @@ class KeywordOutput(KeywordInput):
 class RunRequest(BaseModel):
     keyword_id: int
     source_ids: list[str] | None = None
+    channel_ids: list[str] | None = None
     trigger: Literal["manual", "schedule"] = "manual"
 
 
 class SourceOutput(BaseModel):
+    schema_version: str = "cbce.source-catalog.v1"
     id: str
     label: str
     group: str
+    order: int = 0
+    primary_operation: str = "search"
     state: str
     detail: str
     global_search: bool
     watchlist_filter: bool
     requires_login: bool
     interaction_fields: list[str]
+    metrics: list[dict[str, Any]] = Field(default_factory=list)
+    legacy_aliases: list[str] = Field(default_factory=list)
+    provider_selection: list[str] = Field(default_factory=list)
+    operations: list[dict[str, Any]] = Field(default_factory=list)
+    health_summary: dict[str, Any] = Field(default_factory=dict)
+    coverage_disclaimer: str | None = None
 
 
 class SourceRunOutput(BaseModel):
     id: str
     source_id: str
+    channel_id: str | None = None
+    channel_url: str | None = None
+    channel_label: str | None = None
     state: str
     phase: str = "queued"
     progress_mode: Literal["determinate", "indeterminate"] = "determinate"
@@ -53,6 +82,11 @@ class SourceRunOutput(BaseModel):
     progress_percent: float | None = None
     message: str | None = None
     browser_state: str | None = None
+    provider_id: str | None = None
+    operation: str | None = None
+    error_code: str | None = None
+    retryable: bool | None = None
+    retry_after_seconds: float | None = None
     fetched_count: int
     ingested_count: int
     started_at: datetime | None
@@ -65,6 +99,8 @@ class BatchOutput(BaseModel):
     id: str
     keyword_id: int
     trigger: str
+    session_number: int = 1
+    new_item_count: int = 0
     state: str
     started_at: datetime | None
     finished_at: datetime | None
@@ -408,6 +444,37 @@ class SubtitleOverlayRenderOptions(BaseModel):
     width: float = Field(default=22, ge=4, le=90)
 
 
+class SubtitleMaskRegion(BaseModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    shape: Literal["rectangle", "rounded", "ellipse", "band"] = "rectangle"
+    effect: Literal["blur", "pixelate", "solid", "darken"] = "blur"
+    x: float = Field(default=20, ge=0, le=100)
+    y: float = Field(default=72, ge=0, le=100)
+    width: float = Field(default=60, ge=4, le=100)
+    height: float = Field(default=12, ge=3, le=100)
+    strength: float = Field(default=22, ge=1, le=40)
+    opacity: float = Field(default=1, ge=0.05, le=1)
+    feather: float = Field(default=2, ge=0, le=20)
+    corner_radius: float = Field(
+        default=14,
+        ge=0,
+        le=50,
+        validation_alias="cornerRadius",
+    )
+    color: str = Field(default="#000000", pattern=r"^#[0-9A-Fa-f]{6}$")
+
+    @model_validator(mode="after")
+    def validate_mask_bounds(self) -> SubtitleMaskRegion:
+        if self.shape == "band":
+            self.x = 0
+            self.width = 100
+        if self.x + self.width > 100.000_001:
+            raise ValueError("Mask width exceeds the video frame")
+        if self.y + self.height > 100.000_001:
+            raise ValueError("Mask height exceeds the video frame")
+        return self
+
+
 class SubtitleAlignmentOptions(BaseModel):
     engine: Literal["auto", "energy", "faster_whisper"] = "auto"
     lead_in_ms: StrictInt = Field(default=60, ge=0, le=1000)
@@ -434,9 +501,18 @@ class SubtitleAlignmentRequest(BaseModel):
         return self
 
 
+class GeminiSubtitleOptions(BaseModel):
+    bilingual: bool = True
+
+
+class GeminiSubtitleRequest(BaseModel):
+    video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
+    options: GeminiSubtitleOptions = Field(default_factory=GeminiSubtitleOptions)
+
+
 class SubtitleJobResponse(BaseModel):
     id: str = Field(pattern=r"^[a-f0-9]{20}$")
-    kind: Literal["alignment", "render"]
+    kind: Literal["alignment", "generation", "render"]
     dedupe_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: Literal["queued", "running", "succeeded", "failed", "canceled"]
     progress: StrictInt = Field(ge=0, le=100)
@@ -505,12 +581,26 @@ class SubtitleRenderRequestV2(BaseModel):
     document: SubtitleDocumentV2
     options: SubtitleRenderOptionsV2 = Field(default_factory=SubtitleRenderOptionsV2)
     overlay: SubtitleOverlayRenderOptions | None = None
+    masks: list[SubtitleMaskRegion] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
     def require_subtitles(self) -> SubtitleRenderRequestV2:
         if not self.document.segments:
             raise ValueError("At least one subtitle cue is required")
         return self
+
+
+class SubtitleAssPreviewRequestV2(BaseModel):
+    video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
+    document: SubtitleDocumentV2
+    options: SubtitleRenderOptionsV2 = Field(default_factory=SubtitleRenderOptionsV2)
+
+
+class SubtitleAssPreviewResponse(BaseModel):
+    ass: str
+    play_res_x: int = Field(gt=0)
+    play_res_y: int = Field(gt=0)
+    timing_precision_ms: Literal[10] = 10
 
 
 class SubtitleItem(BaseModel):

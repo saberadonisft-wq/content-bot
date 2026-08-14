@@ -5,6 +5,8 @@ import path from "node:path";
 
 const chromePath = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const port = 9333;
+const appUrl = process.env.SUBTITLE_AUDIT_URL ?? "http://127.0.0.1:5173/?view=subtitles";
+const videoId = process.env.SUBTITLE_AUDIT_VIDEO_ID ?? null;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 class CdpClient {
@@ -47,7 +49,7 @@ const evaluate = async (client, expression) => {
 const text = "KHẢ KHẢ, TRÀ TRÀ, SAO CÁC CẬU LẠI...";
 const draft = {
   version: 2,
-  videoId: null,
+  videoId,
   projectName: "Đo đồng bộ preview/render",
   mediaDurationMs: 5000,
   rawText: "",
@@ -142,7 +144,7 @@ try {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await client.send("Page.navigate", { url: "http://127.0.0.1:5173/?view=subtitles" });
+  await client.send("Page.navigate", { url: appUrl });
   await delay(1000);
   await evaluate(
     client,
@@ -158,6 +160,7 @@ try {
     const overlayRect = overlay.getBoundingClientRect();
     const copyRect = copy.getBoundingClientRect();
     const style = getComputedStyle(overlay);
+    const libassCanvas = document.querySelector('canvas.JASSUB');
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
     context.font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(' ');
@@ -188,6 +191,13 @@ try {
         descent: textMetrics.actualBoundingBoxDescent,
       },
       fontsReady: document.fonts.status,
+      libass: libassCanvas ? {
+        active: true,
+        width: libassCanvas.width,
+        height: libassCanvas.height,
+        cssWidth: libassCanvas.getBoundingClientRect().width,
+        cssHeight: libassCanvas.getBoundingClientRect().height,
+      } : { active: false },
     };
   })()`);
   if (!metrics) throw new Error("Không đo được phụ đề preview.");

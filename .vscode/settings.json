@@ -1,0 +1,38 @@
+{
+  "files.exclude": {
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true,
+    "**/__pycache__": true,
+    "artifacts": true
+  },
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.pytest_cache/**": true,
+    "**/.ruff_cache/**": true,
+    "**/__pycache__/**": true,
+    "backend/.venv/**": true,
+    "frontend/node_modules/**": true,
+    "frontend/dist/**": true,
+    "vendor/mediacrawler/.venv/**": true,
+    "data/**": true,
+    "artifacts/**": true
+  },
+  "search.exclude": {
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true,
+    "**/__pycache__": true,
+    "backend/.venv": true,
+    "frontend/node_modules": true,
+    "frontend/dist": true,
+    "vendor/mediacrawler/.venv": true,
+    "data": true,
+    "artifacts": true
+  },
+  "python.analysis.exclude": [
+    "**/.pytest_cache/**",
+    "backend/.venv/**",
+    "vendor/mediacrawler/.venv/**",
+    "data/**",
+    "artifacts/**"
+  ]
+}

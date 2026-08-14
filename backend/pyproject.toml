@@ -10,22 +10,21 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi==0.141.1",
   "uvicorn[standard]==0.52.0",
-  "sqlalchemy==2.0.51",
   "pymongo==4.17.0",
   "httpx==0.28.1",
+  "cryptography==46.0.5",
   "pydantic-settings==2.14.2",
   "imageio-ffmpeg==0.6.0",
-  "ffmpeg-python==0.2.0",
   "python-multipart==0.0.32",
 ]
 
 [project.optional-dependencies]
-web = ["crawl4ai>=0.9,<1"]
 alignment = ["faster-whisper==1.2.1"]
+browser = ["playwright==1.61.0"]
 dev = ["pytest==8.4.2", "pytest-asyncio==0.26.0", "ruff==0.16.1", "mongomock==4.3.0"]
 
-[tool.setuptools]
-packages = ["app", "app.services"]
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -25,7 +25,7 @@ from .subtitles import (
     subtitles_to_srt,
 )
 
-PRECISION_RENDERER_VERSION = "2026-08-subtitle-v2.3"
+PRECISION_RENDERER_VERSION = "2026-08-subtitle-v3.4-mask-roi"
 SRT_PLAYRES_X = 384
 SRT_PLAYRES_Y = 288
 RenderProgress = Callable[[int, str, str], None]
@@ -62,6 +62,7 @@ def precision_render_cache_key(
     media: dict[str, Any],
     options: dict[str, Any],
     overlay: dict[str, Any] | None = None,
+    masks: list[dict[str, Any]] | None = None,
 ) -> str:
     payload = {
         "renderer": PRECISION_RENDERER_VERSION,
@@ -70,6 +71,7 @@ def precision_render_cache_key(
         "document": document,
         "options": options,
         "overlay": overlay,
+        "masks": masks or [],
     }
     encoded = json.dumps(
         payload,
@@ -287,12 +289,240 @@ def _target_dimensions(
     return (1920, 1080) if large else (1280, 720)
 
 
+def subtitle_play_resolution(
+    media: dict[str, Any], options: dict[str, Any]
+) -> tuple[int, int]:
+    """Return a 720p-relative ASS canvas matching the final display aspect."""
+    target = _target_dimensions(media, str(options.get("aspect_ratio", "original")))
+    output_width = target[0] if target else int(media["width"])
+    output_height = target[1] if target else int(media["height"])
+    play_res_y = SUBTITLE_DESIGN_HEIGHT
+    play_res_x = max(1, round(play_res_y * output_width / max(1, output_height)))
+    return play_res_x, play_res_y
+
+
+def _mask_pixel_geometry(
+    mask: dict[str, Any],
+    output_width: int,
+    output_height: int,
+) -> tuple[int, int, int, int]:
+    """Convert percentage geometry to an even-aligned source-frame ROI."""
+    maximum_x = max(2, output_width - output_width % 2)
+    maximum_y = max(2, output_height - output_height % 2)
+    left = round(output_width * float(mask.get("x", 20)) / 100)
+    top = round(output_height * float(mask.get("y", 72)) / 100)
+    right = round(
+        output_width
+        * (float(mask.get("x", 20)) + float(mask.get("width", 60)))
+        / 100
+    )
+    bottom = round(
+        output_height
+        * (float(mask.get("y", 72)) + float(mask.get("height", 12)))
+        / 100
+    )
+    left = max(0, min(maximum_x - 2, left - left % 2))
+    top = max(0, min(maximum_y - 2, top - top % 2))
+    right = max(left + 2, min(maximum_x, right + right % 2))
+    bottom = max(top + 2, min(maximum_y, bottom + bottom % 2))
+    return left, top, right - left, bottom - top
+
+
+def _expanded_mask_roi(
+    geometry: tuple[int, int, int, int],
+    output_width: int,
+    output_height: int,
+    padding: int,
+) -> tuple[int, int, int, int]:
+    x, y, width, height = geometry
+    maximum_x = max(2, output_width - output_width % 2)
+    maximum_y = max(2, output_height - output_height % 2)
+    left = max(0, x - padding)
+    top = max(0, y - padding)
+    right = min(maximum_x, x + width + padding)
+    bottom = min(maximum_y, y + height + padding)
+    left -= left % 2
+    top -= top % 2
+    right = min(maximum_x, right + right % 2)
+    bottom = min(maximum_y, bottom + bottom % 2)
+    return left, top, max(2, right - left), max(2, bottom - top)
+
+
+def _mask_shape_expression(
+    mask: dict[str, Any],
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+) -> str:
+    shape = str(mask.get("shape", "rectangle"))
+    right = x + width - 1
+    bottom = y + height - 1
+    if shape == "ellipse":
+        radius_x = max(0.5, width / 2)
+        radius_y = max(0.5, height / 2)
+        center_x = x + width / 2
+        center_y = y + height / 2
+        return (
+            f"lte(pow((X-{center_x:.3f})/{radius_x:.3f},2)+"
+            f"pow((Y-{center_y:.3f})/{radius_y:.3f},2),1)"
+        )
+    if shape == "rounded":
+        radius_percent = max(0.0, min(50.0, float(mask.get("corner_radius", 14))))
+        radius = max(0.5, min(width, height) * radius_percent / 100)
+        center_x = x + width / 2
+        center_y = y + height / 2
+        inner_x = max(0.0, width / 2 - radius)
+        inner_y = max(0.0, height / 2 - radius)
+        return (
+            "lte(hypot("
+            f"max(abs(X-{center_x:.3f})-{inner_x:.3f},0),"
+            f"max(abs(Y-{center_y:.3f})-{inner_y:.3f},0)),"
+            f"{radius:.3f})"
+        )
+    return f"between(X,{x},{right})*between(Y,{y},{bottom})"
+
+
+def _append_mask_filters(
+    graph_parts: list[str],
+    current_video: str,
+    masks: list[dict[str, Any]],
+    output_width: int,
+    output_height: int,
+) -> str:
+    for index, mask in enumerate(masks):
+        prefix = f"subtitle_mask_{index}"
+        strength = max(1.0, min(40.0, float(mask.get("strength", 14))))
+        effect = str(mask.get("effect", "blur"))
+        strength_multiplier = 1.5 if effect == "blur" else 1.0
+        scaled_strength = max(
+            0.25,
+            strength * strength_multiplier * output_height / 720,
+        )
+        opacity = (
+            1.0
+            if effect in {"blur", "pixelate"}
+            else max(0.05, min(1.0, float(mask.get("opacity", 1))))
+        )
+        feather = max(0.0, min(20.0, float(mask.get("feather", 2))))
+        scaled_feather = feather * output_height / 720
+        geometry = _mask_pixel_geometry(mask, output_width, output_height)
+        mask_x, mask_y, mask_width, mask_height = geometry
+        shape = str(mask.get("shape", "rectangle"))
+        color = (
+            str(mask.get("color", "#000000")).lstrip("#")
+            if effect == "solid"
+            else "000000"
+        )
+
+        # Rectangular fills need no frame split, crop, alpha plane or overlay.
+        if effect in {"solid", "darken"} and shape in {"rectangle", "band"} and feather == 0:
+            graph_parts.append(
+                f"{current_video}drawbox=x={mask_x}:y={mask_y}:"
+                f"w={mask_width}:h={mask_height}:"
+                f"color=0x{color}@{opacity:.4f}:t=fill[{prefix}_output]"
+            )
+            current_video = f"[{prefix}_output]"
+            continue
+
+        blur_padding = round(scaled_strength * 2) if effect == "blur" else 0
+        feather_padding = round(scaled_feather * 3) if scaled_feather > 0 else 0
+        roi_x, roi_y, roi_width, roi_height = _expanded_mask_roi(
+            geometry,
+            output_width,
+            output_height,
+            blur_padding + feather_padding,
+        )
+        local_x = mask_x - roi_x
+        local_y = mask_y - roi_y
+        graph_parts.append(
+            # Pin the shared source to a color format before the gray alpha
+            # branch, while cropping expensive filters to the selected ROI.
+            f"{current_video}format=yuv420p,split=2"
+            f"[{prefix}_base][{prefix}_roi_source]"
+        )
+        needs_alpha = shape not in {"rectangle", "band"} or scaled_feather > 0
+        split_count = 2 if needs_alpha else 1
+        crop_filter = (
+            f"[{prefix}_roi_source]crop={roi_width}:{roi_height}:{roi_x}:{roi_y}"
+        )
+        if split_count == 2:
+            graph_parts.append(
+                f"{crop_filter},split=2"
+                f"[{prefix}_effect_source][{prefix}_alpha_source]"
+            )
+        else:
+            graph_parts.append(f"{crop_filter}[{prefix}_effect_source]")
+
+        if effect == "pixelate":
+            block_size = max(2, round(scaled_strength))
+            small_width = max(1, roi_width // block_size)
+            small_height = max(1, roi_height // block_size)
+            graph_parts.append(
+                f"[{prefix}_effect_source]scale={small_width}:{small_height}:flags=neighbor,"
+                f"scale={roi_width}:{roi_height}:flags=neighbor[{prefix}_effect]"
+            )
+        elif effect in {"solid", "darken"}:
+            graph_parts.append(
+                f"[{prefix}_effect_source]drawbox=x=0:y=0:w=iw:h=ih:"
+                f"color=0x{color}:t=fill[{prefix}_effect]"
+            )
+        else:
+            graph_parts.append(
+                f"[{prefix}_effect_source]gblur=sigma={scaled_strength:.3f}"
+                f"[{prefix}_effect]"
+            )
+
+        if not needs_alpha:
+            patch_label = f"[{prefix}_effect]"
+            if roi_width != mask_width or roi_height != mask_height:
+                graph_parts.append(
+                    f"{patch_label}crop={mask_width}:{mask_height}:"
+                    f"{local_x}:{local_y}[{prefix}_patch]"
+                )
+                patch_label = f"[{prefix}_patch]"
+            graph_parts.append(
+                f"[{prefix}_base]{patch_label}overlay={mask_x}:{mask_y}:"
+                f"eof_action=pass:shortest=0:format=auto[{prefix}_output]"
+            )
+            current_video = f"[{prefix}_output]"
+            continue
+
+        shape_expression = _mask_shape_expression(
+            mask,
+            local_x,
+            local_y,
+            mask_width,
+            mask_height,
+        )
+        alpha_filter = (
+            f"[{prefix}_alpha_source]format=gray,"
+            f"geq=lum='255*{opacity:.4f}*({shape_expression})'"
+        )
+        if scaled_feather > 0:
+            alpha_filter += f",gblur=sigma={scaled_feather:.3f}"
+        graph_parts.append(f"{alpha_filter}[{prefix}_alpha]")
+        graph_parts.append(
+            f"[{prefix}_effect]format=rgba[{prefix}_rgba]"
+        )
+        graph_parts.append(
+            f"[{prefix}_rgba][{prefix}_alpha]alphamerge[{prefix}_masked]"
+        )
+        graph_parts.append(
+            f"[{prefix}_base][{prefix}_masked]overlay={roi_x}:{roi_y}:"
+            f"eof_action=pass:shortest=0:format=auto[{prefix}_output]"
+        )
+        current_video = f"[{prefix}_output]"
+    return current_video
+
+
 def _video_filter_graph(
     subtitle_path: Path,
     fonts_dir: Path,
     media: dict[str, Any],
     options: dict[str, Any],
     overlay: dict[str, Any] | None = None,
+    masks: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
     escaped_subtitle = _escape_filter_path(subtitle_path)
     escaped_fonts = _escape_filter_path(fonts_dir)
@@ -308,6 +538,18 @@ def _video_filter_graph(
     graph_parts: list[str] = []
     current_video = "[0:v]"
 
+    # Mask coordinates are percentages of the source frame shown in the editor.
+    # Apply them before any aspect-ratio padding/cropping so preview and export
+    # stay aligned even when the final canvas changes shape.
+    if masks:
+        current_video = _append_mask_filters(
+            graph_parts,
+            current_video,
+            masks,
+            int(media["width"]),
+            int(media["height"]),
+        )
+
     if target:
         width, height = target
         fill = str(options.get("bg_fill_type", "blur"))
@@ -315,7 +557,7 @@ def _video_filter_graph(
         if fill == "blur":
             graph_parts.extend(
                 [
-                    "[0:v]split=2[background_source][foreground_source]",
+                    f"{current_video}split=2[background_source][foreground_source]",
                     (
                         f"[background_source]scale={width}:{height}:"
                         "force_original_aspect_ratio=increase,"
@@ -328,7 +570,7 @@ def _video_filter_graph(
         else:
             pad_color = "black" if fill == "black" else f"0x{color}"
             graph_parts.append(
-                f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"{current_video}scale={width}:{height}:force_original_aspect_ratio=decrease,"
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={pad_color}[composed]"
             )
         current_video = "[composed]"
@@ -515,6 +757,7 @@ def render_precision_video(
     fonts_dir: Path,
     overlay_path: Path | None = None,
     overlay: dict[str, Any] | None = None,
+    masks: list[dict[str, Any]] | None = None,
     cancel_event: threading.Event | None = None,
     progress: RenderProgress | None = None,
     timeout_seconds: int = 7200,
@@ -527,7 +770,7 @@ def render_precision_video(
         raise SubtitleRenderError("Overlay path and layout must be provided together")
     if overlay_path is not None and not overlay_path.is_file():
         raise SubtitleRenderError("Overlay image does not exist")
-    cache_key = precision_render_cache_key(document, media, options, overlay)
+    cache_key = precision_render_cache_key(document, media, options, overlay, masks)
     output_duration_ms = _output_duration_ms(media, options)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_filename = f"subtitled_{video_id}_{cache_key[:12]}.mp4"
@@ -549,6 +792,7 @@ def render_precision_video(
                 "render_mode": render_mode,
                 "timing_precision_ms": 1 if render_mode == "precision" else 10,
                 "overlay_applied": overlay is not None,
+                "mask_count": len(masks or []),
             }
         except (MediaProbeError, OSError):
             final_output.unlink(missing_ok=True)
@@ -601,17 +845,14 @@ def render_precision_video(
             work_dir = Path(work)
             if render_mode == "effects":
                 subtitle_path = work_dir / "subtitles.ass"
-                effect_cues = [
-                    {
-                        "start_seconds": int(cue["start_ms"]) / 1000,
-                        "end_seconds": int(cue["end_ms"]) / 1000,
-                        "text": cue["text"],
-                        "secondary_text": cue.get("secondary_text"),
-                    }
-                    for cue in transformed
-                ]
+                play_res_x, play_res_y = subtitle_play_resolution(media, options)
                 subtitle_path.write_text(
-                    subtitles_to_ass(effect_cues, options),
+                    subtitles_to_ass(
+                        transformed,
+                        options,
+                        play_res_x=play_res_x,
+                        play_res_y=play_res_y,
+                    ),
                     encoding="utf-8",
                 )
             else:
@@ -625,6 +866,7 @@ def render_precision_video(
                 media,
                 options,
                 overlay,
+                masks,
             )
             audio_args, audio_copied = _audio_arguments(
                 media,
@@ -729,4 +971,5 @@ def render_precision_video(
         "render_mode": render_mode,
         "timing_precision_ms": 1 if render_mode == "precision" else 10,
         "overlay_applied": overlay is not None,
+        "mask_count": len(masks or []),
     }

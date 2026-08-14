@@ -23,6 +23,20 @@ describe("subtitle draft migration", () => {
         overlayId: "a".repeat(64),
         overlayName: "logo.png",
         overlayLayout: { x: -20, y: 47.25, width: 120 },
+        subtitleMasks: [{
+          id: "mask-one",
+          shape: "ellipse",
+          effect: "pixelate",
+          x: 85,
+          y: 96,
+          width: 30,
+          height: 20,
+          strength: 18,
+          opacity: 2,
+          feather: -1,
+          cornerRadius: 90,
+          color: "#aabbcc",
+        }],
       },
       options,
     );
@@ -36,6 +50,19 @@ describe("subtitle draft migration", () => {
     expect(draft?.overlayId).toBe("a".repeat(64));
     expect(draft?.overlayName).toBe("logo.png");
     expect(draft?.overlayLayout).toEqual({ x: 0, y: 47.3, width: 90 });
+    expect(draft?.subtitleMasks).toEqual([expect.objectContaining({
+      id: "mask-one",
+      shape: "ellipse",
+      effect: "pixelate",
+      x: 70,
+      y: 80,
+      width: 30,
+      height: 20,
+      opacity: 1,
+      feather: 0,
+      cornerRadius: 50,
+      color: "#AABBCC",
+    })]);
   });
 
   it("rejects values that are not draft objects", () => {
@@ -56,5 +83,6 @@ describe("subtitle draft migration", () => {
 
     expect(draft?.overlayId).toBeNull();
     expect(draft?.overlayName).toBe("logo.webp");
+    expect(draft?.subtitleMasks).toEqual([]);
   });
 });

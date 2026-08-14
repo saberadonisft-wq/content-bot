@@ -1,2068 +1,1736 @@
-import { useState, useRef, useEffect, type CSSProperties } from "react";
 import {
-  Upload,
-  Copy,
-  Check,
-  Play,
-  Pause,
-  Film,
-  Sparkles,
-  Download,
-  Trash2,
-  Plus,
-  LoaderCircle,
-  Video,
-  Type,
-  Palette,
-  LayoutTemplate,
-  Home,
-  AlignLeft,
   AlignCenter,
+  AlignLeft,
   AlignRight,
-  Music,
-  Shapes,
-  Underline,
-  Strikethrough,
-  List,
-  ArrowUpDown,
-  Grid,
+  AudioLines,
+  Check,
+  Circle,
+  Cloud,
+  Copy,
+  Download,
+  Film,
+  FileText,
+  Home,
+  Image,
+  EyeOff,
+  LayoutTemplate,
+  LoaderCircle,
+  Move,
+  Minus,
+  Moon,
+  PanelLeft,
+  Redo2,
+  RectangleHorizontal,
+  Sparkles,
+  Square,
+  Type,
+  Upload,
+  Undo2,
+  Video,
   X,
-  Scissors,
-  Volume2,
-  FastForward,
-  Paintbrush,
-  Maximize2,
-  HelpCircle,
-  Subtitles,
+  Trash2,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE,
   api,
-  SubtitleItem,
-  SubtitleBurnOptions,
+  type MediaMetadata,
+  type GeminiSubtitleJob,
+  type GeminiCliStatus,
+  type SubtitleBurnOptions,
+  type SubtitleCueV2,
+  type SubtitleDocumentV2,
+  type SubtitleJob,
+  type SubtitleRenderJob,
+  type SubtitleRenderOptionsV2,
+  type SubtitleWarning,
 } from "./api";
+import {
+  SubtitleWorkspace,
+  type SubtitleWorkspaceHandle,
+} from "./subtitles/SubtitleWorkspace";
+import { VirtualSubtitleList } from "./subtitles/VirtualSubtitleList";
+import {
+  readSavedDraft,
+  type SavedSubtitleDraft,
+} from "./subtitles/draft";
+import {
+  createManualCue,
+  mergeCueWithNext,
+  splitCueById,
+  updateCueById,
+} from "./subtitles/model";
+import {
+  DEFAULT_OVERLAY_LAYOUT,
+  normalizeOverlayLayout,
+} from "./subtitles/overlay";
+import {
+  createSubtitleMask,
+  MAX_SUBTITLE_MASKS,
+  normalizeSubtitleMask,
+} from "./subtitles/masks";
+import { sortCues } from "./subtitles/time";
+import {
+  DEFAULT_FRAME_TIMING,
+  type OverlayLayout,
+  type SubtitleMaskEffect,
+  type SubtitleMaskRegion,
+  type SubtitleMaskShape,
+} from "./subtitles/types";
+import { useSubtitleHistory } from "./subtitles/useSubtitleHistory";
+import "./subtitle-studio.css";
 
-const GEMINI_PROMPT_TEMPLATE = `Hãy nghe/xem video này và tạo phụ đề chính xác bằng tiếng Việt. 
-Yêu cầu định dạng đầu ra chuẩn từng dòng để máy tính phân tích tự động:
+const GEMINI_PROMPT_TEMPLATE = `Bạn là biên tập viên phụ đề tiếng Việt. Hãy nghe toàn bộ video và tạo transcript theo từng câu nói.
 
-Định dạng mẫu cho từng câu (không chèn thêm các ký tự trang trí khác):
-[MM:SS - MM:SS] Nội dung phụ đề
+MỤC TIÊU
+- Chép đúng lời nói, không tóm tắt, không tự thêm thông tin.
+- Giữ các từ đệm có nghe thấy như “ờ”, “ừm”, “à” khi chúng ảnh hưởng ngữ điệu.
+- Mỗi đoạn phải có mốc bắt đầu và kết thúc tính từ đầu video.
+- Mốc thời gian được biểu diễn bằng số nguyên mili-giây.
 
-Ví dụ:
-[00:00 - 00:03] Tại sao nhẫn cưới lại phải đeo ở ngón áp út này?
-[00:03 - 00:05] Bởi vì mạch máu ở ngón áp út nối thẳng đến trái tim.
-[00:06 - 00:10] Hai người sau khi kết hôn, trái tim của họ sẽ kết nối lại với nhau.
+QUY TẮC TIMING
+1. start_ms là lúc âm đầu tiên của câu bắt đầu; end_ms là lúc âm cuối cùng kết thúc.
+2. start_ms < end_ms, không dùng số âm, các đoạn phải theo thứ tự thời gian.
+3. Không để hai đoạn chồng lấn. Nếu hai người nói đè nhau, tách speaker nhưng vẫn ghi đúng khoảng nghe thấy.
+4. Không bịa ba chữ số mili-giây. Nếu hệ thống chỉ xác định được đến giây, đặt timing_precision_ms = 1000 và dùng phần mili-giây 000.
+5. Nếu xác định được gần 100 ms, đặt timing_precision_ms = 100. Chỉ đặt timing_precision_ms = 1 khi thật sự có dữ liệu ở độ phân giải mili-giây.
+6. Nếu không nghe rõ một từ, ghi “[không rõ]”; không đoán.
 
-Quy tắc:
-1. Mốc thời gian theo định dạng Phút:Giây (VD: 00:05 - 00:10 hoặc 01:15 - 01:20).
-2. Không thêm văn bản giải thích lời nói đầu hay lời kết, chỉ trả về đúng danh sách phụ đề theo định dạng trên.`;
+QUY TẮC CHIA CÂU
+- Một segment chứa một ý nói tự nhiên, ưu tiên 1–6 giây.
+- Không quá 84 ký tự mỗi segment; ưu tiên vị trí dấu câu và khoảng nghỉ để tách.
+- Không thêm lời mở đầu, giải thích, Markdown hoặc code fence.
 
-const hexToRgba = (hex: string, alpha: number) => {
-  let c = hex.replace("#", "");
-  if (c.length === 3) c = c.split("").map((x) => x + x).join("");
-  const num = parseInt(c, 16) || 0;
-  return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
+CHỈ TRẢ VỀ MỘT JSON HỢP LỆ THEO MẪU
+{
+  "schema_version": 2,
+  "language": "vi",
+  "timebase": "milliseconds",
+  "timing_source": "gemini_estimate",
+  "timing_precision_ms": 1000,
+  "segments": [
+    {
+      "id": "s0001",
+      "start_ms": 0,
+      "end_ms": 3000,
+      "text": "Nội dung phụ đề.",
+      "confidence": 0.90
+    }
+  ]
+}
+
+Trước khi trả kết quả, tự kiểm tra:
+- JSON parse được.
+- ID không trùng.
+- start_ms/end_ms là integer.
+- Không có đoạn rỗng, đảo thời gian hoặc chồng lấn.
+- Không có văn bản nào ngoài JSON.`;
+
+const DEFAULT_OPTIONS: SubtitleBurnOptions = {
+  font_name: "Arimo",
+  font_size: 38,
+  font_color: "#FFFFFF",
+  bold: true,
+  italic: false,
+  underline: false,
+  strikethrough: false,
+  uppercase: false,
+  alignment_type: "center",
+  outline_color: "#000000",
+  outline_width: 2,
+  shadow_color: "#000000",
+  shadow_width: 2,
+  bg_enabled: false,
+  bg_color: "#000000",
+  bg_opacity: 0.75,
+  spacing: 0,
+  line_spacing: 1.2,
+  pos_x: 50,
+  pos_y: 78,
+  position: "custom",
+  video_speed: 1,
+  volume: 1,
+  fade_in: 0,
+  fade_out: 0,
+  aspect_ratio: "original",
+  bg_fill_type: "blur",
+  trim_start: 0,
+  trim_end: null,
+  animation: "none",
 };
 
-const getErrorMessage = (error: unknown, fallback: string) =>
-  error instanceof Error ? error.message : fallback;
+const createSubtitleDocument = (
+  cues: readonly SubtitleCueV2[],
+): SubtitleDocumentV2 => {
+  const timingSources = new Set(cues.map((cue) => cue.timing_source));
+  return {
+    schema_version: 2,
+    language: "vi",
+    timebase: "milliseconds",
+    timing_source:
+      timingSources.size === 1 ? cues[0]?.timing_source ?? "manual" : "manual",
+    timing_precision_ms: Math.max(1, ...cues.map((cue) => cue.timing_precision_ms)),
+    segments: [...cues],
+  };
+};
+
+const createRenderOptions = (
+  options: SubtitleBurnOptions,
+): SubtitleRenderOptionsV2 => {
+  const animation = options.animation ?? "none";
+  return {
+    render_mode: animation === "none" ? "precision" : "effects",
+    profile: "fast",
+    encoder: "auto",
+    font_name: options.font_name,
+    font_size: options.font_size,
+    font_color: options.font_color,
+    bold: options.bold,
+    italic: options.italic,
+    underline: options.underline ?? false,
+    strikethrough: options.strikethrough ?? false,
+    uppercase: options.uppercase,
+    alignment_type: options.alignment_type ?? "center",
+    outline_color: options.outline_color,
+    outline_width: options.outline_width,
+    shadow_color: options.shadow_color,
+    shadow_width: options.shadow_width,
+    bg_enabled: options.bg_enabled,
+    bg_color: options.bg_color,
+    bg_opacity: options.bg_opacity,
+    spacing: options.spacing,
+    line_spacing: options.line_spacing ?? 1.2,
+    pos_x: options.pos_x,
+    pos_y: options.pos_y,
+    position: options.position,
+    video_speed: options.video_speed ?? 1,
+    volume: options.volume ?? 1,
+    aspect_ratio: options.aspect_ratio ?? "original",
+    bg_fill_type: options.bg_fill_type ?? "blur",
+    trim_start_ms: Math.max(0, Math.round((options.trim_start ?? 0) * 1000)),
+    trim_end_ms:
+      options.trim_end == null ? null : Math.round(options.trim_end * 1000),
+    fade_in_ms: Math.max(0, Math.round((options.fade_in ?? 0) * 1000)),
+    fade_out_ms: Math.max(0, Math.round((options.fade_out ?? 0) * 1000)),
+    animation,
+  };
+};
+
+const STYLE_PRESETS: Record<string, Partial<SubtitleBurnOptions>> = {
+  readable: {
+    font_name: "Arimo",
+    font_size: 38,
+    font_color: "#FFFFFF",
+    bold: true,
+    outline_color: "#000000",
+    outline_width: 2,
+    shadow_width: 1,
+    bg_enabled: false,
+  },
+  compact: {
+    font_name: "Arial",
+    font_size: 30,
+    font_color: "#FFFFFF",
+    bold: true,
+    outline_color: "#000000",
+    outline_width: 1,
+    bg_enabled: true,
+    bg_color: "#000000",
+    bg_opacity: 0.72,
+  },
+  emphasis: {
+    font_name: "Impact",
+    font_size: 42,
+    font_color: "#FFE45C",
+    bold: true,
+    uppercase: true,
+    outline_color: "#111827",
+    outline_width: 3,
+    bg_enabled: false,
+  },
+};
+
+type StudioTab = "upload" | "transcript" | "style" | "mask" | "video" | "position";
 
 type SubtitleStudioProps = {
   onBack?: () => void;
 };
 
+const SUBTITLE_DRAFT_KEY = "content-bot:subtitle-studio:v2";
+
+const readLocalDraft = () =>
+  readSavedDraft(window.localStorage, SUBTITLE_DRAFT_KEY, DEFAULT_OPTIONS);
+
+const getErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback;
+
+const formatGeminiError = (error: string | null | undefined) => {
+  const raw = (error ?? "").trim();
+  const lowered = raw.toLowerCase();
+  if (
+    lowered.includes("ineligibletiererror") ||
+    lowered.includes("unsupported_client") ||
+    lowered.includes("no longer supported for gemini code assist for individuals")
+  ) {
+    return "Gemini CLI không còn hỗ trợ đăng nhập Google cá nhân (Free/AI Pro/Ultra). Hãy cấu hình GEMINI_API_KEY trong backend/.env hoặc Vertex AI; tài khoản Code Assist tổ chức vẫn có thể dùng OAuth.";
+  }
+  if (lowered.includes("api_key_invalid") || lowered.includes("api key not valid")) {
+    return "GEMINI_API_KEY không hợp lệ hoặc đã bị Google từ chối. Hãy kiểm tra lại key trong backend/.env.";
+  }
+  if (
+    lowered.includes("authentication") ||
+    lowered.includes("authenticate") ||
+    lowered.includes("authenticating")
+  ) {
+    return "Gemini CLI chưa có phương thức xác thực dùng được. Thêm GEMINI_API_KEY vào backend/.env hoặc cấu hình Vertex AI rồi khởi động lại ứng dụng.";
+  }
+  return raw.length > 0
+    ? "Gemini CLI không thể xử lý yêu cầu. Kiểm tra cấu hình và thử lại."
+    : "Gemini CLI không tạo được phụ đề.";
+};
+
+const absoluteApiUrl = (path: string) =>
+  path.startsWith("/api/v1/")
+    ? `${API_BASE.replace(/\/api\/v1$/, "")}${path}`
+    : `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+
 export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
+  const [initialDraft] = useState(readLocalDraft);
+  const workspaceRef = useRef<SubtitleWorkspaceHandle>(null);
+  const uploadControllerRef = useRef<AbortController | null>(null);
+  const metadataControllerRef = useRef<AbortController | null>(null);
+  const parseControllerRef = useRef<AbortController | null>(null);
+  const generationControllerRef = useRef<AbortController | null>(null);
+  const alignmentControllerRef = useRef<AbortController | null>(null);
+  const renderControllerRef = useRef<AbortController | null>(null);
+  const overlayUploadControllerRef = useRef<AbortController | null>(null);
+  const overlayObjectUrlRef = useRef<string | null>(null);
+  const [activeTab, setActiveTab] = useState<StudioTab>("transcript");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [videoId, setVideoId] = useState<string | null>(null);
-  const [originalVideoUrl, setOriginalVideoUrl] = useState<string | null>(null);
-  const [subtitledVideoUrl, setSubtitledVideoUrl] = useState<string | null>(null);
-  const [currentTime, setCurrentTime] = useState<number>(0);
-  const [duration, setDuration] = useState<number>(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [previewMode, setPreviewMode] = useState<"live" | "rendered">("live");
-
-  const [activeTab, setActiveTab] = useState<"upload" | "text" | "style" | "presets" | "video_edit" | "position" | "animate">("text");
-
-  const [uploading, setUploading] = useState(false);
-  const [parsing, setParsing] = useState(false);
-  const [rendering, setRendering] = useState(false);
-  const [copiedPrompt, setCopiedPrompt] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
-
-  const [showSpacingPopover, setShowSpacingPopover] = useState(false);
-  const [zoomLevel, setZoomLevel] = useState(42);
-  const [copiedStyleBuffer, setCopiedStyleBuffer] = useState<Partial<SubtitleBurnOptions> | null>(null);
-  const [isEditingInline, setIsEditingInline] = useState(false);
-
-  const [rawText, setRawText] = useState("");
-  const [subtitles, setSubtitles] = useState<SubtitleItem[]>([]);
-  const [selectedSubIndex, setSelectedSubIndex] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [renderElapsedSec, setRenderElapsedSec] = useState(0);
-
-  useEffect(() => {
-    if (!rendering) return undefined;
-    const interval = window.setInterval(() => {
-      setRenderElapsedSec((prev) => prev + 1);
-    }, 1000);
-    return () => window.clearInterval(interval);
-  }, [rendering]);
-
-
-  const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
-  const [videoThumbnails, setVideoThumbnails] = useState<string[]>([]);
-  const [overlayImage, setOverlayImage] = useState<string | null>(null);
-  const [overlayName, setOverlayName] = useState<string>("");
-
-  const extractVideoThumbnails = (videoUrl: string, totalDur: number) => {
-    if (!totalDur || totalDur <= 0) return;
-    const v = document.createElement("video");
-    v.src = videoUrl;
-    v.crossOrigin = "anonymous";
-    v.onloadeddata = async () => {
-      const thumbs: string[] = [];
-      const count = 8;
-      const step = totalDur / count;
-      const canvas = document.createElement("canvas");
-      canvas.width = 120;
-      canvas.height = 68;
-      const ctx = canvas.getContext("2d");
-
-      for (let i = 0; i < count; i++) {
-        v.currentTime = Math.min(totalDur - 0.1, i * step);
-        await new Promise((resolve) => {
-          v.onseeked = resolve;
-        });
-        if (ctx) {
-          ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
-          thumbs.push(canvas.toDataURL("image/jpeg", 0.7));
-        }
-      }
-      setVideoThumbnails(thumbs);
-    };
-  };
-
-  const [options, setOptions] = useState<SubtitleBurnOptions>({
-    font_name: "Arimo",
-    font_size: 38,
-    font_color: "#FFFFFF",
-    bold: true,
-    italic: false,
-    underline: false,
-    strikethrough: false,
-    uppercase: false,
-    alignment_type: "center",
-    outline_color: "#000000",
-    outline_width: 2,
-    shadow_color: "#000000",
-    shadow_width: 2,
-    bg_enabled: false,
-    bg_color: "#000000",
-    bg_opacity: 0.75,
-    spacing: 0,
-    line_spacing: 1.2,
-    pos_x: 50,
-    pos_y: 50,
-    position: "custom",
-    video_speed: 1.0,
-    volume: 1.0,
-    fade_in: 0.0,
-    fade_out: 0.0,
-    aspect_ratio: "16:9",
-    bg_fill_type: "blur",
-    trim_start: 0,
-    trim_end: null,
-    animation: "none",
-  });
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const playerWrapperRef = useRef<HTMLDivElement>(null);
-
-  const activeSub =
-    subtitles.find(
-      (s) => s.start_seconds <= currentTime && currentTime <= s.end_seconds
-    ) || (subtitles.length > 0 ? subtitles[0] : null);
-
-  const selectedSub = selectedSubIndex !== null && subtitles[selectedSubIndex]
-    ? subtitles[selectedSubIndex]
-    : null;
-
-  const formatSrtTime = (totalSeconds: number): string => {
-    const s = Math.max(0, totalSeconds);
-    const hrs = Math.floor(s / 3600);
-    const mins = Math.floor((s % 3600) / 60);
-    const secs = Math.floor(s % 60);
-    const millis = Math.floor((s % 1) * 1000);
-    return `${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")},${millis.toString().padStart(3, "0")}`;
-  };
-
-  const dragStartRef = useRef<{
-    startX: number;
-    startY: number;
-    mouseX: number;
-    mouseY: number;
-  }>({ startX: 0, startY: 0, mouseX: 0, mouseY: 0 });
-
-  const [isResizingText, setIsResizingText] = useState(false);
-  const resizeStartRef = useRef<{ startSize: number; mouseY: number }>({ startSize: 38, mouseY: 0 });
-
-  const [isScrubbing, setIsScrubbing] = useState(false);
-  const timelineTracksAreaRef = useRef<HTMLDivElement>(null);
-
-  const [pillDragState, setPillDragState] = useState<{
-    index: number;
-    mode: "move" | "trim_start" | "trim_end";
-    startMouseX: number;
-    origStartSec: number;
-    origEndSec: number;
+  const [projectName, setProjectName] = useState(
+    initialDraft?.projectName ?? "Dự án chưa đặt tên",
+  );
+  const [videoId, setVideoId] = useState<string | null>(initialDraft?.videoId ?? null);
+  const [originalVideoUrl, setOriginalVideoUrl] = useState<string | null>(() =>
+    initialDraft?.videoId
+      ? `${API_BASE}/subtitles/video/${initialDraft.videoId}`
+      : null,
+  );
+  const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
+  const [mediaDurationMs, setMediaDurationMs] = useState(
+    initialDraft?.mediaDurationMs ?? 0,
+  );
+  const [mediaMetadata, setMediaMetadata] = useState<MediaMetadata | null>(null);
+  const [rawText, setRawText] = useState(initialDraft?.rawText ?? "");
+  const {
+    cues,
+    commit: commitCues,
+    reset: resetCues,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+  } = useSubtitleHistory(initialDraft?.cues ?? []);
+  const [selectedCueId, setSelectedCueId] = useState<string | null>(
+    initialDraft?.selectedCueId ?? null,
+  );
+  const [warnings, setWarnings] = useState<SubtitleWarning[]>([]);
+  const [activeGeminiJobId, setActiveGeminiJobId] = useState<string | null>(
+    initialDraft?.activeGeminiJobId ?? null,
+  );
+  const [generationJob, setGenerationJob] = useState<GeminiSubtitleJob | null>(null);
+  const [geminiStatus, setGeminiStatus] = useState<GeminiCliStatus | null>(null);
+  const [geminiBilingual, setGeminiBilingual] = useState(true);
+  const [activeAlignmentJobId, setActiveAlignmentJobId] = useState<string | null>(
+    initialDraft?.activeAlignmentJobId ?? null,
+  );
+  const [alignmentJob, setAlignmentJob] = useState<SubtitleJob | null>(null);
+  const [activeRenderJobId, setActiveRenderJobId] = useState<string | null>(
+    initialDraft?.activeRenderJobId ?? null,
+  );
+  const [renderJob, setRenderJob] = useState<SubtitleRenderJob | null>(null);
+  const [options, setOptions] = useState<SubtitleBurnOptions>(
+    initialDraft?.options ?? DEFAULT_OPTIONS,
+  );
+  const [liveAssTrack, setLiveAssTrack] = useState<{
+    videoId: string;
+    content: string;
   } | null>(null);
+  const liveAssContent =
+    videoId && liveAssTrack?.videoId === videoId ? liveAssTrack.content : null;
+  const [overlayId, setOverlayId] = useState<string | null>(
+    initialDraft?.overlayId ?? null,
+  );
+  const [overlayImage, setOverlayImage] = useState<string | null>(() =>
+    initialDraft?.overlayId
+      ? `${API_BASE}/subtitles/overlays/${initialDraft.overlayId}`
+      : null,
+  );
+  const [overlayName, setOverlayName] = useState(initialDraft?.overlayName ?? "");
+  const [overlayLayout, setOverlayLayout] = useState<OverlayLayout>(
+    initialDraft?.overlayLayout ?? DEFAULT_OVERLAY_LAYOUT,
+  );
+  const [subtitleMasks, setSubtitleMasks] = useState<SubtitleMaskRegion[]>(
+    initialDraft?.subtitleMasks ?? [],
+  );
+  const [selectedMaskId, setSelectedMaskId] = useState<string | null>(
+    initialDraft?.subtitleMasks[0]?.id ?? null,
+  );
+  const [uploading, setUploading] = useState(false);
+  const [overlayUploading, setOverlayUploading] = useState(false);
+  const [parsing, setParsing] = useState(false);
+  const [copiedPrompt, setCopiedPrompt] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleStartDrag = (e: React.MouseEvent) => {
-    if (previewMode !== "live" || !playerWrapperRef.current || isEditingInline) return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    dragStartRef.current = {
-      startX: options.pos_x,
-      startY: options.pos_y,
-      mouseX: e.clientX,
-      mouseY: e.clientY,
-    };
-
-    setIsDragging(true);
-  };
-
-  const handleStartResizeText = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    resizeStartRef.current = {
-      startSize: options.font_size,
-      mouseY: e.clientY,
-    };
-    setIsResizingText(true);
-  };
-
-  const handleStartScrubbing = (e: React.MouseEvent) => {
-    if (!timelineTracksAreaRef.current) return;
-    const rect = timelineTracksAreaRef.current.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const totalDur = duration || 40;
-    const newTime = Math.max(0, Math.min(totalDur, (clickX / rect.width) * totalDur));
-    handleSeek(newTime);
-    setIsScrubbing(true);
-  };
-
-  const handleStartPillDrag = (e: React.MouseEvent, index: number, mode: "move" | "trim_start" | "trim_end") => {
-    e.preventDefault();
-    e.stopPropagation();
-    setSelectedSubIndex(index);
-    const sub = subtitles[index];
-    if (!sub) return;
-    setPillDragState({
-      index,
-      mode,
-      startMouseX: e.clientX,
-      origStartSec: sub.start_seconds,
-      origEndSec: sub.end_seconds,
-    });
-  };
+  const sortedCues = useMemo(() => sortCues(cues), [cues]);
+  const subtitleDocument = useMemo(
+    () => createSubtitleDocument(sortedCues),
+    [sortedCues],
+  );
+  const renderOptions = useMemo(() => createRenderOptions(options), [options]);
+  const frameTiming = mediaMetadata ?? DEFAULT_FRAME_TIMING;
+  const thumbnailCacheKey = mediaMetadata?.fingerprint ?? (
+    videoFile && videoId
+      ? `${videoId}:${videoFile.size}:${videoFile.lastModified}`
+      : videoId
+  );
+  const overlayNeedsUpload = Boolean(overlayImage && !overlayId && !overlayUploading);
+  const overlayReady = !overlayImage || Boolean(overlayId && !overlayUploading);
+  const selectedMask = subtitleMasks.find((mask) => mask.id === selectedMaskId) ?? null;
+  const canRender = Boolean(
+    videoId &&
+      overlayReady &&
+      sortedCues.length > 0 &&
+      sortedCues.every(
+        (cue) => cue.text.trim() && cue.start_ms >= 0 && cue.end_ms > cue.start_ms,
+      ),
+  );
 
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      // 1. Drag subtitle position on Canvas
-      if (isDragging && playerWrapperRef.current) {
-        const rect = playerWrapperRef.current.getBoundingClientRect();
-        if (rect.width && rect.height) {
-          const deltaXPercent = ((e.clientX - dragStartRef.current.mouseX) / rect.width) * 100;
-          const deltaYPercent = ((e.clientY - dragStartRef.current.mouseY) / rect.height) * 100;
+    if (!videoId || subtitleDocument.segments.length === 0) {
+      return undefined;
+    }
 
-          let newX = dragStartRef.current.startX + deltaXPercent;
-          let newY = dragStartRef.current.startY + deltaYPercent;
-
-          // Magnetic snapping at center (50%)
-          if (Math.abs(newX - 50) < 1.8) newX = 50;
-          if (Math.abs(newY - 50) < 1.8) newY = 50;
-
-          newX = Math.max(0, Math.min(100, newX));
-          newY = Math.max(0, Math.min(100, newY));
-
-          setOptions((prev) => ({
-            ...prev,
-            position: "custom",
-            pos_x: Math.round(newX * 10) / 10,
-            pos_y: Math.round(newY * 10) / 10,
-          }));
-        }
-      }
-
-      // 2. Resize subtitle font size via corner handles
-      if (isResizingText) {
-        const deltaY = resizeStartRef.current.mouseY - e.clientY;
-        const newFontSize = Math.max(14, Math.min(96, Math.round(resizeStartRef.current.startSize + deltaY * 0.3)));
-        setOptions((prev) => ({ ...prev, font_size: newFontSize }));
-      }
-
-      // 3. Scrub timeline playhead
-      if (isScrubbing && timelineTracksAreaRef.current) {
-        const rect = timelineTracksAreaRef.current.getBoundingClientRect();
-        const clickX = e.clientX - rect.left;
-        const totalDur = duration || 40;
-        const newTime = Math.max(0, Math.min(totalDur, (clickX / rect.width) * totalDur));
-        if (videoRef.current) {
-          videoRef.current.currentTime = newTime;
-        }
-        setCurrentTime(newTime);
-      }
-
-      // 4. Move / Trim subtitle pills on timeline
-      if (pillDragState && timelineTracksAreaRef.current) {
-        const rect = timelineTracksAreaRef.current.getBoundingClientRect();
-        const totalDur = duration || 40;
-        const deltaSec = ((e.clientX - pillDragState.startMouseX) / rect.width) * totalDur;
-        const { index, mode, origStartSec, origEndSec } = pillDragState;
-
-        setSubtitles((prev) => {
-          return prev.map((item, idx) => {
-            if (idx !== index) return item;
-
-            let newStart = item.start_seconds;
-            let newEnd = item.end_seconds;
-            const durationSec = origEndSec - origStartSec;
-
-            if (mode === "move") {
-              newStart = Math.max(0, Math.min(totalDur - durationSec, origStartSec + deltaSec));
-              newEnd = newStart + durationSec;
-            } else if (mode === "trim_start") {
-              newStart = Math.max(0, Math.min(item.end_seconds - 0.3, origStartSec + deltaSec));
-            } else if (mode === "trim_end") {
-              newEnd = Math.max(item.start_seconds + 0.3, Math.min(totalDur, origEndSec + deltaSec));
-            }
-
-            newStart = Math.round(newStart * 10) / 10;
-            newEnd = Math.round(newEnd * 10) / 10;
-
-            return {
-              ...item,
-              start_seconds: newStart,
-              end_seconds: newEnd,
-              start_time: formatSrtTime(newStart),
-              end_time: formatSrtTime(newEnd),
-            };
-          });
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      void api
+        .previewSubtitleDocument(
+          videoId,
+          subtitleDocument,
+          renderOptions,
+          controller.signal,
+        )
+        .then((result) => setLiveAssTrack({ videoId, content: result.ass }))
+        .catch((previewError: unknown) => {
+          if (
+            !controller.signal.aborted &&
+            !(previewError instanceof DOMException && previewError.name === "AbortError")
+          ) {
+            setLiveAssTrack(null);
+          }
         });
+    }, 120);
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [renderOptions, subtitleDocument, videoId]);
+  const alignmentRunning =
+    alignmentJob?.state === "queued" || alignmentJob?.state === "running";
+  const canAlign = Boolean(
+    videoId &&
+      mediaMetadata?.has_audio &&
+      sortedCues.some((cue) => cue.timing_source !== "manual") &&
+      !activeAlignmentJobId &&
+      !alignmentRunning,
+  );
+  const generationRunning = Boolean(activeGeminiJobId) ||
+    generationJob?.state === "queued" ||
+    generationJob?.state === "running";
+  const canGenerate = Boolean(
+    videoId &&
+      mediaMetadata?.has_audio &&
+      geminiStatus?.authenticated &&
+      !generationRunning,
+  );
+  const rendering = Boolean(activeRenderJobId) ||
+    renderJob?.state === "queued" ||
+    renderJob?.state === "running";
+
+  useEffect(
+    () => () => {
+      uploadControllerRef.current?.abort();
+      metadataControllerRef.current?.abort();
+      parseControllerRef.current?.abort();
+      generationControllerRef.current?.abort();
+      alignmentControllerRef.current?.abort();
+      renderControllerRef.current?.abort();
+      overlayUploadControllerRef.current?.abort();
+      if (overlayObjectUrlRef.current) URL.revokeObjectURL(overlayObjectUrlRef.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let stopped = false;
+    let timer: number | null = null;
+    const controller = new AbortController();
+    const pollStatus = async () => {
+      try {
+        const status = await api.geminiCliStatus(controller.signal);
+        if (stopped) return;
+        setGeminiStatus(status);
+        if (!status.authenticated) {
+          timer = window.setTimeout(() => void pollStatus(), 5000);
+        }
+      } catch {
+        if (!stopped && !controller.signal.aborted) {
+          setGeminiStatus({ installed: false, authenticated: false });
+          timer = window.setTimeout(() => void pollStatus(), 5000);
+        }
+      }
+    };
+    void pollStatus();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!videoId || mediaMetadata) return undefined;
+    metadataControllerRef.current?.abort();
+    const controller = new AbortController();
+    metadataControllerRef.current = controller;
+    void api
+      .subtitleVideoMetadata(videoId, controller.signal)
+      .then((media) => {
+        if (controller.signal.aborted) return;
+        setMediaMetadata(media);
+        setMediaDurationMs(media.duration_ms);
+      })
+      .catch((metadataError: unknown) => {
+        if (!controller.signal.aborted) {
+          setError(
+            getErrorMessage(
+              metadataError,
+              "Không đọc được FPS/PTS của video đã lưu.",
+            ),
+          );
+        }
+      });
+    return () => controller.abort();
+  }, [mediaMetadata, videoId]);
+
+  useEffect(() => {
+    if (!activeAlignmentJobId) return undefined;
+    let stopped = false;
+    let timer: number | null = null;
+    const controller = new AbortController();
+
+    const poll = async () => {
+      try {
+        const job = await api.subtitleJob(activeAlignmentJobId, controller.signal);
+        if (stopped) return;
+        setAlignmentJob(job);
+        if (job.state === "succeeded") {
+          const result = job.result;
+          if (result) {
+            const nextCues = sortCues(result.document.segments);
+            resetCues(nextCues);
+            setWarnings(result.warnings);
+            setSelectedCueId((current) =>
+              current && nextCues.some((cue) => cue.id === current)
+                ? current
+                : (nextCues[0]?.id ?? null),
+            );
+          }
+          setActiveAlignmentJobId(null);
+          return;
+        }
+        if (job.state === "failed" || job.state === "canceled") {
+          if (job.state === "failed") {
+            setError(job.error || "Alignment audio thất bại.");
+          }
+          setActiveAlignmentJobId(null);
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), 500);
+      } catch (pollError: unknown) {
+        if (controller.signal.aborted || stopped) return;
+        setError(
+          getErrorMessage(
+            pollError,
+            "Mất kết nối khi đọc tiến độ alignment; đang thử lại.",
+          ),
+        );
+        timer = window.setTimeout(() => void poll(), 1200);
       }
     };
 
-    const handleMouseUp = () => {
-      if (isDragging) setIsDragging(false);
-      if (isResizingText) setIsResizingText(false);
-      if (isScrubbing) setIsScrubbing(false);
-      if (pillDragState) setPillDragState(null);
-    };
-
-    if (isDragging || isResizingText || isScrubbing || pillDragState) {
-      window.addEventListener("mousemove", handleMouseMove);
-      window.addEventListener("mouseup", handleMouseUp);
-    }
+    void poll();
     return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
+      stopped = true;
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
     };
-  }, [isDragging, isResizingText, isScrubbing, pillDragState, duration]);
+  }, [activeAlignmentJobId, resetCues]);
 
-  const applyPreset = (type: string) => {
-    if (type === "tiktok") {
-      setOptions((prev) => ({
-        ...prev,
-        font_name: "Impact",
-        font_size: 28,
-        font_color: "#FFE600",
-        bold: true,
-        uppercase: true,
-        outline_color: "#000000",
-        outline_width: 3,
-        bg_enabled: false,
-        shadow_width: 0,
-      }));
-    } else if (type === "neon") {
-      setOptions((prev) => ({
-        ...prev,
-        font_name: "Montserrat",
-        font_size: 26,
-        font_color: "#00FFFF",
-        bold: true,
-        uppercase: false,
-        outline_color: "#FF0055",
-        outline_width: 2,
-        shadow_color: "#FF0055",
-        shadow_width: 4,
-        bg_enabled: false,
-      }));
-    } else if (type === "box") {
-      setOptions((prev) => ({
-        ...prev,
-        font_name: "Roboto",
-        font_size: 24,
-        font_color: "#FFFFFF",
-        bold: true,
-        uppercase: false,
-        outline_width: 0,
-        bg_enabled: true,
-        bg_color: "#000000",
-        bg_opacity: 0.85,
-        shadow_width: 0,
-      }));
-    } else if (type === "minimal") {
-      setOptions((prev) => ({
-        ...prev,
-        font_name: "Segoe UI",
-        font_size: 22,
-        font_color: "#FFFFFF",
-        bold: false,
-        uppercase: false,
-        outline_color: "#000000",
-        outline_width: 1,
-        bg_enabled: false,
-        shadow_color: "#000000",
-        shadow_width: 2,
-      }));
-    }
-  };
+  useEffect(() => {
+    if (!activeGeminiJobId) return undefined;
+    let stopped = false;
+    let timer: number | null = null;
+    const controller = new AbortController();
 
-  const handleCopyPrompt = () => {
-    navigator.clipboard.writeText(GEMINI_PROMPT_TEMPLATE);
-    setCopiedPrompt(true);
-    setTimeout(() => setCopiedPrompt(false), 2000);
-  };
+    const poll = async () => {
+      try {
+        const job = await api.geminiSubtitleJob(
+          activeGeminiJobId,
+          controller.signal,
+        );
+        if (stopped) return;
+        setGenerationJob(job);
+        if (job.state === "succeeded") {
+          if (job.result) {
+            const nextCues = sortCues(job.result.document.segments);
+            resetCues(nextCues);
+            setRawText(job.result.srt);
+            setWarnings(job.result.warnings);
+            setSelectedCueId(nextCues[0]?.id ?? null);
+          }
+          setActiveGeminiJobId(null);
+          return;
+        }
+        if (job.state === "failed" || job.state === "canceled") {
+          if (job.state === "failed") {
+            setError(formatGeminiError(job.error));
+            void api.geminiCliStatus().then(setGeminiStatus).catch(() => undefined);
+          }
+          setActiveGeminiJobId(null);
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), 1000);
+      } catch (pollError: unknown) {
+        if (controller.signal.aborted || stopped) return;
+        setError(
+          getErrorMessage(
+            pollError,
+            "Mất kết nối khi đọc tiến độ Gemini CLI; đang thử lại.",
+          ),
+        );
+        timer = window.setTimeout(() => void poll(), 2000);
+      }
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activeGeminiJobId, resetCues]);
+
+  useEffect(() => {
+    if (!activeRenderJobId) return undefined;
+    let stopped = false;
+    let timer: number | null = null;
+    const controller = new AbortController();
+
+    const poll = async () => {
+      try {
+        const job = await api.subtitleRenderJob(activeRenderJobId, controller.signal);
+        if (stopped) return;
+        setRenderJob(job);
+        if (job.state === "succeeded") {
+          if (job.result) {
+            setRenderedVideoUrl(
+              `${absoluteApiUrl(job.result.subtitled_video_url)}?t=${Date.now()}`,
+            );
+          }
+          setActiveRenderJobId(null);
+          return;
+        }
+        if (job.state === "failed" || job.state === "canceled") {
+          if (job.state === "failed") {
+            setError(job.error || "Render video thất bại.");
+          }
+          setActiveRenderJobId(null);
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), 500);
+      } catch (pollError: unknown) {
+        if (controller.signal.aborted || stopped) return;
+        setError(
+          getErrorMessage(
+            pollError,
+            "Mất kết nối khi đọc tiến độ render; đang thử lại.",
+          ),
+        );
+        timer = window.setTimeout(() => void poll(), 1200);
+      }
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activeRenderJobId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const draft: SavedSubtitleDraft = {
+        version: 2,
+        videoId,
+        projectName,
+        mediaDurationMs,
+        rawText,
+        cues,
+        selectedCueId,
+        activeGeminiJobId,
+        activeAlignmentJobId,
+        activeRenderJobId,
+        options,
+        overlayId,
+        overlayName,
+        overlayLayout,
+        subtitleMasks,
+      };
+      try {
+        window.localStorage.setItem(SUBTITLE_DRAFT_KEY, JSON.stringify(draft));
+      } catch {
+        // Storage can be unavailable in private mode; editing remains functional.
+      }
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeGeminiJobId,
+    activeAlignmentJobId,
+    activeRenderJobId,
+    cues,
+    mediaDurationMs,
+    options,
+    overlayId,
+    overlayLayout,
+    overlayName,
+    projectName,
+    rawText,
+    selectedCueId,
+    subtitleMasks,
+    videoId,
+  ]);
+
+  useEffect(() => {
+    const handleHistoryShortcut = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.matches("input, textarea, select") ||
+        target?.isContentEditable ||
+        !(event.ctrlKey || event.metaKey) ||
+        event.key.toLowerCase() !== "z"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+    };
+    window.addEventListener("keydown", handleHistoryShortcut);
+    return () => window.removeEventListener("keydown", handleHistoryShortcut);
+  }, [redo, undo]);
+
+  const handleDurationChange = useCallback(
+    (durationMs: number) => {
+      if (!mediaMetadata) setMediaDurationMs(durationMs);
+    },
+    [mediaMetadata],
+  );
 
   const handleFileChange = async (file: File) => {
+    uploadControllerRef.current?.abort();
+    const controller = new AbortController();
+    uploadControllerRef.current = controller;
     setVideoFile(file);
-    setError(null);
+    setProjectName(file.name);
     setUploading(true);
-    setSubtitledVideoUrl(null);
-    setPreviewMode("live");
-    setSubtitles([]);
-    setRawText("");
-    setSelectedSubIndex(null);
-
+    setError(null);
+    setRenderedVideoUrl(null);
+    setMediaMetadata(null);
+    setMediaDurationMs(0);
+    alignmentControllerRef.current?.abort();
+    generationControllerRef.current?.abort();
+    renderControllerRef.current?.abort();
+    setActiveAlignmentJobId(null);
+    setAlignmentJob(null);
+    setActiveGeminiJobId(null);
+    setGenerationJob(null);
+    setActiveRenderJobId(null);
+    setRenderJob(null);
+    resetCues([]);
+    setSelectedCueId(null);
+    setSubtitleMasks([]);
+    setSelectedMaskId(null);
+    setWarnings([]);
     try {
-      const res = await api.uploadSubtitleVideo(file);
-      setVideoId(res.video_id);
-      setOriginalVideoUrl(`${API_BASE}/subtitles/video/${res.video_id}`);
-      setActiveTab("text");
-    } catch (err: unknown) {
-      setError(getErrorMessage(err, "Upload video thất bại"));
+      const result = await api.uploadSubtitleVideo(file, controller.signal);
+      if (controller.signal.aborted) return;
+      setVideoId(result.video_id);
+      setMediaMetadata(result.media);
+      setMediaDurationMs(result.media.duration_ms);
+      setOriginalVideoUrl(`${API_BASE}/subtitles/video/${result.video_id}`);
+      setActiveTab("transcript");
+    } catch (uploadError: unknown) {
+      if (controller.signal.aborted) return;
+      setError(getErrorMessage(uploadError, "Không tải được video. Kiểm tra định dạng và thử lại."));
     } finally {
-      setUploading(false);
+      if (!controller.signal.aborted) setUploading(false);
     }
   };
 
-  const handleParseText = async () => {
+  const handleOverlayChange = async (file: File) => {
+    overlayUploadControllerRef.current?.abort();
+    const controller = new AbortController();
+    overlayUploadControllerRef.current = controller;
+    const previousOverlay = overlayId
+      ? { id: overlayId, image: overlayImage, name: overlayName }
+      : { id: null, image: null, name: "" };
+    if (overlayObjectUrlRef.current) URL.revokeObjectURL(overlayObjectUrlRef.current);
+    const objectUrl = URL.createObjectURL(file);
+    overlayObjectUrlRef.current = objectUrl;
+    setOverlayId(null);
+    setOverlayImage(objectUrl);
+    setOverlayName(file.name);
+    setSelectedCueId(null);
+    setOverlayUploading(true);
+    setError(null);
+    try {
+      const uploaded = await api.uploadSubtitleOverlay(file, controller.signal);
+      if (controller.signal.aborted) return;
+      if (overlayObjectUrlRef.current === objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+        overlayObjectUrlRef.current = null;
+      }
+      setOverlayId(uploaded.overlay_id);
+      setOverlayImage(absoluteApiUrl(uploaded.overlay_url));
+      setOverlayName(uploaded.filename);
+    } catch (uploadError: unknown) {
+      if (controller.signal.aborted) return;
+      if (overlayObjectUrlRef.current === objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+        overlayObjectUrlRef.current = null;
+      }
+      setOverlayId(previousOverlay.id);
+      setOverlayImage(previousOverlay.image);
+      setOverlayName(previousOverlay.name);
+      setError(
+        getErrorMessage(
+          uploadError,
+          "Không tải được ảnh phủ. Hãy dùng PNG, JPEG hoặc WebP rồi thử lại.",
+        ),
+      );
+    } finally {
+      if (overlayUploadControllerRef.current === controller) {
+        overlayUploadControllerRef.current = null;
+        setOverlayUploading(false);
+      }
+    }
+  };
+
+  const handleCopyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(GEMINI_PROMPT_TEMPLATE);
+      setCopiedPrompt(true);
+      window.setTimeout(() => setCopiedPrompt(false), 2500);
+    } catch {
+      setError("Không sao chép được prompt. Hãy cấp quyền clipboard rồi thử lại.");
+    }
+  };
+
+  const handleParse = async () => {
     const text = rawText.trim();
     if (!text) {
-      setError("Hãy dán nội dung phụ đề trước khi bấm Bóc Tách Phụ Đề.");
+      setError("Chưa có kết quả Gemini. Dán JSON hoặc SRT/VTT rồi phân tích lại.");
       return;
     }
+    parseControllerRef.current?.abort();
+    const controller = new AbortController();
+    parseControllerRef.current = controller;
     setParsing(true);
     setError(null);
     try {
-      const res = await api.parseSubtitleText(text);
-      setSubtitles(res.subtitles);
-      if (res.subtitles.length === 0) {
-        setError("Không bóc tách được mốc thời gian nào từ văn bản. Hãy kiểm tra lại cấu trúc văn bản dán.");
+      const result = await api.parseSubtitleTextV2(
+        text,
+        mediaDurationMs || null,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      const nextCues = sortCues(result.document.segments);
+      commitCues(nextCues);
+      setWarnings(result.warnings);
+      setSelectedCueId(nextCues[0]?.id ?? null);
+      if (nextCues.length === 0) {
+        setError("Không tìm thấy cue hợp lệ. Kiểm tra JSON hoặc mốc thời gian đầu vào.");
       }
-    } catch (err: unknown) {
-      setError(getErrorMessage(err, "Phân tích phụ đề thất bại"));
+    } catch (parseError: unknown) {
+      if (controller.signal.aborted) return;
+      setError(getErrorMessage(parseError, "Không phân tích được phụ đề. Kiểm tra dữ liệu và thử lại."));
     } finally {
-      setParsing(false);
+      if (!controller.signal.aborted) setParsing(false);
     }
   };
 
-  const handleSeek = (seconds: number) => {
-    if (videoRef.current) {
-      videoRef.current.currentTime = seconds;
-      setCurrentTime(seconds);
-      videoRef.current.play().catch(() => { });
+  const handleGenerateWithGemini = async () => {
+    if (!videoId || !mediaMetadata?.has_audio) {
+      setError("Hãy tải video có audio trước khi chạy Gemini.");
+      return;
     }
-  };
-
-  const togglePlay = () => {
-    if (videoRef.current) {
-      if (videoRef.current.paused) {
-        videoRef.current.play();
-      } else {
-        videoRef.current.pause();
-      }
-    }
-  };
-
-  const handleUpdateSubText = (index: number, newText: string) => {
-    setSubtitles((prev) =>
-      prev.map((item, i) => (i === index ? { ...item, text: newText } : item))
-    );
-  };
-
-  const handleDeleteSub = (index: number) => {
-    setSubtitles((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const handleAddSub = () => {
-    setSubtitles((prev) => [
-      ...prev,
-      {
-        start_time: "00:00:00,000",
-        end_time: "00:00:03,000",
-        start_seconds: 0,
-        end_seconds: 3,
-        text: "Dòng phụ đề mới",
-      },
-    ]);
-  };
-
-  const handleBurnSubtitles = async () => {
-    if (!videoId || subtitles.length === 0) return;
-    setRenderElapsedSec(0);
-    setRendering(true);
+    generationControllerRef.current?.abort();
+    const controller = new AbortController();
+    generationControllerRef.current = controller;
     setError(null);
     try {
-      await api.burnSubtitleVideo(videoId, subtitles, options);
-      const url = `${API_BASE}/subtitles/video/${videoId}?type=subtitled&t=${Date.now()}`;
-      setSubtitledVideoUrl(url);
-      setPreviewMode("rendered");
-    } catch (err: unknown) {
-      setError(getErrorMessage(err, "Ghép phụ đề thất bại"));
-    } finally {
-      setRendering(false);
+      const job = await api.generateSubtitlesWithGemini(
+        videoId,
+        { bilingual: geminiBilingual },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setGenerationJob(job);
+      setActiveGeminiJobId(job.id);
+    } catch (generationError: unknown) {
+      if (!controller.signal.aborted) {
+        setError(formatGeminiError(getErrorMessage(generationError, "Không khởi chạy được Gemini CLI.")));
+        void api.geminiCliStatus().then(setGeminiStatus).catch(() => undefined);
+      }
     }
   };
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  const handleCancelGeneration = async () => {
+    if (!generationJob || !generationRunning) return;
+    try {
+      const job = await api.cancelGeminiSubtitleJob(generationJob.id);
+      setGenerationJob(job);
+    } catch (cancelError: unknown) {
+      setError(getErrorMessage(cancelError, "Không gửi được yêu cầu hủy job Gemini."));
+    }
   };
 
+  const handleCueChange = useCallback(
+    (
+      cueId: string,
+      patch: Partial<Pick<SubtitleCueV2, "start_ms" | "end_ms" | "text">>,
+    ) => {
+      commitCues((current) =>
+        updateCueById(current, cueId, patch, {
+          markManual: true,
+          durationMs: mediaDurationMs || undefined,
+        }),
+        "text" in patch ? `text:${cueId}` : `timing:${cueId}`,
+      );
+    },
+    [commitCues, mediaDurationMs],
+  );
+
+  const handleAlign = useCallback(
+    async (cueIds?: string[]) => {
+      if (!videoId || !mediaMetadata) {
+        setError("Hãy tải video và chờ đọc metadata trước khi căn timing.");
+        return;
+      }
+      if (!mediaMetadata.has_audio) {
+        setError("Video không có audio; hãy chỉnh timing thủ công.");
+        return;
+      }
+      alignmentControllerRef.current?.abort();
+      const controller = new AbortController();
+      alignmentControllerRef.current = controller;
+      setError(null);
+      try {
+        const timingSources = new Set(sortedCues.map((cue) => cue.timing_source));
+        const document = {
+          schema_version: 2 as const,
+          language: "vi",
+          timebase: "milliseconds" as const,
+          timing_source:
+            timingSources.size === 1
+              ? sortedCues[0]?.timing_source ?? "gemini_estimate"
+              : ("gemini_estimate" as const),
+          timing_precision_ms: Math.max(
+            1,
+            ...sortedCues.map((cue) => cue.timing_precision_ms),
+          ),
+          segments: sortedCues,
+        };
+        const job = await api.alignSubtitleDocument(
+          videoId,
+          document,
+          { engine: "auto" },
+          cueIds,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        setAlignmentJob(job);
+        setActiveAlignmentJobId(job.id);
+      } catch (alignmentError: unknown) {
+        if (!controller.signal.aborted) {
+          setError(
+            getErrorMessage(alignmentError, "Không thể bắt đầu alignment audio."),
+          );
+        }
+      }
+    },
+    [mediaMetadata, sortedCues, videoId],
+  );
+
+  const handleCancelAlignment = async () => {
+    if (!alignmentJob || !alignmentRunning) return;
+    try {
+      const job = await api.cancelSubtitleJob(alignmentJob.id);
+      setAlignmentJob(job);
+    } catch (cancelError: unknown) {
+      setError(getErrorMessage(cancelError, "Không hủy được alignment."));
+    }
+  };
+
+  const handleCueTimingCommit = useCallback(
+    (cueId: string, startMs: number, endMs: number) =>
+      handleCueChange(cueId, { start_ms: startMs, end_ms: endMs }),
+    [handleCueChange],
+  );
+
+  const handleAddCue = () => {
+    const cue = createManualCue(sortedCues, mediaDurationMs);
+    commitCues((current) => sortCues([...current, cue]));
+    setSelectedCueId(cue.id);
+    workspaceRef.current?.seekTo(cue.start_ms);
+  };
+
+  const handleDeleteCue = (cueId: string) => {
+    commitCues((current) => current.filter((cue) => cue.id !== cueId));
+    if (selectedCueId === cueId) setSelectedCueId(null);
+  };
+
+  const handleSplitCue = (cueId: string) => {
+    const cue = sortedCues.find((item) => item.id === cueId);
+    if (!cue) return;
+    const playheadMs = workspaceRef.current?.getCurrentMs() ?? cue.start_ms;
+    const splitMs =
+      playheadMs > cue.start_ms && playheadMs < cue.end_ms
+        ? playheadMs
+        : Math.round((cue.start_ms + cue.end_ms) / 2);
+    commitCues((current) => splitCueById(current, cueId, splitMs));
+    workspaceRef.current?.seekTo(splitMs);
+  };
+
+  const handleMergeCue = (cueId: string) => {
+    commitCues((current) => mergeCueWithNext(current, cueId));
+    setSelectedCueId(cueId);
+  };
+
+  const handleRender = async () => {
+    if (!videoId) {
+      setError("Hãy tải video trước khi xuất video.");
+      return;
+    }
+    if (!canRender) {
+      setError(
+        overlayNeedsUpload
+          ? "Hãy chờ ảnh phủ tải xong hoặc chọn lại ảnh phủ trước khi xuất."
+          : "Chưa có cue phụ đề hợp lệ để xuất video.",
+      );
+      return;
+    }
+    renderControllerRef.current?.abort();
+    const controller = new AbortController();
+    renderControllerRef.current = controller;
+    setError(null);
+    try {
+      const job = await api.renderSubtitleDocument(
+        videoId,
+        subtitleDocument,
+        renderOptions,
+        overlayId ? { overlay_id: overlayId, ...overlayLayout } : null,
+        subtitleMasks,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setRenderedVideoUrl(null);
+      setRenderJob(job);
+      setActiveRenderJobId(job.id);
+    } catch (renderError: unknown) {
+      if (!controller.signal.aborted) {
+        setError(
+          getErrorMessage(
+            renderError,
+            "Không bắt đầu được render. Kiểm tra timeline rồi thử lại.",
+          ),
+        );
+      }
+    }
+  };
+
+  const handleCancelRender = async () => {
+    const jobId = renderJob?.id ?? activeRenderJobId;
+    if (!jobId || !rendering) return;
+    try {
+      const job = await api.cancelSubtitleRenderJob(jobId);
+      setRenderJob(job);
+    } catch (cancelError: unknown) {
+      setError(getErrorMessage(cancelError, "Không hủy được render."));
+    }
+  };
+
+  const clearOverlay = () => {
+    overlayUploadControllerRef.current?.abort();
+    overlayUploadControllerRef.current = null;
+    if (overlayObjectUrlRef.current) URL.revokeObjectURL(overlayObjectUrlRef.current);
+    overlayObjectUrlRef.current = null;
+    setOverlayUploading(false);
+    setOverlayId(null);
+    setOverlayImage(null);
+    setOverlayName("");
+    setOverlayLayout(DEFAULT_OVERLAY_LAYOUT);
+  };
+
+  const addSubtitleMask = () => {
+    if (subtitleMasks.length >= MAX_SUBTITLE_MASKS) return;
+    const mask = createSubtitleMask();
+    setSubtitleMasks((current) => [...current, mask]);
+    setSelectedMaskId(mask.id);
+    setSelectedCueId(null);
+    setActiveTab("mask");
+    setSidebarOpen(true);
+  };
+
+  const updateSubtitleMask = (
+    maskId: string,
+    patch: Partial<SubtitleMaskRegion>,
+  ) => {
+    setSubtitleMasks((current) => current.map((mask) =>
+      mask.id === maskId
+        ? normalizeSubtitleMask({ ...mask, ...patch, id: mask.id })
+        : mask,
+    ));
+  };
+
+  const deleteSubtitleMask = (maskId: string) => {
+    const next = subtitleMasks.filter((mask) => mask.id !== maskId);
+    setSubtitleMasks(next);
+    if (selectedMaskId === maskId) setSelectedMaskId(next[0]?.id ?? null);
+  };
+
+  const tabs: { id: StudioTab; label: string; icon: typeof Upload }[] = [
+    { id: "upload", label: "Tải lên", icon: Upload },
+    { id: "transcript", label: "Phụ đề", icon: FileText },
+    { id: "style", label: "Kiểu chữ", icon: Type },
+    { id: "mask", label: "Che chữ cũ", icon: EyeOff },
+    { id: "video", label: "Video", icon: Video },
+    { id: "position", label: "Bố cục", icon: Move },
+  ];
+
   return (
-    <div className="canva-layout">
-      {/* ── HEADER ── */}
-      <header className="canva-header">
-        <div className="canva-brand">
-          <button type="button" aria-label="Về trang chủ" onClick={onBack} className="canva-btn canva-btn-primary" style={{ padding: '8px', background: 'rgba(255,255,255,0.2)', color: 'white' }}>
-            <Home size={20} />
+    <div className="subtitle-studio-shell">
+      <header className="subtitle-studio-header">
+        <div className="subtitle-studio-header-start">
+          <button type="button" className="studio-header-icon" onClick={onBack} aria-label="Về trang chính">
+            <Home size={19} />
           </button>
-          <span style={{ margin: '0 12px' }}>Tệp</span>
-          <span style={{ margin: '0 12px' }}>Đổi cỡ</span>
-          <span style={{ margin: '0 12px' }}>Sửa</span>
-        </div>
-        <div style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)', fontWeight: 600, fontSize: 16 }}>
-          Thiết kế không tên - Phụ Đề Video
-        </div>
-        <div className="canva-header-actions">
-          <button type="button" className="canva-btn canva-btn-secondary" style={{ background: 'rgba(0,0,0,0.2)' }}>
-            <Sparkles size={16} className="icon-gold" /> Dùng thử với giá 0 đ
+          <button
+            type="button"
+            className="studio-header-icon is-sidebar-toggle"
+            onClick={() => setSidebarOpen((open) => !open)}
+            aria-label={sidebarOpen ? "Đóng bảng công cụ" : "Mở bảng công cụ"}
+            aria-expanded={sidebarOpen}
+          >
+            <PanelLeft size={19} />
           </button>
-          <span className="canva-toolbar-divider" style={{ background: 'rgba(255,255,255,0.3)', margin: '0 8px' }}></span>
-          {rendering && (
-            <span style={{ fontSize: 13, marginRight: 16, color: '#ffeb3b', display: 'flex', alignItems: 'center' }}>
-              Đang xử lý video (có thể mất vài phút)...
+          <div className="subtitle-studio-title">
+            <strong>Subtitle Studio</strong>
+            <span>{projectName}</span>
+          </div>
+          <div className="subtitle-history-controls" aria-label="Lịch sử chỉnh sửa">
+            <button type="button" className="studio-header-icon" disabled={!canUndo} onClick={undo} aria-label="Hoàn tác" title="Hoàn tác (Ctrl+Z)"><Undo2 size={17} /></button>
+            <button type="button" className="studio-header-icon" disabled={!canRedo} onClick={redo} aria-label="Làm lại" title="Làm lại (Ctrl+Shift+Z)"><Redo2 size={17} /></button>
+          </div>
+        </div>
+        <div className="subtitle-studio-header-status" aria-live="polite">
+          {rendering && renderJob && (
+            <span>
+              <LoaderCircle className="spin" size={15} /> {renderJob.message} ·{" "}
+              {renderJob.progress}%
             </span>
           )}
-          {videoId && subtitles.length > 0 && (
-            <button
-              className="canva-btn canva-btn-primary"
-              onClick={handleBurnSubtitles}
-              disabled={rendering}
-            >
-              {rendering ? <LoaderCircle className="spin" size={16} /> : <Film size={16} />}
-              <span>{rendering ? `Đang Xuất... (${formatTime(renderElapsedSec)})` : "Xuất Video"}</span>
-            </button>
-          )}
-          {subtitledVideoUrl && (
+        </div>
+        <div className="subtitle-studio-header-actions">
+          {renderedVideoUrl && (
             <a
-              href={subtitledVideoUrl}
-              download={`subtitled_${videoId}.mp4`}
-              className="canva-btn canva-btn-secondary"
+              className="studio-header-action is-secondary"
+              href={renderedVideoUrl}
+              download={renderJob?.result?.output_filename ?? `subtitled_${videoId}.mp4`}
             >
-              <Download size={16} /> Chia sẻ
+              <Download size={17} /> <span>Tải video</span>
             </a>
           )}
+          <button
+            type="button"
+            className="studio-header-action is-primary"
+            disabled={!rendering && (!canRender || alignmentRunning)}
+            onClick={() =>
+              rendering ? void handleCancelRender() : void handleRender()
+            }
+            title={
+              overlayUploading
+                ? "Đợi ảnh phủ tải xong trước khi xuất"
+                : overlayNeedsUpload
+                  ? "Hãy chọn lại ảnh phủ để đồng bộ với file xuất"
+                  : !canRender
+                    ? "Cần video và cue hợp lệ trước khi xuất"
+                    : "Xuất video có phụ đề và ảnh phủ"
+            }
+          >
+            {rendering ? <Square size={14} fill="currentColor" /> : <Film size={17} />}
+            <span>{rendering ? "Hủy xuất" : "Xuất video"}</span>
+          </button>
         </div>
       </header>
 
-      {/* ── BODY ── */}
-      <div className="canva-body">
-        {/* LEFT ICONS */}
-        <div className="canva-sidebar-icons">
-          <button
-            type="button"
-            aria-label="Tải lên"
-            className={`canva-icon-tab ${activeTab === "upload" ? "active" : ""}`}
-            onClick={() => setActiveTab("upload")}
-          >
-            <Upload size={22} />
-            <span>Tải lên</span>
-          </button>
-          <button
-            type="button"
-            aria-label="Văn bản"
-            className={`canva-icon-tab ${activeTab === "text" ? "active" : ""}`}
-            onClick={() => setActiveTab("text")}
-          >
-            <Type size={22} />
-            <span>Văn bản</span>
-          </button>
-          <button
-            type="button"
-            aria-label="Mẫu"
-            className={`canva-icon-tab ${activeTab === "presets" ? "active" : ""}`}
-            onClick={() => setActiveTab("presets")}
-          >
-            <LayoutTemplate size={22} />
-            <span>Mẫu</span>
-          </button>
-          <button
-            type="button"
-            aria-label="Hiệu ứng"
-            className={`canva-icon-tab ${activeTab === "style" ? "active" : ""}`}
-            onClick={() => setActiveTab("style")}
-          >
-            <Palette size={22} />
-            <span>Hiệu ứng</span>
-          </button>
-          <button
-            type="button"
-            aria-label="Biên tập video"
-            className={`canva-icon-tab ${activeTab === "video_edit" ? "active" : ""}`}
-            onClick={() => setActiveTab("video_edit")}
-          >
-            <Scissors size={22} />
-            <span>Biên tập</span>
-          </button>
+      {error && (
+        <div className="subtitle-studio-error" role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={() => setError(null)} aria-label="Đóng thông báo lỗi"><X size={16} /></button>
         </div>
+      )}
 
-        {/* SIDEBAR CONTENT PANEL */}
-        <div className="canva-sidebar-panel">
-          {error && <div className="studio-error" style={{ marginBottom: 16 }}>{error}</div>}
+      <div className="subtitle-studio-body">
+        <nav className="subtitle-tool-rail" aria-label="Công cụ Subtitle Studio">
+          {tabs.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              className={activeTab === id ? "is-active" : ""}
+              aria-label={label}
+              aria-pressed={activeTab === id}
+              onClick={() => {
+                setActiveTab(id);
+                setSidebarOpen(true);
+              }}
+            >
+              <Icon size={20} />
+              <span>{label}</span>
+            </button>
+          ))}
+        </nav>
 
-          {/* TAB: UPLOAD */}
+        <aside className={`subtitle-tool-panel ${sidebarOpen ? "is-open" : ""}`} aria-label="Bảng công cụ">
           {activeTab === "upload" && (
-            <div className="canva-panel-content">
-              <h3>Tải video lên</h3>
-              <p className="canva-text-muted">Chọn video từ máy tính của bạn để bắt đầu chỉnh sửa phụ đề.</p>
-
-              <div className="upload-box" style={{ marginTop: 16 }}>
+            <div className="studio-panel-section">
+              <div className="studio-panel-heading">
+                <h2>Tệp dự án</h2>
+                <p>Video gốc và ảnh phủ được tải một lần, sau đó tái sử dụng trong preview.</p>
+              </div>
+              <label className={`studio-file-drop ${uploading ? "is-loading" : ""}`}>
                 <input
                   type="file"
                   accept="video/*"
-                  id="video-upload"
-                  onChange={(e) => e.target.files?.[0] && handleFileChange(e.target.files[0])}
-                  style={{ display: "none" }}
+                  disabled={uploading}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) void handleFileChange(file);
+                  }}
                 />
-                <label htmlFor="video-upload" className="upload-label">
-                  {uploading ? (
-                    <div className="loading-state">
-                      <LoaderCircle className="spin" size={32} />
-                      <span>Đang tải...</span>
-                    </div>
-                  ) : videoFile ? (
-                    <div className="file-info">
-                      <Video size={32} />
-                      <div>
-                        <strong>{videoFile.name}</strong>
-                        <p>{(videoFile.size / (1024 * 1024)).toFixed(2)} MB</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="upload-placeholder">
-                      <Upload size={32} />
-                      <span>Tải lên nội dung</span>
-                    </div>
-                  )}
-                </label>
-              </div>
-
-              <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px solid #e5e7eb" }}>
-                <h4 style={{ margin: "0 0 4px 0", fontSize: 15, fontWeight: 700 }}>Tải logo / hình ảnh đè</h4>
-                <p className="canva-text-muted">Chọn tệp ảnh logo (PNG/JPG) để chèn đè lên video nếu muốn.</p>
-
-                <div className="upload-box" style={{ marginTop: 12 }}>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    id="logo-upload"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        const url = URL.createObjectURL(file);
-                        setOverlayImage(url);
-                        setOverlayName(file.name);
-                      }
-                    }}
-                    style={{ display: "none" }}
-                  />
-                  <label htmlFor="logo-upload" className="upload-label">
-                    {overlayImage ? (
-                      <div className="file-info" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <img src={overlayImage} alt="Logo" style={{ width: 28, height: 28, objectFit: "contain", borderRadius: 4 }} />
-                          <strong style={{ fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 140 }}>{overlayName}</strong>
-                        </div>
-                        <button
-                          type="button"
-                          className="canva-btn canva-btn-outline"
-                          style={{ padding: "2px 8px", fontSize: 12, color: "#ef4444", borderColor: "#fca5a5" }}
-                          onClick={(evt) => {
-                            evt.preventDefault();
-                            setOverlayImage(null);
-                            setOverlayName("");
-                          }}
-                        >
-                          Xóa
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="upload-placeholder">
-                        <Upload size={24} />
-                        <span>Tải ảnh logo đè lên</span>
-                      </div>
-                    )}
+                {uploading ? <LoaderCircle className="spin" size={22} /> : <Upload size={22} />}
+                <strong>{uploading ? "Đang tải video" : videoFile?.name ?? "Chọn video"}</strong>
+                <span>MP4, MOV hoặc WebM</span>
+              </label>
+              <label className={`studio-file-drop is-compact ${overlayUploading ? "is-loading" : ""}`}>
+                <input
+                  type="file"
+                  accept=".png,.jpg,.jpeg,.webp"
+                  disabled={overlayUploading}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.currentTarget.value = "";
+                    if (file) void handleOverlayChange(file);
+                  }}
+                />
+                {overlayUploading ? <LoaderCircle className="spin" size={20} /> : <Image size={20} />}
+                <strong>{overlayUploading ? "Đang đồng bộ ảnh phủ" : overlayName || "Thêm ảnh phủ"}</strong>
+                <span>PNG, JPEG hoặc WebP · tối đa 10 MB</span>
+              </label>
+              {overlayImage && (
+                <div className="studio-overlay-controls" aria-label="Điều chỉnh ảnh phủ">
+                  <p>
+                    {overlayUploading
+                      ? "Ảnh đang được chuẩn bị cho file xuất…"
+                      : overlayNeedsUpload
+                        ? "Hãy chọn lại ảnh phủ để đồng bộ với file xuất."
+                        : "Kéo ảnh trên video để di chuyển hoặc kéo một góc để đổi kích thước."}
+                  </p>
+                  <label className="studio-range-field">
+                    <span>Kích thước ảnh phủ <output>{overlayLayout.width.toFixed(1)}%</output></span>
+                    <input
+                      type="range"
+                      min={4}
+                      max={90}
+                      step={0.1}
+                      value={overlayLayout.width}
+                      aria-label="Kích thước ảnh phủ theo phần trăm chiều rộng video"
+                      onChange={(event) => setOverlayLayout((current) => normalizeOverlayLayout({
+                        ...current,
+                        width: Number(event.target.value),
+                      }))}
+                    />
                   </label>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB: TEXT (Gemini & Subtitle List) */}
-          {activeTab === "text" && (
-            <div className="canva-panel-content">
-              <h3>Tạo phụ đề (Gemini)</h3>
-
-              <div className="canva-tool-group">
-                <label className="canva-label">1. Copy Prompt</label>
-                <button
-                  type="button"
-                  className={`canva-btn ${copiedPrompt ? "canva-btn-success" : "canva-btn-outline"}`}
-                  onClick={handleCopyPrompt}
-                  style={{ width: "100%" }}
-                >
-                  {copiedPrompt ? <Check size={16} /> : <Copy size={16} />}
-                  {copiedPrompt ? "Đã Sao Chép!" : "Sao Chép Prompt"}
-                </button>
-              </div>
-
-              <div className="canva-tool-group">
-                <label className="canva-label">2. Dán Kết Quả</label>
-                <textarea
-                  className="canva-textarea"
-                  rows={4}
-                  placeholder="Dán văn bản phụ đề từ Gemini ở đây..."
-                  value={rawText}
-                  onChange={(e) => setRawText(e.target.value)}
-                />
-                  <button
-                    type="button"
-                    className="canva-btn canva-btn-primary"
-                    onClick={handleParseText}
-                    disabled={parsing}
-                    aria-busy={parsing}
-                    style={{ width: "100%", marginTop: 8 }}
-                >
-                  {parsing ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
-                  {parsing ? "Đang bóc tách..." : "Bóc Tách Phụ Đề"}
-                </button>
-              </div>
-
-              {subtitles.length > 0 && (
-                <div className="canva-tool-group" style={{ marginTop: 24 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                    <label className="canva-label" style={{ margin: 0 }}>Danh Sách Phụ Đề</label>
-                    <button type="button" className="btn-icon" onClick={handleAddSub} title="Thêm dòng"><Plus size={16} /></button>
-                  </div>
-                  <div className="subtitle-list" style={{ maxHeight: '400px' }}>
-                    {subtitles.map((sub, idx) => (
-                      <div
-                        key={idx}
-                        className={`sub-item-row ${selectedSubIndex === idx ? "selected" : ""}`}
-                        style={{
-                          flexDirection: 'column',
-                          alignItems: 'flex-start',
-                          border: selectedSubIndex === idx ? "2px solid #7d2ae8" : "1px solid #e5e7eb",
-                          borderRadius: 8,
-                          padding: 8,
-                          marginBottom: 8,
-                          background: selectedSubIndex === idx ? "#f5f3ff" : "white"
-                        }}
-                        onClick={() => {
-                          handleSeek(sub.start_seconds);
-                          setSelectedSubIndex(idx);
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
-                          <button
-                            type="button"
-                            className="btn-play-seek"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleSeek(sub.start_seconds);
-                              setSelectedSubIndex(idx);
-                            }}
-                          >
-                            <Play size={12} /> {sub.start_time.slice(3, 8)}
-                          </button>
-                          <button type="button" className="btn-icon btn-delete" onClick={(e) => { e.stopPropagation(); handleDeleteSub(idx); }}>
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                        <textarea
-                          className="canva-textarea"
-                          rows={2}
-                          value={sub.text}
-                          onFocus={() => setSelectedSubIndex(idx)}
-                          onChange={(e) => handleUpdateSubText(idx, e.target.value)}
-                          style={{ width: "100%", marginTop: 4, minHeight: 40 }}
-                        />
-                      </div>
-                    ))}
+                  <div className="studio-overlay-actions">
+                    <button
+                      type="button"
+                      className="studio-secondary-button"
+                      onClick={() => setOverlayLayout(DEFAULT_OVERLAY_LAYOUT)}
+                    >
+                      Đặt lại ảnh phủ
+                    </button>
+                    <button type="button" className="studio-secondary-button" onClick={clearOverlay}>Xóa ảnh phủ</button>
                   </div>
                 </div>
               )}
             </div>
           )}
 
-          {/* TAB: PRESETS */}
-          {activeTab === "presets" && (
-            <div className="canva-panel-content">
-              <h3>Mẫu Phụ Đề</h3>
-              <p className="canva-text-muted">Áp dụng nhanh các phong cách phổ biến.</p>
-
-              <div className="canva-presets-grid">
-                <button className="preset-card tiktok" onClick={() => applyPreset("tiktok")}>
-                  <span>🔥 TikTok</span>
-                </button>
-                <button className="preset-card neon" onClick={() => applyPreset("neon")}>
-                  <span>✨ Neon</span>
-                </button>
-                <button className="preset-card box" onClick={() => applyPreset("box")}>
-                  <span>⬛ Hộp Đen</span>
-                </button>
-                <button className="preset-card minimal" onClick={() => applyPreset("minimal")}>
-                  <span>⚪ Tối Giản</span>
-                </button>
+          {activeTab === "transcript" && (
+            <div className="studio-panel-section is-transcript">
+              <div className="studio-panel-heading">
+                <h2>Tạo phụ đề</h2>
+                <p>Gemini xem cả hình ảnh, chữ trên video và nghe audio để tạo phụ đề tiếng Việt theo ngữ cảnh.</p>
               </div>
-            </div>
-          )}
-
-          {/* TAB: STYLE (EFFECTS PANEL - MATCHING CANVA EXACTLY) */}
-          {activeTab === "style" && (
-            <div className="canva-panel-content" style={{ padding: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #e5e7eb', paddingBottom: 12 }}>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#111827' }}>Hiệu ứng</h3>
-                <button type="button" className="canva-toolbar-btn canva-toolbar-btn-icon" onClick={() => setActiveTab("text")} title="Đóng">
-                  <X size={18} />
-                </button>
-              </div>
-
-              {/* 1. Phong cách (Standard Text Effects) */}
-              <div className="canva-effects-section">
-                <div className="canva-effects-grid">
-                  {/* Không có */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, shadow_width: 0, outline_width: 0, bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ textShadow: 'none', WebkitTextStroke: 'none' }}>Ag</div>
-                    <span className="effect-card-label">Không có</span>
-                  </button>
-
-                  {/* Đổ bóng */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, shadow_width: 5, shadow_color: '#000000', outline_width: 0, bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ textShadow: '3px 3px 6px rgba(0,0,0,0.4)' }}>Ag</div>
-                    <span className="effect-card-label">Đổ bóng</span>
-                  </button>
-
-                  {/* Phát sáng */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, shadow_width: 10, shadow_color: '#a855f7', outline_width: 0, bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ textShadow: '0 0 12px #a855f7' }}>Ag</div>
-                    <span className="effect-card-label">Phát sáng</span>
-                  </button>
-
-                  {/* Lặp bóng */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, shadow_width: 6, shadow_color: '#c084fc', outline_width: 0, bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ textShadow: '4px 4px 0 #c084fc' }}>Ag</div>
-                    <span className="effect-card-label">Lặp bóng</span>
-                  </button>
-
-                  {/* Viền */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, outline_width: 2, outline_color: '#7d2ae8', shadow_width: 0, bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ color: 'white', WebkitTextStroke: '1.5px #7d2ae8' }}>Ag</div>
-                    <span className="effect-card-label">Viền</span>
-                  </button>
-
-                  {/* Nền */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, bg_enabled: true, bg_color: '#d8b4fe', bg_opacity: 0.8, outline_width: 0, shadow_width: 0 })}
-                  >
-                    <div className="effect-card-preview" style={{ background: '#d8b4fe', color: '#6b21a8', borderRadius: 8 }}>Ag</div>
-                    <span className="effect-card-label">Nền</span>
-                  </button>
-
-                  {/* Bóng rỗng */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, outline_width: 2, outline_color: '#7d2ae8', shadow_width: 4, shadow_color: '#e9d5ff', bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ color: 'transparent', WebkitTextStroke: '1.5px #7d2ae8', textShadow: '3px 3px 0 #e9d5ff' }}>Ag</div>
-                    <span className="effect-card-label">Bóng rỗng</span>
-                  </button>
-
-                  {/* Rỗng */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, outline_width: 2, outline_color: '#7d2ae8', shadow_width: 0, bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ color: 'transparent', WebkitTextStroke: '1.5px #7d2ae8' }}>Ag</div>
-                    <span className="effect-card-label">Rỗng</span>
-                  </button>
-
-                  {/* Neon */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, shadow_width: 12, shadow_color: '#f472b6', font_color: '#ffffff', outline_width: 1, outline_color: '#ec4899', bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#f472b6', textShadow: '0 0 10px #ec4899, 0 0 20px #ec4899' }}>Ag</div>
-                    <span className="effect-card-label">Neon</span>
-                  </button>
-
-                  {/* Nhiễu */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, shadow_width: 4, shadow_color: '#06b6d4', outline_width: 2, outline_color: '#ec4899', bg_enabled: false })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#7d2ae8', textShadow: '-2px 0 #06b6d4, 2px 0 #ec4899' }}>Ag</div>
-                    <span className="effect-card-label">Nhiễu</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* 2. Nâng cao (Advanced Presets) */}
-              <div className="canva-effects-section">
-                <div className="canva-effects-section-title">Nâng cao</div>
-                <div className="canva-effects-grid">
-                  {/* Đèn neon */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#f472b6', shadow_width: 12, shadow_color: '#ec4899' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#f472b6', textShadow: '0 0 12px #ec4899' }}>AG</div>
-                    <span className="effect-card-label">Đèn neon</span>
-                  </button>
-
-                  {/* Nhiễu TV */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#38bdf8', shadow_width: 6, shadow_color: '#c084fc', outline_width: 2, outline_color: '#f43f5e' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#38bdf8', textShadow: '-2px 2px #f43f5e' }}>Ag</div>
-                    <span className="effect-card-label">Nhiễu TV</span>
-                  </button>
-
-                  {/* Thập niên 70 */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#fbbf24', shadow_width: 5, shadow_color: '#b45309', outline_width: 1, outline_color: '#78350f' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#fbbf24', textShadow: '3px 3px 0 #b45309' }}>Ag</div>
-                    <span className="effect-card-label">Thập niên 70</span>
-                  </button>
-
-                  {/* Khoa học viễn tưởng */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#4ade80', shadow_width: 10, shadow_color: '#22c55e', outline_width: 1, outline_color: '#15803d' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#4ade80', textShadow: '0 0 8px #22c55e', fontFamily: 'monospace' }}>AG</div>
-                    <span className="effect-card-label">Khoa học viễn tưởng</span>
-                  </button>
-
-                  {/* In lụa */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#f472b6', shadow_width: 6, shadow_color: '#db2777', outline_width: 1, outline_color: '#9d174d' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#f472b6', textShadow: '4px 4px 0 #db2777' }}>AG</div>
-                    <span className="effect-card-label">In lụa</span>
-                  </button>
-
-                  {/* Phương Tây */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#f97316', shadow_width: 4, shadow_color: '#9a3412', outline_width: 2, outline_color: '#7c2d12' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#f97316', fontFamily: 'serif', fontStyle: 'italic' }}>Ag</div>
-                    <span className="effect-card-label">Phương Tây</span>
-                  </button>
-
-                  {/* Graffiti */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#10b981', shadow_width: 6, shadow_color: '#047857', outline_width: 3, outline_color: '#064e3b' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#10b981', WebkitTextStroke: '2px #064e3b', fontWeight: 900 }}>AG</div>
-                    <span className="effect-card-label">Graffiti</span>
-                  </button>
-
-                  {/* Bong bóng */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#06b6d4', shadow_width: 5, shadow_color: '#0e7490', outline_width: 2, outline_color: '#164e63' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#06b6d4', WebkitTextStroke: '1.5px #164e63', borderRadius: '50%' }}>Ag</div>
-                    <span className="effect-card-label">Bong bóng</span>
-                  </button>
-
-                  {/* Thể dục nhịp điệu */}
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, font_color: '#e879f9', shadow_width: 10, shadow_color: '#c084fc', outline_width: 1, outline_color: '#a855f7' })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#e879f9', fontStyle: 'italic', textShadow: '0 0 10px #c084fc' }}>Ag</div>
-                    <span className="effect-card-label">Thể dục nhịp điệu</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* 3. Hình dạng (Shape Effects) */}
-              <div className="canva-effects-section">
-                <div className="canva-effects-section-title">Hình dạng</div>
-                <div className="canva-effects-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-                  <button
-                    type="button"
-                    className="canva-effect-card"
-                    onClick={() => setOptions({ ...options, spacing: options.spacing === 2 ? 0 : 2 })}
-                  >
-                    <div className="effect-card-preview" style={{ color: '#7d2ae8', fontSize: 18 }}>
-                      <span style={{ display: 'inline-block', transform: 'rotate(-10deg)' }}>A</span>
-                      <span style={{ display: 'inline-block', transform: 'rotate(-5deg)' }}>B</span>
-                      <span style={{ display: 'inline-block', transform: 'rotate(5deg)' }}>C</span>
-                      <span style={{ display: 'inline-block', transform: 'rotate(10deg)' }}>D</span>
-                    </div>
-                    <span className="effect-card-label">Uốn cong</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* 4. Fine-tuning sliders */}
-              <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #e5e7eb' }}>
-                <div className="canva-tool-group">
-                  <label className="canva-label">Khoảng cách chữ: {options.spacing}</label>
-                  <input type="range" className="canva-slider" min={-5} max={15} value={options.spacing} onChange={(e) => setOptions({ ...options, spacing: Number(e.target.value) })} />
-                </div>
-
-                <div className="canva-tool-group">
-                  <label className="canva-label">Màu viền & Độ dày ({options.outline_width}px)</label>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input type="color" className="canva-color-picker" value={options.outline_color} onChange={(e) => setOptions({ ...options, outline_color: e.target.value })} />
-                    <input type="range" className="canva-slider" style={{ flex: 1 }} min={0} max={10} value={options.outline_width} onChange={(e) => setOptions({ ...options, outline_width: Number(e.target.value) })} />
+              <section className="subtitle-generation-panel" aria-labelledby="gemini-generation-title">
+                <div className="subtitle-generation-heading">
+                  <div>
+                    <strong id="gemini-generation-title"><Cloud size={17} /> Gemini</strong>
+                    <span>App tự nén và gửi video bằng Gemini CLI qua API key hoặc Vertex AI đã cấu hình.</span>
                   </div>
-                </div>
-
-                <div className="canva-tool-group">
-                  <label className="canva-label">Màu bóng đổ & Độ dày ({options.shadow_width}px)</label>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input type="color" className="canva-color-picker" value={options.shadow_color} onChange={(e) => setOptions({ ...options, shadow_color: e.target.value })} />
-                    <input type="range" className="canva-slider" style={{ flex: 1 }} min={0} max={10} value={options.shadow_width} onChange={(e) => setOptions({ ...options, shadow_width: Number(e.target.value) })} />
-                  </div>
-                </div>
-
-                <div className="canva-tool-group">
-                  <label className="checkbox-label" style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <input type="checkbox" checked={options.bg_enabled} onChange={(e) => setOptions({ ...options, bg_enabled: e.target.checked })} />
-                    Bật khung nền
-                  </label>
-                  {options.bg_enabled && (
-                    <div style={{ padding: 12, background: '#f3f4f6', borderRadius: 8, marginTop: 8 }}>
-                      <div className="canva-tool-group">
-                        <label className="canva-label">Màu nền</label>
-                        <input type="color" className="canva-color-picker" value={options.bg_color} onChange={(e) => setOptions({ ...options, bg_color: e.target.value })} />
-                      </div>
-                      <div className="canva-tool-group" style={{ marginBottom: 0 }}>
-                        <label className="canva-label">Độ mờ: {Math.round(options.bg_opacity * 100)}%</label>
-                        <input type="range" className="canva-slider" min={0.1} max={1.0} step={0.05} value={options.bg_opacity} onChange={(e) => setOptions({ ...options, bg_opacity: Number(e.target.value) })} />
-                      </div>
-                    </div>
+                  {generationRunning ? (
+                    <button
+                      type="button"
+                      className="studio-icon-button is-danger"
+                      aria-label="Hủy tạo phụ đề bằng Gemini"
+                      title="Hủy tác vụ Gemini đang chạy"
+                      onClick={() => void handleCancelGeneration()}
+                    >
+                      <Square size={14} fill="currentColor" />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="studio-primary-button subtitle-generation-start"
+                      disabled={!canGenerate}
+                      onClick={() => void handleGenerateWithGemini()}
+                    >
+                      <Sparkles size={17} />
+                      Tạo phụ đề
+                    </button>
                   )}
                 </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB: VIDEO EDIT (Cắt xén, Tốc độ, Âm thanh, Nền, Tỷ lệ) */}
-          {activeTab === "video_edit" && (
-            <div className="canva-panel-content" style={{ padding: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #e5e7eb', paddingBottom: 12 }}>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#111827' }}>Biên Tập Video</h3>
-                <button type="button" className="canva-toolbar-btn canva-toolbar-btn-icon" onClick={() => setActiveTab("text")} title="Đóng">
-                  <X size={18} />
-                </button>
-              </div>
-
-              {/* 1. Tốc độ (Speed) */}
-              <div className="canva-tool-group">
-                <label className="canva-label" style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
-                  <FastForward size={16} />
-                  Tốc độ phát: {options.video_speed || 1.0}x
-                </label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6, marginTop: 8 }}>
-                  {[0.5, 1.0, 1.25, 1.5, 2.0].map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      className={`canva-btn ${(options.video_speed || 1.0) === s ? "canva-btn-primary" : "canva-btn-outline"}`}
-                      style={{ padding: '6px 0', fontSize: 12, fontWeight: 600 }}
-                      onClick={() => setOptions({ ...options, video_speed: s })}
-                    >
-                      {s}x
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 2. Âm thanh (Audio) */}
-              <div className="canva-tool-group" style={{ marginTop: 20 }}>
-                <label className="canva-label" style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
-                  <Volume2 size={16} />
-                  Âm lượng: {Math.round((options.volume || 1.0) * 100)}%
-                </label>
-                <input
-                  type="range"
-                  className="canva-slider"
-                  min={0.0}
-                  max={2.0}
-                  step={0.1}
-                  value={options.volume || 1.0}
-                  onChange={(e) => setOptions({ ...options, volume: Number(e.target.value) })}
-                />
-
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
-                  <div>
-                    <label className="canva-label" style={{ fontSize: 12 }}>Tăng âm đầu (Fade-in): {(options.fade_in || 0).toFixed(1)}s</label>
+                <div className="subtitle-generation-options is-gemini">
+                  <label className="subtitle-generation-checkbox">
                     <input
-                      type="range"
-                      className="canva-slider"
-                      min={0.0}
-                      max={3.0}
-                      step={0.5}
-                      value={options.fade_in || 0}
-                      onChange={(e) => setOptions({ ...options, fade_in: Number(e.target.value) })}
+                      type="checkbox"
+                      checked={geminiBilingual}
+                      disabled={generationRunning}
+                      onChange={(event) => setGeminiBilingual(event.target.checked)}
                     />
-                  </div>
-                  <div>
-                    <label className="canva-label" style={{ fontSize: 12 }}>Giảm âm cuối (Fade-out): {(options.fade_out || 0).toFixed(1)}s</label>
-                    <input
-                      type="range"
-                      className="canva-slider"
-                      min={0.0}
-                      max={3.0}
-                      step={0.5}
-                      value={options.fade_out || 0}
-                      onChange={(e) => setOptions({ ...options, fade_out: Number(e.target.value) })}
-                    />
-                  </div>
+                    <span>Giữ câu gốc làm dòng phụ</span>
+                  </label>
                 </div>
-              </div>
-
-              {/* 3. Tỷ lệ & Nền (Aspect Ratio & Background Fill) */}
-              <div className="canva-tool-group" style={{ marginTop: 20 }}>
-                <label className="canva-label" style={{ fontWeight: 700 }}>Tỷ lệ khung hình & Nền</label>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>
-                  <button
-                    type="button"
-                    className={`canva-btn ${(options.aspect_ratio || "16:9") === "16:9" ? "canva-btn-primary" : "canva-btn-outline"}`}
-                    style={{ fontSize: 12, padding: '8px 4px' }}
-                    onClick={() => setOptions({ ...options, aspect_ratio: "16:9" })}
-                  >
-                    16:9 (Ngang)
-                  </button>
-                  <button
-                    type="button"
-                    className={`canva-btn ${(options.aspect_ratio || "16:9") === "9:16" ? "canva-btn-primary" : "canva-btn-outline"}`}
-                    style={{ fontSize: 12, padding: '8px 4px' }}
-                    onClick={() => setOptions({ ...options, aspect_ratio: "9:16" })}
-                  >
-                    9:16 (TikTok)
-                  </button>
-                  <button
-                    type="button"
-                    className={`canva-btn ${(options.aspect_ratio || "16:9") === "1:1" ? "canva-btn-primary" : "canva-btn-outline"}`}
-                    style={{ fontSize: 12, padding: '8px 4px' }}
-                    onClick={() => setOptions({ ...options, aspect_ratio: "1:1" })}
-                  >
-                    1:1 (Vuông)
-                  </button>
-                </div>
-
-                {(options.aspect_ratio === "9:16" || options.aspect_ratio === "1:1") && (
-                  <div style={{ marginTop: 12, padding: 12, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-                    <label className="canva-label" style={{ fontSize: 12, fontWeight: 600 }}>Kiểu phủ nền (Background Fill)</label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-                      <button
-                        type="button"
-                        className={`canva-btn ${(options.bg_fill_type || "blur") === "blur" ? "canva-btn-primary" : "canva-btn-outline"}`}
-                        style={{ flex: 1, fontSize: 12 }}
-                        onClick={() => setOptions({ ...options, bg_fill_type: "blur" })}
-                      >
-                        ✨ Mờ nền (Blur)
-                      </button>
-                      <button
-                        type="button"
-                        className={`canva-btn ${(options.bg_fill_type || "blur") === "black" ? "canva-btn-primary" : "canva-btn-outline"}`}
-                        style={{ flex: 1, fontSize: 12 }}
-                        onClick={() => setOptions({ ...options, bg_fill_type: "black" })}
-                      >
-                        ⬛ Khung đen
-                      </button>
-                    </div>
-                  </div>
+                {!videoId && <small>Hãy tải video trước để bật Gemini.</small>}
+                {geminiStatus && !geminiStatus.installed && (
+                  <small role="alert">Chưa cài Gemini CLI. Chạy: npm install -g @google/gemini-cli@latest</small>
                 )}
-              </div>
-
-              {/* 4. Cắt xén Video (Video Trimming) */}
-              <div className="canva-tool-group" style={{ marginTop: 20 }}>
-                <label className="canva-label" style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
-                  <Scissors size={16} />
-                  Cắt xén Video (Trim)
-                </label>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 8 }}>
-                  <div>
-                    <label className="canva-label" style={{ fontSize: 12 }}>Thời điểm bắt đầu (s)</label>
-                    <input
-                      type="number"
-                      className="canva-toolbar-input"
-                      style={{ width: '100%' }}
-                      min={0}
-                      max={duration || 100}
-                      step={0.5}
-                      value={options.trim_start || 0}
-                      onChange={(e) => setOptions({ ...options, trim_start: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div>
-                    <label className="canva-label" style={{ fontSize: 12 }}>Thời điểm kết thúc (s)</label>
-                    <input
-                      type="number"
-                      className="canva-toolbar-input"
-                      style={{ width: '100%' }}
-                      min={options.trim_start || 0}
-                      max={duration || 100}
-                      step={0.5}
-                      placeholder={duration ? duration.toFixed(1) : "Hết video"}
-                      value={options.trim_end !== null && options.trim_end !== undefined ? options.trim_end : ""}
-                      onChange={(e) => setOptions({ ...options, trim_end: e.target.value ? Number(e.target.value) : null })}
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB: POSITION (Vị trí) */}
-          {activeTab === "position" && (
-            <div className="canva-panel-content" style={{ padding: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #e5e7eb', paddingBottom: 12 }}>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#111827' }}>Vị trí</h3>
-                <button type="button" className="canva-toolbar-btn canva-toolbar-btn-icon" onClick={() => setActiveTab("text")} title="Đóng">
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="canva-tool-group">
-                <label className="canva-label" style={{ fontWeight: 700 }}>Căn chỉnh vị trí trên trang</label>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>
-                  <button
-                    type="button"
-                    className="canva-btn canva-btn-outline"
-                    style={{ fontSize: 12 }}
-                    onClick={() => setOptions({ ...options, position: "custom", pos_x: 10, pos_y: options.pos_y })}
-                  >
-                    Trái
-                  </button>
-                  <button
-                    type="button"
-                    className="canva-btn canva-btn-outline"
-                    style={{ fontSize: 12 }}
-                    onClick={() => setOptions({ ...options, position: "custom", pos_x: 50, pos_y: options.pos_y })}
-                  >
-                    Giữa (Ngang)
-                  </button>
-                  <button
-                    type="button"
-                    className="canva-btn canva-btn-outline"
-                    style={{ fontSize: 12 }}
-                    onClick={() => setOptions({ ...options, position: "custom", pos_x: 90, pos_y: options.pos_y })}
-                  >
-                    Phải
-                  </button>
-
-                  <button
-                    type="button"
-                    className="canva-btn canva-btn-outline"
-                    style={{ fontSize: 12 }}
-                    onClick={() => setOptions({ ...options, position: "custom", pos_x: options.pos_x, pos_y: 15 })}
-                  >
-                    Trên
-                  </button>
-                  <button
-                    type="button"
-                    className="canva-btn canva-btn-outline"
-                    style={{ fontSize: 12 }}
-                    onClick={() => setOptions({ ...options, position: "custom", pos_x: options.pos_x, pos_y: 50 })}
-                  >
-                    Giữa (Dọc)
-                  </button>
-                  <button
-                    type="button"
-                    className="canva-btn canva-btn-outline"
-                    style={{ fontSize: 12 }}
-                    onClick={() => setOptions({ ...options, position: "custom", pos_x: options.pos_x, pos_y: 85 })}
-                  >
-                    Dưới
-                  </button>
-                </div>
-              </div>
-
-              <div className="canva-tool-group" style={{ marginTop: 24 }}>
-                <label className="canva-label" style={{ fontWeight: 700 }}>Tọa độ tùy chỉnh (%)</label>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <div>
-                    <label className="canva-label" style={{ fontSize: 12 }}>X: {options.pos_x}%</label>
-                    <input
-                      type="range"
-                      className="canva-slider"
-                      min={0}
-                      max={100}
-                      value={options.pos_x}
-                      onChange={(e) => setOptions({ ...options, position: "custom", pos_x: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div>
-                    <label className="canva-label" style={{ fontSize: 12 }}>Y: {options.pos_y}%</label>
-                    <input
-                      type="range"
-                      className="canva-slider"
-                      min={0}
-                      max={100}
-                      value={options.pos_y}
-                      onChange={(e) => setOptions({ ...options, position: "custom", pos_y: Number(e.target.value) })}
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB: ANIMATE (Chuyển động) */}
-          {activeTab === "animate" && (
-            <div className="canva-panel-content" style={{ padding: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #e5e7eb', paddingBottom: 12 }}>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#111827' }}>Chuyển động phụ đề</h3>
-                <button type="button" className="canva-toolbar-btn canva-toolbar-btn-icon" onClick={() => setActiveTab("text")} title="Đóng">
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="canva-effects-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
-                {[
-                  { id: "none", label: "Không có", icon: "✨" },
-                  { id: "fade", label: "Mờ dần", icon: "🌫️" },
-                  { id: "rise", label: "Trồi lên", icon: "⬆️" },
-                  { id: "pan", label: "Gạt sang", icon: "➡️" },
-                  { id: "typewriter", label: "Máy đánh chữ", icon: "⌨️" },
-                ].map((anim) => (
-                  <button
-                    key={anim.id}
-                    type="button"
-                    className={`canva-effect-card ${options.animation === anim.id ? "active" : ""}`}
-                    onClick={() => setOptions({ ...options, animation: anim.id as SubtitleBurnOptions["animation"] })}
-                  >
-                    <div className="effect-card-preview" style={{ fontSize: 24 }}>
-                      {anim.icon}
-                    </div>
-                    <span className="effect-card-label">{anim.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* MAIN CANVAS & TIMELINE */}
-        <div className="canva-main-area">
-          {/* TOP TOOLBAR AREA */}
-          <div className="canva-top-toolbar-area">
-            {selectedSub ? (
-              <div className="canva-floating-pill-toolbar" style={{ position: "relative" }}>
-                {/* 1. Subtitle / Caption Label Pill */}
-                <button
-                  type="button"
-                  className={`canva-pill-item ${activeTab === "text" ? "active" : ""}`}
-                  onClick={() => setActiveTab("text")}
-                  title="Chú thích phụ đề"
-                  style={{ background: "#f0e7fe", color: "#7d2ae8", border: "1px solid #c084fc", fontWeight: 600 }}
-                >
-                  <Subtitles size={15} />
-                  <span>Chú thích</span>
-                </button>
-
-                {/* 2. Font family select */}
-                <select
-                  className="canva-pill-select"
-                  value={options.font_name}
-                  onChange={(e) => setOptions({ ...options, font_name: e.target.value })}
-                >
-                  <option value="Arimo">Arimo</option>
-                  <option value="Arial">Arial</option>
-                  <option value="Roboto">Roboto</option>
-                  <option value="Montserrat">Montserrat</option>
-                  <option value="Impact">Impact</option>
-                  <option value="Trebuchet MS">Trebuchet MS</option>
-                  <option value="Comic Sans MS">Comic Sans MS</option>
-                  <option value="Times New Roman">Times New Roman</option>
-                </select>
-
-                {/* 3. Font size capsule */}
-                <div className="canva-pill-capsule">
-                  <button className="canva-pill-btn-sm" onClick={() => setOptions({ ...options, font_size: Math.max(14, options.font_size - 2) })}>-</button>
-                  <span className="canva-pill-size-num">{options.font_size}</span>
-                  <button className="canva-pill-btn-sm" onClick={() => setOptions({ ...options, font_size: Math.min(72, options.font_size + 2) })}>+</button>
-                </div>
-
-                {/* 4. Text color with Rainbow bar */}
-                <div className="canva-pill-color-btn" title="Màu chữ">
-                  <span className="color-letter" style={{ color: options.font_color !== "#FFFFFF" ? options.font_color : "#0f172a" }}>A</span>
-                  <div className="rainbow-bar" style={{ background: options.font_color !== "#FFFFFF" ? options.font_color : undefined }} />
-                  <input
-                    type="color"
-                    className="hidden-color-input"
-                    value={options.font_color}
-                    onChange={(e) => setOptions({ ...options, font_color: e.target.value })}
-                  />
-                </div>
-
-                {/* 5. Bold B */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn ${options.bold ? "active" : ""}`}
-                  onClick={() => setOptions({ ...options, bold: !options.bold })}
-                  title="In đậm"
-                >
-                  <strong>B</strong>
-                </button>
-
-                {/* 6. Italic I */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn ${options.italic ? "active" : ""}`}
-                  onClick={() => setOptions({ ...options, italic: !options.italic })}
-                  title="In nghiêng"
-                >
-                  <em>I</em>
-                </button>
-
-                {/* 7. Underline U */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn ${options.underline ? "active" : ""}`}
-                  onClick={() => setOptions({ ...options, underline: !options.underline })}
-                  title="Gạch chân"
-                >
-                  <Underline size={15} />
-                </button>
-
-                {/* 8. Strikethrough S */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn ${options.strikethrough ? "active" : ""}`}
-                  onClick={() => setOptions({ ...options, strikethrough: !options.strikethrough })}
-                  title="Gạch ngang"
-                >
-                  <Strikethrough size={15} />
-                </button>
-
-                {/* 9. Uppercase aA */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn ${options.uppercase ? "active" : ""}`}
-                  onClick={() => setOptions({ ...options, uppercase: !options.uppercase })}
-                  title="Đổi kiểu chữ hoa/thường"
-                >
-                  aA
-                </button>
-
-                {/* 10. Align Toggle */}
-                <button
-                  type="button"
-                  className="canva-pill-btn"
-                  title="Căn chỉnh dòng"
-                  onClick={() => {
-                    const nextAlign = options.alignment_type === "center" ? "left" : options.alignment_type === "left" ? "right" : "center";
-                    setOptions({ ...options, alignment_type: nextAlign });
-                  }}
-                >
-                  {options.alignment_type === "left" ? <AlignLeft size={15} /> : options.alignment_type === "right" ? <AlignRight size={15} /> : <AlignCenter size={15} />}
-                </button>
-
-                {/* 11. List */}
-                <button
-                  type="button"
-                  className="canva-pill-btn"
-                  title="Danh sách"
-                >
-                  <List size={15} />
-                </button>
-
-                {/* 12. Spacing Button with Popover */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn ${showSpacingPopover ? "active" : ""}`}
-                  title="Khoảng cách chữ & dòng"
-                  onClick={() => setShowSpacingPopover(!showSpacingPopover)}
-                >
-                  <ArrowUpDown size={15} />
-                </button>
-
-                {/* Spacing Popover Floating Container */}
-                {showSpacingPopover && (
-                  <div className="canva-popover-menu">
-                    <div className="canva-popover-row">
-                      <label className="canva-label" style={{ fontSize: 12 }}>Khoảng cách chữ: {options.spacing}px</label>
-                      <input
-                        type="range"
-                        className="canva-slider"
-                        min={-5}
-                        max={15}
-                        value={options.spacing}
-                        onChange={(e) => setOptions({ ...options, spacing: Number(e.target.value) })}
-                      />
-                    </div>
-                    <div className="canva-popover-row">
-                      <label className="canva-label" style={{ fontSize: 12 }}>Khoảng cách dòng: {(options.line_spacing || 1.2).toFixed(1)}</label>
-                      <input
-                        type="range"
-                        className="canva-slider"
-                        min={0.8}
-                        max={2.5}
-                        step={0.1}
-                        value={options.line_spacing || 1.2}
-                        onChange={(e) => setOptions({ ...options, line_spacing: Number(e.target.value) })}
-                      />
-                    </div>
-                  </div>
+                {geminiStatus?.issue === "unsupported_consumer_oauth" && (
+                  <small role="alert">
+                    Đăng nhập Google cá nhân không còn dùng được cho Gemini CLI. Thêm <code>GEMINI_API_KEY</code> vào <code>backend/.env</code> rồi khởi động lại; xem thêm <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>.
+                  </small>
                 )}
-
-                {/* 13. Format Painter */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn ${copiedStyleBuffer ? "active" : ""}`}
-                  title="Sao chép định dạng"
-                  onClick={() => {
-                    if (!copiedStyleBuffer) {
-                      setCopiedStyleBuffer({ ...options });
-                    } else {
-                      setOptions({ ...options, ...copiedStyleBuffer });
-                    }
-                  }}
-                >
-                  <Paintbrush size={15} />
-                </button>
-
-                {/* 14. Hiệu ứng */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn text-btn ${activeTab === "style" ? "active" : ""}`}
-                  style={activeTab === "style" ? { background: "#f0e7fe", color: "#7d2ae8", fontWeight: 700 } : undefined}
-                  onClick={() => setActiveTab("style")}
-                >
-                  Hiệu ứng
-                </button>
-
-                {/* 15. Chuyển động */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn text-btn ${activeTab === "animate" ? "active" : ""}`}
-                  style={activeTab === "animate" ? { background: "#f0e7fe", color: "#7d2ae8", fontWeight: 700 } : undefined}
-                  onClick={() => setActiveTab("animate")}
-                >
-                  Chuyển động
-                </button>
-
-                {/* 16. Vị trí */}
-                <button
-                  type="button"
-                  className={`canva-pill-btn text-btn ${activeTab === "position" ? "active" : ""}`}
-                  style={activeTab === "position" ? { background: "#f0e7fe", color: "#7d2ae8", fontWeight: 700 } : undefined}
-                  onClick={() => setActiveTab("position")}
-                >
-                  Vị trí
-                </button>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="canva-canvas">
-            <div
-              className="player-wrapper"
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                alignItems: "center",
-                width: "100%",
-                height: "100%",
-                padding: "20px"
-              }}
-            >
-              <div
-                className="video-aspect-container"
-                ref={playerWrapperRef}
-                style={{
-                  position: "relative",
-                  width: videoSize.width && videoSize.height ? `min(100%, calc(100vh * ${videoSize.width / videoSize.height}))` : "800px",
-                  height: videoSize.width && videoSize.height ? `min(100%, calc(100vw * ${videoSize.height / videoSize.width}))` : "450px",
-                  maxHeight: "100%",
-                  maxWidth: "100%",
-                  aspectRatio: videoSize.width && videoSize.height ? `${videoSize.width}/${videoSize.height}` : "16/9",
-                  boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
-                  background: originalVideoUrl ? "#000" : "#1e293b",
-                  overflow: "hidden"
-                }}
-              >
-                {originalVideoUrl ? (
-                  <video
-                    ref={videoRef}
-                    src={previewMode === "rendered" && subtitledVideoUrl ? subtitledVideoUrl : originalVideoUrl}
-                    style={{ width: "100%", height: "100%", display: "block" }}
-                    onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                    onDurationChange={(e) => setDuration(e.currentTarget.duration)}
-                    onPlay={() => setIsPlaying(true)}
-                    onPause={() => setIsPlaying(false)}
-                    onEnded={() => setIsPlaying(false)}
-                    onClick={togglePlay}
-                    onLoadedMetadata={(e) => {
-                      const dur = e.currentTarget.duration || 40;
-                      setVideoSize({
-                        width: e.currentTarget.videoWidth,
-                        height: e.currentTarget.videoHeight,
-                      });
-                      if (originalVideoUrl) {
-                        extractVideoThumbnails(originalVideoUrl, dur);
-                      }
-                    }}
-                  />
-                ) : (
+                {geminiStatus?.issue === "invalid_api_key" && (
+                  <small role="alert">GEMINI_API_KEY không hợp lệ. Kiểm tra key trong backend/.env rồi khởi động lại ứng dụng.</small>
+                )}
+                {geminiStatus?.installed && !geminiStatus.authenticated && !geminiStatus.issue && (
+                  <small role="alert">Chưa có xác thực dùng được. Thêm GEMINI_API_KEY vào backend/.env hoặc cấu hình Vertex AI.</small>
+                )}
+                {geminiStatus?.authenticated && (
+                  <small className="subtitle-generation-ready">
+                    {geminiStatus.auth_method === "gemini_api_key"
+                      ? "Đã cấu hình Gemini API key cho CLI."
+                      : geminiStatus.auth_method === "vertex_ai"
+                        ? "Đã cấu hình Vertex AI cho CLI."
+                        : "Đã tìm thấy phiên Gemini CLI; quyền truy cập sẽ được kiểm tra khi chạy."}
+                  </small>
+                )}
+                {videoId && mediaMetadata && !mediaMetadata.has_audio && (
+                  <small role="alert">Video không có audio để tạo phụ đề.</small>
+                )}
+                {generationJob && (
                   <div
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      backgroundColor: "#ffffff",
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      position: "relative"
-                    }}
-                  />
-                )}
-
-                {/* Magenta Alignment Guidelines */}
-                {(isDragging || Math.abs(options.pos_x - 50) < 1.5) && (
-                  <div className="canva-snap-line-v" style={{ left: `${options.pos_x}%` }} />
-                )}
-                {(isDragging || Math.abs(options.pos_y - 50) < 1.5) && (
-                  <div className="canva-snap-line-h" style={{ top: `${options.pos_y}%` }} />
-                )}
-
-                {/* User-uploaded Logo Overlay Image */}
-                {overlayImage && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      top: 16,
-                      left: 16,
-                      zIndex: 40,
-                      pointerEvents: "none",
-                    }}
+                    className={`subtitle-job-progress state-${generationJob.state}`}
+                    aria-live="polite"
                   >
-                    <img src={overlayImage} alt="Logo overlay" style={{ maxHeight: 40, maxWidth: 160, objectFit: "contain" }} />
-                  </div>
-                )}
-
-                {/* Canva Drag-Drop Interactive Live Subtitle Overlay */}
-                {previewMode === "live" && activeSub && (
-                  <div
-                    className={`live-sub-overlay canva-box ${selectedSub && selectedSub === activeSub ? "selected" : ""}`}
-                    role="button"
-                    tabIndex={0}
-                    aria-label="Chọn lớp phụ đề đang hiển thị"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const idx = subtitles.indexOf(activeSub);
-                      setSelectedSubIndex(idx >= 0 ? idx : 0);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        const idx = subtitles.indexOf(activeSub);
-                        setSelectedSubIndex(idx >= 0 ? idx : 0);
-                      }
-                    }}
-                    style={{
-                      fontFamily: options.font_name,
-                      fontSize: `${Math.max(14, options.font_size)}px`,
-                      color: options.font_color,
-                      fontWeight: options.bold ? "bold" : "normal",
-                      fontStyle: options.italic ? "italic" : "normal",
-                      textDecoration: `${options.underline ? "underline" : ""} ${options.strikethrough ? "line-through" : ""}`.trim() || "none",
-                      textAlign: options.alignment_type || "center",
-                      lineHeight: options.line_spacing || 1.2,
-                      textTransform: options.uppercase ? "uppercase" : "none",
-                      letterSpacing: `${options.spacing}px`,
-                      left: `${options.pos_x}%`,
-                      top: `${options.pos_y}%`,
-                      transform: "translate(-50%, -50%)",
-                      WebkitPaintOrder: "stroke fill",
-                      paintOrder: "stroke fill",
-                      WebkitTextStroke: options.outline_width > 0 ? `${options.outline_width}px ${options.outline_color}` : "none",
-                      textShadow: options.shadow_width > 0
-                        ? `${options.shadow_width}px ${options.shadow_width}px 4px ${options.shadow_color}`
-                        : (options.outline_width > 0 ? "none" : "0 2px 4px rgba(0,0,0,0.9)"),
-                      backgroundColor: options.bg_enabled ? hexToRgba(options.bg_color, options.bg_opacity) : "transparent",
-                      padding: options.bg_enabled ? "8px 16px" : "4px 12px",
-                      borderRadius: "8px",
-                      maxWidth: "85%",
-                    } as CSSProperties}
-                  >
-                    {/* Bounding box drag border area */}
-                    <div
-                      className="canva-border-drag-area"
-                      onMouseDown={handleStartDrag}
-                      title="Bấm và kéo đường viền để di chuyển vị trí phụ đề"
-                    />
-
-                    {/* Corner Handles */}
-                    <div className="canva-handle handle-tl" onMouseDown={handleStartResizeText} title="Kéo để thay đổi cỡ chữ" />
-                    <div className="canva-handle handle-tr" onMouseDown={handleStartResizeText} title="Kéo để thay đổi cỡ chữ" />
-                    <div className="canva-handle handle-bl" onMouseDown={handleStartResizeText} title="Kéo để thay đổi cỡ chữ" />
-                    <div className="canva-handle handle-br" onMouseDown={handleStartResizeText} title="Kéo để thay đổi cỡ chữ" />
-
-                    {/* Drag Move handle (+) */}
-                    <div
-                      className={`canva-move-handle ${isDragging ? "is-dragging" : ""}`}
-                      onMouseDown={handleStartDrag}
-                      title="Tóm vào đây để di chuyển phụ đề"
-                    >
-                      +
+                    <div>
+                      <span>{generationJob.message}</span>
+                      <strong>{generationJob.progress}%</strong>
                     </div>
-
-                    {/* Subtitle text area (Bấm và kéo để di chuyển, nhấp kép để sửa chữ) */}
-                    <div
-                      className="sub-text-content"
-                      contentEditable={isEditingInline}
-                      suppressContentEditableWarning
-                      onMouseDown={(e) => {
-                        if (!isEditingInline) {
-                          handleStartDrag(e);
-                        } else {
-                          e.stopPropagation();
-                        }
-                      }}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        setIsEditingInline(true);
-                      }}
-                      onBlur={(e) => {
-                        setIsEditingInline(false);
-                        const updatedText = e.currentTarget.innerText.trim();
-                        if (updatedText && activeSub && selectedSubIndex !== null) {
-                          handleUpdateSubText(selectedSubIndex, updatedText);
-                        }
-                      }}
-                      style={{
-                        outline: isEditingInline ? "1px dashed #7d2ae8" : "none",
-                        backgroundColor: isEditingInline ? "rgba(255,255,255,0.2)" : undefined,
-                        cursor: isEditingInline ? "text" : "move",
-                      }}
-                    >
-                      {options.uppercase ? activeSub.text.toUpperCase() : activeSub.text}
-                    </div>
-
-                    {activeSub.secondary_text && (
-                      <span className="sub-secondary-line">
-                        {activeSub.secondary_text}
-                      </span>
+                    <progress max={100} value={generationJob.progress} />
+                    {generationJob.cancel_requested && generationRunning && (
+                      <small>Đang dừng tiến trình Gemini CLI an toàn.</small>
+                    )}
+                    {generationJob.state === "succeeded" && generationJob.result && (
+                      <small>
+                        {generationJob.result.segment_count} cue · {generationJob.result.chunk_count} lượt Gemini
+                        {generationJob.result.processing_seconds
+                          ? ` · ${Math.round(generationJob.result.processing_seconds)} giây xử lý`
+                          : ""}
+                      </small>
                     )}
                   </div>
                 )}
-              </div>
-            </div>
-          </div>
-
-          {/* TIMELINE CENTER PLAYBACK BAR */}
-          <div className="canva-timeline-center-controls">
-            <span className="time-display">{formatTime(currentTime)}</span>
-            <button className="btn-play-circle-lg" onClick={togglePlay} disabled={!originalVideoUrl} title={isPlaying ? "Tạm dừng" : "Phát"}>
-              {isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" style={{ marginLeft: 2 }} />}
-            </button>
-            <span className="time-display">{formatTime(duration || 40)}</span>
-          </div>
-
-          {/* TIMELINE MULTI-TRACK AREA */}
-          <div className="canva-timeline">
-            <div className="timeline-tracks-area">
-              <div className="timeline-body">
-                {/* Left Track Control Rail */}
-                <div className="timeline-track-controls">
-                  {!originalVideoUrl ? (
-                    <>
-                      <button className="btn-track-toggle" title="Thành phần">
-                        <Shapes size={16} />
-                      </button>
-                      <button className="btn-track-toggle" title="Phương tiện">
-                        <Film size={16} />
-                      </button>
-                      <button className="btn-track-toggle" title="Âm thanh">
-                        <Music size={16} />
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button className="btn-track-toggle active" title="Phụ đề">
-                        <Subtitles size={16} />
-                        <div className="btn-track-badge" />
-                      </button>
-                      {overlayImage && (
-                        <button className="btn-track-toggle active" title="Ảnh Logo đè">
-                          <Shapes size={16} />
-                          <div className="btn-track-badge" />
-                        </button>
-                      )}
-                      <button className="btn-track-toggle" title="Video Clip">
-                        <Film size={16} />
-                      </button>
-                    </>
-                  )}
-                </div>
-
-                <div className="timeline-scale" ref={timelineTracksAreaRef} onMouseDown={handleStartScrubbing}>
-                  {/* Time Ruler */}
-                  <div className="timeline-ruler">
-                    {Array.from({ length: 7 }).map((_, i) => (
-                      <div key={i} className="ruler-mark-group">
-                        <span className="ruler-label">{i === 6 ? "1:00" : `${i * 10} giây`}</span>
-                        <div className="ruler-ticks">
-                          <span />
-                          <span />
-                          <span />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="timeline-tracks-container">
-                    {/* Canva Playhead Line */}
-                    <div
-                      className="canva-playhead"
-                      style={{ left: (duration || 40) > 0 ? `${(currentTime / (duration || 40)) * 100}%` : "0%" }}
-                    >
-                      <div className="playhead-head">▼</div>
-                      <div className="playhead-line" />
-                    </div>
-
-                    <div className="timeline-track-lanes">
-                  {!originalVideoUrl ? (
-                    <>
-                      {/* Empty State Track 1: Thêm thành phần */}
-                      <div className="canva-track track-empty-placeholder" style={{ height: 32 }}>
-                        <Shapes size={14} />
-                        <span>Thêm thành phần</span>
-                      </div>
-                      {/* Empty State Track 2: Kéo và thả phương tiện */}
-                      <div className="canva-track track-empty-placeholder" style={{ height: 64, backgroundColor: "#f3f4f6" }}>
-                        <div className="empty-add-btn">
-                          <Plus size={16} />
-                        </div>
-                        <span>hoặc kéo và thả phương tiện</span>
-                      </div>
-                      {/* Empty State Track 3: Thêm âm thanh */}
-                      <div className="canva-track track-empty-placeholder" style={{ height: 32 }}>
-                        <Music size={14} />
-                        <span>Thêm âm thanh</span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      {/* Track 1: Subtitles (Canva Bright Green Capsules) */}
-                      <div className="canva-track track-elements">
-                        {subtitles.length > 0 ? (
-                          <div className="subtitles-timeline-row">
-                            {subtitles.map((sub, i) => {
-                              const totalSec = duration || 40;
-                              const left = (sub.start_seconds / Math.max(totalSec, 1)) * 100;
-                              const width = Math.max(1, ((sub.end_seconds - sub.start_seconds) / Math.max(totalSec, 1)) * 100);
-                              const isAct = activeSub === sub;
-                              const isSel = selectedSubIndex === i;
-                              return (
-                                <div
-                                  key={i}
-                                  className={`sub-block-pill ${isAct ? "active" : ""} ${isSel ? "selected" : ""}`}
-                                  style={{ left: `${left}%`, width: `${width}%` }}
-                                  onMouseDown={(e) => handleStartPillDrag(e, i, "move")}
-                                  onClick={() => {
-                                    handleSeek(sub.start_seconds);
-                                    setSelectedSubIndex(i);
-                                  }}
-                                  title={`${sub.text} (${sub.start_seconds.toFixed(1)}s - ${sub.end_seconds.toFixed(1)}s)`}
-                                >
-                                  <div
-                                    className="pill-handle-l"
-                                    onMouseDown={(e) => handleStartPillDrag(e, i, "trim_start")}
-                                    title="Kéo để chỉnh mốc thời gian bắt đầu"
-                                  />
-                                  <div className="sub-track-indicator-top" />
-                                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{sub.text}</span>
-                                  <div
-                                    className="pill-handle-r"
-                                    onMouseDown={(e) => handleStartPillDrag(e, i, "trim_end")}
-                                    title="Kéo để chỉnh mốc thời gian kết thúc"
-                                  />
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <div className="track-empty-bar">
-                            <Shapes size={14} />
-                            <span>Thêm phụ đề</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Track 2: Overlay Logo Track (Only rendered if user uploaded a logo image!) */}
-                      {overlayImage && (
-                        <div className="canva-track track-elements">
-                          <div className="subtitles-timeline-row">
-                            <div
-                              className="watermark-block-pill"
-                              style={{ left: "0%", width: "100%" }}
-                              title={overlayName || "Logo Overlay"}
-                            >
-                              <img src={overlayImage} alt="Logo" style={{ width: 16, height: 16, objectFit: "contain", borderRadius: 2 }} />
-                              <span>{overlayName || "Logo Overlay"}</span>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Track 3: Video Clips Filmstrip with Real Extracted Thumbnails */}
-                      <div className="canva-track track-media" style={{ height: 48 }}>
-                        <div className="video-thumbnails-strip">
-                          {videoThumbnails.length > 0 ? (
-                            videoThumbnails.map((thumb, idx) => (
-                              <div key={idx} className="video-thumb-clip">
-                                <img src={thumb} alt={`Clip frame ${idx}`} />
-                              </div>
-                            ))
-                          ) : (
-                            <div className="track-empty-bar">
-                              <Film size={14} />
-                              <span>Đang tải video...</span>
-                            </div>
-                          )}
-                          <div className="plus-box" style={{ borderRadius: 0, height: "100%", width: 36, cursor: "pointer" }}>
-                            <Plus size={16} />
-                          </div>
-                        </div>
-                      </div>
-                    </>
-                  )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* BOTTOM STATUS BAR (Matching Canva exactly) */}
-          <div className="canva-status-bar">
-            <div className="canva-status-left">
-              <span>Trang 1 / 1</span>
-            </div>
-
-            <div className="canva-status-right">
-              {/* Zoom Controls */}
-              <div className="canva-zoom-control">
-                <button className="canva-status-btn" onClick={() => setZoomLevel(Math.max(10, zoomLevel - 5))}>-</button>
-                <input
-                  type="range"
-                  className="canva-zoom-slider"
-                  min={10}
-                  max={200}
-                  value={zoomLevel}
-                  onChange={(e) => setZoomLevel(Number(e.target.value))}
+              </section>
+              <div className="subtitle-manual-divider"><span>Hoặc nhập phụ đề thủ công</span></div>
+              <button
+                type="button"
+                className={`studio-copy-prompt ${copiedPrompt ? "is-success" : ""}`}
+                onClick={() => void handleCopyPrompt()}
+              >
+                {copiedPrompt ? <Check size={17} /> : <Copy size={17} />}
+                {copiedPrompt ? "Đã sao chép" : "Sao chép prompt JSON V2"}
+              </button>
+              <label className="studio-textarea-field">
+                <span>Kết quả Gemini, SRT hoặc VTT</span>
+                <textarea
+                  rows={6}
+                  value={rawText}
+                  placeholder='Dán JSON bắt đầu bằng { "schema_version": 2, … }'
+                  onChange={(event) => setRawText(event.target.value)}
                 />
-                <button className="canva-status-btn" onClick={() => setZoomLevel(Math.min(200, zoomLevel + 5))}>+</button>
-                <span style={{ minWidth: 32, textAlign: "right" }}>{zoomLevel}%</span>
-              </div>
-
-              {/* Trang grid button */}
-              <button className="canva-status-btn">
-                <Grid size={14} />
-                <span>Trang</span>
-                <span style={{ opacity: 0.7, marginLeft: 4 }}>{formatTime(currentTime)} / {formatTime(duration || 40)}</span>
+              </label>
+              <button
+                type="button"
+                className="studio-primary-button"
+                disabled={parsing || !rawText.trim()}
+                aria-busy={parsing}
+                onClick={() => void handleParse()}
+              >
+                {parsing ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}
+                {parsing ? "Đang phân tích" : "Phân tích phụ đề"}
               </button>
-
-              {/* Fullscreen button */}
-              <button className="canva-status-btn" title="Toàn màn hình">
-                <Maximize2 size={14} />
-              </button>
-
-              {/* Help button */}
-              <button className="canva-status-btn" title="Trợ giúp">
-                <HelpCircle size={14} />
-              </button>
+              {sortedCues.length > 0 && (
+                <div className="subtitle-alignment-panel">
+                  <div className="subtitle-alignment-heading">
+                    <div>
+                      <strong>Căn timing theo audio</strong>
+                      <span>
+                        {mediaMetadata?.has_audio
+                          ? "Cue thủ công được khóa; cache theo audio + transcript."
+                          : "Video này không có audio để căn tự động."}
+                      </span>
+                    </div>
+                    {alignmentRunning ? (
+                      <button
+                        type="button"
+                        className="studio-icon-button is-danger"
+                        aria-label="Hủy alignment"
+                        title="Hủy alignment"
+                        onClick={() => void handleCancelAlignment()}
+                      >
+                        <Square size={14} fill="currentColor" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="studio-secondary-button"
+                        disabled={!canAlign}
+                        onClick={() => void handleAlign()}
+                      >
+                        <AudioLines size={16} />
+                        Căn tất cả
+                      </button>
+                    )}
+                  </div>
+                  {alignmentJob && (
+                    <div
+                      className={`subtitle-job-progress state-${alignmentJob.state}`}
+                      aria-live="polite"
+                    >
+                      <div>
+                        <span>{alignmentJob.message}</span>
+                        <strong>{alignmentJob.progress}%</strong>
+                      </div>
+                      <progress max={100} value={alignmentJob.progress} />
+                      {alignmentJob.state === "succeeded" && alignmentJob.result && (
+                        <small>
+                          {alignmentJob.result.aligned_cue_count} cue ·{" "}
+                          {alignmentJob.result.engine === "energy"
+                            ? "Energy VAD"
+                            : "Faster Whisper"}
+                          {alignmentJob.result.cache_hit ? " · cache" : ""}
+                        </small>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+              {warnings.length > 0 && (
+                <details className="subtitle-warning-summary">
+                  <summary>{warnings.length} cảnh báo timing</summary>
+                  <ul>
+                    {warnings.slice(0, 12).map((warning, index) => (
+                      <li key={`${warning.code}-${warning.cue_id ?? index}`}>{warning.message}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {sortedCues.length > 0 && (
+                <VirtualSubtitleList
+                  cues={sortedCues}
+                  selectedCueId={selectedCueId}
+                  durationMs={mediaDurationMs}
+                  frameTiming={frameTiming}
+                  onAdd={handleAddCue}
+                  onSelect={setSelectedCueId}
+                  onSeek={(milliseconds) => workspaceRef.current?.seekTo(milliseconds)}
+                  onDelete={handleDeleteCue}
+                  onSplit={handleSplitCue}
+                  onMergeNext={handleMergeCue}
+                  onChange={handleCueChange}
+                  onAlignCue={(cueId) => void handleAlign([cueId])}
+                />
+              )}
             </div>
-          </div>
-        </div>
+          )}
+
+          {activeTab === "style" && (
+            <div className="studio-panel-section">
+              <div className="studio-panel-heading"><h2>Kiểu phụ đề</h2><p>Preview trực tiếp dùng cùng lựa chọn font, màu và khoảng cách với renderer.</p></div>
+              <div className="studio-preset-grid">
+                {Object.entries(STYLE_PRESETS).map(([name, preset]) => (
+                  <button key={name} type="button" onClick={() => setOptions((current) => ({ ...current, ...preset }))}>
+                    <LayoutTemplate size={17} />
+                    {name === "readable" ? "Dễ đọc" : name === "compact" ? "Gọn" : "Nhấn mạnh"}
+                  </button>
+                ))}
+              </div>
+              <label className="studio-field"><span>Font</span><select value={options.font_name} onChange={(event) => setOptions({ ...options, font_name: event.target.value })}><option>Arimo</option><option>Arial</option><option>Impact</option><option>Segoe UI</option></select></label>
+              <div className="studio-field-grid">
+                <label className="studio-field"><span>Cỡ chữ</span><input type="number" min={14} max={96} value={options.font_size} onChange={(event) => setOptions({ ...options, font_size: Number(event.target.value) })} /></label>
+                <label className="studio-field"><span>Màu chữ</span><input type="color" value={options.font_color} onChange={(event) => setOptions({ ...options, font_color: event.target.value })} /></label>
+              </div>
+              <div className="studio-toggle-row">
+                <label><input type="checkbox" checked={options.bold} onChange={(event) => setOptions({ ...options, bold: event.target.checked })} /> Đậm</label>
+                <label><input type="checkbox" checked={options.uppercase} onChange={(event) => setOptions({ ...options, uppercase: event.target.checked })} /> Viết hoa</label>
+                <label><input type="checkbox" checked={options.bg_enabled} onChange={(event) => setOptions({ ...options, bg_enabled: event.target.checked })} /> Nền</label>
+              </div>
+              <div className="studio-align-row" aria-label="Căn chữ">
+                {(["left", "center", "right"] as const).map((alignment) => {
+                  const Icon = alignment === "left" ? AlignLeft : alignment === "center" ? AlignCenter : AlignRight;
+                  return <button key={alignment} type="button" className={options.alignment_type === alignment ? "is-active" : ""} aria-label={`Căn ${alignment}`} aria-pressed={options.alignment_type === alignment} onClick={() => setOptions({ ...options, alignment_type: alignment })}><Icon size={18} /></button>;
+                })}
+              </div>
+              <label className="studio-range-field"><span>Viền <output>{options.outline_width}px</output></span><input type="range" min={0} max={8} step={1} value={options.outline_width} onChange={(event) => setOptions({ ...options, outline_width: Number(event.target.value) })} /></label>
+              <label className="studio-range-field"><span>Giãn chữ <output>{options.spacing}px</output></span><input type="range" min={-2} max={12} step={0.5} value={options.spacing} onChange={(event) => setOptions({ ...options, spacing: Number(event.target.value) })} /></label>
+            </div>
+          )}
+
+          {activeTab === "mask" && (
+            <div className="studio-panel-section">
+              <div className="studio-panel-heading">
+                <h2>Che phụ đề cũ</h2>
+                <p>Tạo vùng che theo phần trăm khung video. Mặc định làm mờ và áp dụng suốt video.</p>
+              </div>
+              <div className="studio-mask-toolbar">
+                <button
+                  type="button"
+                  className="studio-primary-button"
+                  disabled={!videoId || subtitleMasks.length >= MAX_SUBTITLE_MASKS}
+                  onClick={addSubtitleMask}
+                >
+                  <EyeOff size={17} /> Thêm vùng che
+                </button>
+              </div>
+              {!videoId && <p className="studio-mask-hint">Hãy tải video trước để tạo vùng che.</p>}
+              {videoId && subtitleMasks.length === 0 && (
+                <p className="studio-mask-hint">Nhấn “Thêm vùng che”, sau đó kéo vùng trên video tới đúng phụ đề nước ngoài.</p>
+              )}
+              {subtitleMasks.length > 0 && (
+                <label className="studio-mask-selector">
+                  <select
+                    value={selectedMaskId ?? ""}
+                    aria-label="Chọn vùng che để chỉnh sửa"
+                    onChange={(event) => {
+                      setSelectedMaskId(event.target.value);
+                      setSelectedCueId(null);
+                    }}
+                  >
+                    {subtitleMasks.map((mask, index) => (
+                      <option key={mask.id} value={mask.id}>Vùng che {index + 1}</option>
+                    ))}
+                  </select>
+                  <span>{subtitleMasks.length}/{MAX_SUBTITLE_MASKS}</span>
+                </label>
+              )}
+              {selectedMask && (
+                <>
+                  <div className="studio-mask-group">
+                    <span>Hình dạng</span>
+                    <div className="studio-mask-choice-grid">
+                      {([
+                        ["rectangle", "Chữ nhật", Square],
+                        ["rounded", "Bo góc", RectangleHorizontal],
+                        ["ellipse", "Elip", Circle],
+                        ["band", "Dải ngang", Minus],
+                      ] as const).map(([shape, label, Icon]) => (
+                        <button
+                          key={shape}
+                          type="button"
+                          className={selectedMask.shape === shape ? "is-active" : ""}
+                          aria-pressed={selectedMask.shape === shape}
+                          onClick={() => updateSubtitleMask(selectedMask.id, { shape: shape as SubtitleMaskShape })}
+                        >
+                          <Icon size={17} /> {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="studio-mask-group">
+                    <span>Hiệu ứng</span>
+                    <div className="studio-mask-choice-grid">
+                      {([
+                        ["blur", "Làm mờ", EyeOff],
+                        ["pixelate", "Pixel", LayoutTemplate],
+                        ["solid", "Màu đặc", Square],
+                        ["darken", "Làm tối", Moon],
+                      ] as const).map(([effect, label, Icon]) => (
+                        <button
+                          key={effect}
+                          type="button"
+                          className={selectedMask.effect === effect ? "is-active" : ""}
+                          aria-pressed={selectedMask.effect === effect}
+                          onClick={() => updateSubtitleMask(selectedMask.id, { effect: effect as SubtitleMaskEffect })}
+                        >
+                          <Icon size={17} /> {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {(selectedMask.effect === "blur" || selectedMask.effect === "pixelate") && (
+                    <label className="studio-range-field">
+                      <span>{selectedMask.effect === "blur" ? "Độ mờ" : "Cỡ pixel"} <output>{selectedMask.strength.toFixed(0)}</output></span>
+                      <input type="range" min={1} max={40} step={1} value={selectedMask.strength} onChange={(event) => updateSubtitleMask(selectedMask.id, { strength: Number(event.target.value) })} />
+                    </label>
+                  )}
+                  {(selectedMask.effect === "solid" || selectedMask.effect === "darken") && (
+                    <label className="studio-range-field">
+                      <span>Độ phủ <output>{Math.round(selectedMask.opacity * 100)}%</output></span>
+                      <input type="range" min={0.05} max={1} step={0.05} value={selectedMask.opacity} onChange={(event) => updateSubtitleMask(selectedMask.id, { opacity: Number(event.target.value) })} />
+                    </label>
+                  )}
+                  <label className="studio-range-field">
+                    <span>Mềm viền <output>{selectedMask.feather.toFixed(0)}</output></span>
+                    <input type="range" min={0} max={20} step={1} value={selectedMask.feather} onChange={(event) => updateSubtitleMask(selectedMask.id, { feather: Number(event.target.value) })} />
+                  </label>
+                  {selectedMask.shape === "rounded" && (
+                    <label className="studio-range-field">
+                      <span>Bo góc <output>{selectedMask.cornerRadius.toFixed(0)}%</output></span>
+                      <input type="range" min={0} max={50} step={1} value={selectedMask.cornerRadius} onChange={(event) => updateSubtitleMask(selectedMask.id, { cornerRadius: Number(event.target.value) })} />
+                    </label>
+                  )}
+                  {selectedMask.effect === "solid" && (
+                    <label className="studio-field">
+                      <span>Màu che</span>
+                      <input type="color" value={selectedMask.color} onChange={(event) => updateSubtitleMask(selectedMask.id, { color: event.target.value })} />
+                    </label>
+                  )}
+                  <div className="studio-field-grid">
+                    <label className="studio-range-field">
+                      <span>Rộng <output>{selectedMask.width.toFixed(1)}%</output></span>
+                      <input type="range" min={4} max={100} step={0.1} disabled={selectedMask.shape === "band"} value={selectedMask.width} onChange={(event) => updateSubtitleMask(selectedMask.id, { width: Number(event.target.value) })} />
+                    </label>
+                    <label className="studio-range-field">
+                      <span>Cao <output>{selectedMask.height.toFixed(1)}%</output></span>
+                      <input type="range" min={3} max={100} step={0.1} value={selectedMask.height} onChange={(event) => updateSubtitleMask(selectedMask.id, { height: Number(event.target.value) })} />
+                    </label>
+                  </div>
+                  <p className="studio-mask-hint">Kéo vùng để di chuyển, kéo bốn góc để đổi kích thước. Giữ Shift + phím mũi tên để dịch nhanh.</p>
+                  <button
+                    type="button"
+                    className="studio-secondary-button studio-mask-delete"
+                    onClick={() => deleteSubtitleMask(selectedMask.id)}
+                  >
+                    <Trash2 size={16} /> Xóa vùng che
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
+          {activeTab === "video" && (
+            <div className="studio-panel-section">
+              <div className="studio-panel-heading"><h2>Video</h2><p>Trim và tốc độ dùng chung time-map khi xuất.</p></div>
+              <label className="studio-range-field"><span>Tốc độ <output>{options.video_speed?.toFixed(2)}×</output></span><input type="range" min={0.5} max={2} step={0.05} value={options.video_speed} onChange={(event) => setOptions({ ...options, video_speed: Number(event.target.value) })} /></label>
+              <label className="studio-range-field"><span>Âm lượng <output>{Math.round((options.volume ?? 1) * 100)}%</output></span><input type="range" min={0} max={1} step={0.01} value={options.volume} onChange={(event) => setOptions({ ...options, volume: Number(event.target.value) })} /></label>
+              <div className="studio-field-grid"><label className="studio-field"><span>Trim đầu (s)</span><input type="number" min={0} step={0.001} value={options.trim_start ?? 0} onChange={(event) => setOptions({ ...options, trim_start: Number(event.target.value) })} /></label><label className="studio-field"><span>Trim cuối (s)</span><input type="number" min={0} step={0.001} value={options.trim_end ?? ""} placeholder="Tự động" onChange={(event) => setOptions({ ...options, trim_end: event.target.value ? Number(event.target.value) : null })} /></label></div>
+              <label className="studio-field"><span>Tỉ lệ khung</span><select value={options.aspect_ratio} onChange={(event) => setOptions({ ...options, aspect_ratio: event.target.value as SubtitleBurnOptions["aspect_ratio"] })}><option value="original">Gốc</option><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option></select></label>
+              <label className="studio-field"><span>Chuyển động</span><select value={options.animation} onChange={(event) => setOptions({ ...options, animation: event.target.value as SubtitleBurnOptions["animation"] })}><option value="none">Không — timing 1 ms</option><option value="fade">Fade — timing 10 ms</option><option value="rise">Rise — timing 10 ms</option><option value="pan">Pan — timing 10 ms</option><option value="typewriter">Typewriter — timing 10 ms</option></select><small>Preview và video xuất cùng dùng libass; chế độ không hiệu ứng vẫn giữ timestamp 1 ms.</small></label>
+            </div>
+          )}
+
+          {activeTab === "position" && (
+            <div className="studio-panel-section">
+              <div className="studio-panel-heading"><h2>Vị trí và nền</h2><p>Kéo trực tiếp phụ đề trên video hoặc nhập tọa độ chính xác.</p></div>
+              <label className="studio-range-field"><span>Ngang <output>{options.pos_x.toFixed(1)}%</output></span><input type="range" min={0} max={100} step={0.1} value={options.pos_x} onChange={(event) => setOptions({ ...options, position: "custom", pos_x: Number(event.target.value) })} /></label>
+              <label className="studio-range-field"><span>Dọc <output>{options.pos_y.toFixed(1)}%</output></span><input type="range" min={0} max={100} step={0.1} value={options.pos_y} onChange={(event) => setOptions({ ...options, position: "custom", pos_y: Number(event.target.value) })} /></label>
+              <label className="studio-range-field"><span>Độ mờ nền <output>{Math.round(options.bg_opacity * 100)}%</output></span><input type="range" min={0} max={1} step={0.05} value={options.bg_opacity} disabled={!options.bg_enabled} onChange={(event) => setOptions({ ...options, bg_opacity: Number(event.target.value) })} /></label>
+              <button type="button" className="studio-secondary-button" onClick={() => setOptions({ ...options, position: "custom", pos_x: 50, pos_y: 78 })}>Đặt lại vị trí</button>
+            </div>
+          )}
+        </aside>
+
+        {sidebarOpen && <button type="button" className="subtitle-panel-backdrop" aria-label="Đóng bảng công cụ" onClick={() => setSidebarOpen(false)} />}
+
+        <main className="subtitle-studio-main">
+          <SubtitleWorkspace
+            ref={workspaceRef}
+            originalVideoUrl={originalVideoUrl}
+            renderedVideoUrl={renderedVideoUrl}
+            thumbnailCacheKey={thumbnailCacheKey}
+            media={mediaMetadata}
+            liveAssContent={liveAssContent}
+            cues={sortedCues}
+            selectedCueId={selectedCueId}
+            options={options}
+            overlayImage={overlayImage}
+            overlayName={overlayName}
+            overlayLayout={overlayLayout}
+            subtitleMasks={subtitleMasks}
+            selectedMaskId={selectedMaskId}
+            onDurationChange={handleDurationChange}
+            onSelectCue={setSelectedCueId}
+            onUpdateCueText={(cueId, text) => handleCueChange(cueId, { text })}
+            onCueTimingCommit={handleCueTimingCommit}
+            onOptionsChange={setOptions}
+            onOverlayLayoutChange={setOverlayLayout}
+            onSelectMask={(maskId) => {
+              setSelectedMaskId(maskId);
+              if (maskId) {
+                setSelectedCueId(null);
+                setActiveTab("mask");
+                setSidebarOpen(true);
+              }
+            }}
+            onMaskChange={updateSubtitleMask}
+            onMaskDelete={deleteSubtitleMask}
+          />
+        </main>
       </div>
     </div>
   );

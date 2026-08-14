@@ -10,8 +10,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
-from backup_sqlite import sqlite_path
-
 from app.config import settings
 
 
@@ -32,11 +30,6 @@ def safe_data_directory() -> Path:
     if data_dir == PROJECT_ROOT:
         raise ValueError("Refusing to delete the workspace root as a data directory.")
 
-    database_path = sqlite_path(settings.content_bot_database_url).resolve()
-    try:
-        database_path.relative_to(data_dir)
-    except ValueError as exc:
-        raise ValueError("Refusing to delete because the configured SQLite database is outside the data directory.") from exc
     return data_dir
 
 

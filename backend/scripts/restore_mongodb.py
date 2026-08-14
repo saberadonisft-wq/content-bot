@@ -32,6 +32,7 @@ def main() -> int:
         help="Required acknowledgement that the current database will be replaced.",
     )
     args = parser.parse_args()
+    store.initialize()
     if not settings.mongodb_uri or not store.is_available:
         raise RuntimeError("MongoDB is not available; refusing to restore data.")
     if not args.replace_current:

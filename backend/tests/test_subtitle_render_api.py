@@ -4,8 +4,60 @@ import time
 from pathlib import Path
 
 from app import main
-from app.schemas import SubtitleJobResponse, SubtitleRenderRequestV2
+from app.schemas import (
+    SubtitleAssPreviewRequestV2,
+    SubtitleJobResponse,
+    SubtitleRenderRequestV2,
+)
 from app.services.subtitle_jobs import SubtitleJobManager
+
+
+def test_preview_ass_uses_percentage_anchor_and_output_aspect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"fixture")
+    media = {
+        "width": 1920,
+        "height": 1080,
+        "duration_ms": 5000,
+        "has_audio": False,
+    }
+    monkeypatch.setattr(main, "_uploaded_video_path", lambda _video_id: source)
+    monkeypatch.setattr(main, "probe_media_cached", lambda *_args, **_kwargs: media)
+    request = SubtitleAssPreviewRequestV2(
+        video_id="a" * 12,
+        document={
+            "schema_version": 2,
+            "language": "vi",
+            "timebase": "milliseconds",
+            "timing_source": "manual",
+            "timing_precision_ms": 1,
+            "segments": [
+                {
+                    "id": "cue-1",
+                    "start_ms": 100,
+                    "end_ms": 900,
+                    "text": "Phụ đề tỷ lệ",
+                    "timing_source": "manual",
+                    "timing_precision_ms": 1,
+                    "needs_review": False,
+                    "revision": 0,
+                }
+            ],
+        },
+        options={"font_size": 14, "pos_x": 25, "pos_y": 75},
+    )
+
+    response = main.preview_subtitle_timeline_v2_endpoint(request)
+
+    assert response.play_res_x == 1280
+    assert response.play_res_y == 720
+    assert "PlayResX: 1280" in response.ass
+    assert "PlayResY: 720" in response.ass
+    assert "Style: Default,Arimo,21.0" in response.ass
+    assert r"\pos(320,540)" in response.ass
 
 
 def test_render_endpoint_submits_progress_and_attachable_result(
@@ -73,6 +125,20 @@ def test_render_endpoint_submits_progress_and_attachable_result(
             "y": 12,
             "width": 22,
         },
+        masks=[{
+            "id": "mask-1",
+            "shape": "rounded",
+            "effect": "blur",
+            "x": 20,
+            "y": 70,
+            "width": 60,
+            "height": 12,
+            "strength": 14,
+            "opacity": 0.85,
+            "feather": 2,
+            "cornerRadius": 18,
+            "color": "#000000",
+        }],
     )
 
     submitted = SubtitleJobResponse(
@@ -100,5 +166,19 @@ def test_render_endpoint_submits_progress_and_attachable_result(
         "y": 12.0,
         "width": 22.0,
     }
+    assert received["masks"] == [{
+        "id": "mask-1",
+        "shape": "rounded",
+        "effect": "blur",
+        "x": 20.0,
+        "y": 70.0,
+        "width": 60.0,
+        "height": 12.0,
+        "strength": 14.0,
+        "opacity": 0.85,
+        "feather": 2.0,
+        "corner_radius": 18.0,
+        "color": "#000000",
+    }]
     assert (tmp_path / "jobs" / f"{submitted.id}.json").is_file()
     manager.shutdown()

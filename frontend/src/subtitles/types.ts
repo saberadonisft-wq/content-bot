@@ -73,6 +73,25 @@ export type OverlayLayout = {
   width: number;
 };
 
+export type SubtitleMaskShape = "rectangle" | "rounded" | "ellipse" | "band";
+
+export type SubtitleMaskEffect = "blur" | "pixelate" | "solid" | "darken";
+
+export type SubtitleMaskRegion = {
+  id: string;
+  shape: SubtitleMaskShape;
+  effect: SubtitleMaskEffect;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  strength: number;
+  opacity: number;
+  feather: number;
+  cornerRadius: number;
+  color: string;
+};
+
 export type MediaMetadata = {
   fingerprint: string;
   file_size_bytes: number;
