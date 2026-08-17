@@ -517,20 +517,22 @@ def _append_mask_filters(
 
 
 def _video_filter_graph(
-    subtitle_path: Path,
+    subtitle_path: Path | None,
     fonts_dir: Path,
     media: dict[str, Any],
     options: dict[str, Any],
     overlay: dict[str, Any] | None = None,
     masks: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
-    escaped_subtitle = _escape_filter_path(subtitle_path)
     escaped_fonts = _escape_filter_path(fonts_dir)
-    subtitle_filter = (
-        f"subtitles=filename='{escaped_subtitle}':fontsdir='{escaped_fonts}'"
-    )
-    if subtitle_path.suffix.lower() != ".ass":
-        subtitle_filter += f":charenc=UTF-8:force_style='{_force_style(options)}'"
+    subtitle_filter: str | None = None
+    if subtitle_path is not None:
+        escaped_subtitle = _escape_filter_path(subtitle_path)
+        subtitle_filter = (
+            f"subtitles=filename='{escaped_subtitle}':fontsdir='{escaped_fonts}'"
+        )
+        if subtitle_path.suffix.lower() != ".ass":
+            subtitle_filter += f":charenc=UTF-8:force_style='{_force_style(options)}'"
     speed = Decimal(str(options.get("video_speed", 1)))
     setpts = "setpts=PTS-STARTPTS" if speed == 1 else f"setpts=(PTS-STARTPTS)/{speed}"
     target = _target_dimensions(media, str(options.get("aspect_ratio", "original")))
@@ -590,7 +592,10 @@ def _video_filter_graph(
         )
         current_video = "[with_overlay]"
 
-    graph_parts.append(f"{current_video}{setpts},{subtitle_filter}[vout]")
+    video_chain = f"{current_video}{setpts}"
+    if subtitle_filter:
+        video_chain += f",{subtitle_filter}"
+    graph_parts.append(f"{video_chain}[vout]")
     return ";".join(graph_parts), "[vout]"
 
 
@@ -813,8 +818,6 @@ def render_precision_video(
             cue["text"] = str(cue["text"]).upper()
             if cue.get("secondary_text"):
                 cue["secondary_text"] = str(cue["secondary_text"]).upper()
-    if not transformed:
-        raise SubtitleRenderError("No subtitle cue intersects the render range")
     warnings = validate_cues(transformed)
     if render_mode == "effects":
         warnings.append(
@@ -843,7 +846,8 @@ def render_precision_video(
             prefix=f"{video_id[:8]}-", dir=work_root
         ) as work:
             work_dir = Path(work)
-            if render_mode == "effects":
+            subtitle_path: Path | None = None
+            if transformed and render_mode == "effects":
                 subtitle_path = work_dir / "subtitles.ass"
                 play_res_x, play_res_y = subtitle_play_resolution(media, options)
                 subtitle_path.write_text(
@@ -855,7 +859,7 @@ def render_precision_video(
                     ),
                     encoding="utf-8",
                 )
-            else:
+            elif transformed:
                 subtitle_path = work_dir / "subtitles.srt"
                 subtitle_path.write_text(
                     subtitles_to_srt(transformed), encoding="utf-8"

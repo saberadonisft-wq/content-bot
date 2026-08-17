@@ -175,6 +175,7 @@ def build_catalog_router(
                             "permission_required": AvailabilityState.PERMISSION_REQUIRED.value,
                             "degraded": AvailabilityState.DEGRADED.value,
                             "rate_limited": AvailabilityState.RATE_LIMITED.value,
+                            "disabled_by_policy": AvailabilityState.DISABLED_BY_POLICY.value,
                         }.get(status.state, AvailabilityState.SETUP_REQUIRED.value)
                         reason_code = status.reason_code or "LOCAL_PREREQUISITE_MISSING"
                         message = status.detail
@@ -195,6 +196,15 @@ def build_catalog_router(
                             "auth_modes": [mode.value for mode in spec.auth_modes],
                             "schedule_policy": spec.schedule_policy.value,
                             "target_kinds": [kind.value for kind in spec.target_kinds],
+                            "budget_limits": (
+                                {
+                                    "max_items": spec.budget_limits.max_items,
+                                    "max_requests": spec.budget_limits.max_requests,
+                                    "deadline_seconds": spec.budget_limits.deadline_seconds,
+                                }
+                                if spec.budget_limits is not None
+                                else None
+                            ),
                         }
                     )
             search_specs = SOURCE_REGISTRY.operation_specs(manifest.id, Operation.SEARCH)

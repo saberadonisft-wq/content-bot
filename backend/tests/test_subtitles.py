@@ -77,6 +77,23 @@ def test_subtitles_to_srt():
     assert "2\n00:00:03,000 --> 00:00:05,000\nDòng 2" in srt
 
 
+def test_secondary_text_is_alignment_metadata_and_not_rendered():
+    cue = {
+        "start_ms": 0,
+        "end_ms": 3000,
+        "text": "Bản dịch tiếng Việt",
+        "secondary_text": "原文字幕",
+    }
+
+    srt = subtitles_to_srt([cue])
+    ass = subtitles_to_ass([cue], {"position": "custom", "pos_x": 50, "pos_y": 78})
+
+    assert "Bản dịch tiếng Việt" in srt
+    assert "原文字幕" not in srt
+    assert "Bản dịch tiếng Việt" in ass
+    assert "原文字幕" not in ass
+
+
 def test_subtitles_to_ass_applies_render_options_and_multiline_spacing():
     ass = subtitles_to_ass(
         [{"start_seconds": 0, "end_seconds": 3, "text": "Dòng một\nDòng hai"}],

@@ -606,8 +606,6 @@ def subtitles_to_srt(subtitles: list[dict[str, Any]]) -> str:
         s_time = ms_to_srt_time(start_ms)
         e_time = ms_to_srt_time(end_ms)
         text = str(sub["text"])
-        if sub.get("secondary_text"):
-            text = f"{text}\n{sub['secondary_text']}"
         blocks.append(f"{idx}\n{s_time} --> {e_time}\n{text}\n")
     return "\n".join(blocks)
 
@@ -769,14 +767,9 @@ def subtitles_to_ass(
             for line in str(subtitle.get("text", "")).replace("\r\n", "\n").splitlines()
             if line.strip()
         ]
-        secondary_lines = [
-            (line.strip(), True)
-            for line in str(subtitle.get("secondary_text") or "")
-            .replace("\r\n", "\n")
-            .splitlines()
-            if line.strip()
-        ]
-        text_lines = primary_lines + secondary_lines
+        # secondary_text is retained as source-language metadata for alignment,
+        # but only the Vietnamese display text is rendered/exported.
+        text_lines = primary_lines
         if not text_lines:
             continue
         for index, line in enumerate(text_lines):
@@ -801,10 +794,8 @@ def subtitles_to_ass(
                 if animation in {"rise", "pan"} and animation_inner
                 else f"{{\\pos({base_x},{round(y)}){animation_inner}}}"
             )
-            line, is_secondary = line
-            secondary_size = round(ass_font_size * 0.82, 2)
-            secondary_tag = f"\\fs{secondary_size}\\b0" if is_secondary else ""
-            formatting_override = f"{{{secondary_tag}}}" if secondary_tag else ""
+            line, _is_secondary = line
+            formatting_override = ""
             safe_line = (
                 line.replace("\\", r"\\")
                 .replace("{", "\\{")

@@ -46,7 +46,7 @@ class CommandResult:
     stderr: str
 
 
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 
 
 def gemini_generation_cache_key(
@@ -379,6 +379,17 @@ Bạn là biên tập viên phụ đề tiếng Việt chuyên nghiệp. Hãy xe
 2. Đối chiếu với audio, nhân vật và ngữ cảnh hình ảnh.
 3. Giữ tên nhân vật, đại từ và thuật ngữ nhất quán trong toàn đoạn.
 
+Nếu video có phụ đề gốc hiển thị trên hình:
+- Phụ đề gốc là transcript và timing anchor ưu tiên cao nhất.
+- Bám sát từng cue gốc: giữ nguyên thứ tự, điểm bắt đầu, điểm kết thúc, cách xuống dòng và ranh giới lượt thoại.
+- Mỗi cue dịch tiếng Việt phải xuất hiện đồng thời với cue gốc tương ứng. Không gộp nhiều cue gốc thành một cue dịch và không tự tách một cue gốc thành nhiều cue dịch nếu không có bằng chứng rõ ràng.
+- Đặt nguyên văn nội dung gốc vào secondary_text khi chế độ song ngữ được bật để làm metadata đối chiếu/alignment; trường này không phải dòng cần hiển thị trên video. Đặt bản dịch tiếng Việt vào text.
+- Nếu phụ đề gốc và audio có vẻ lệch, ưu tiên thời điểm phụ đề thực sự xuất hiện trên hình, đặt needs_review=true và giảm confidence; không tự nối các cue thành một dải liên tục.
+
+Nếu video không có phụ đề gốc nhìn thấy:
+- Dùng audio làm nguồn timing chính.
+- start_ms là âm đầu tiên nghe được và end_ms là sau âm cuối cùng nghe được; giữ nguyên khoảng im lặng giữa hai lượt thoại.
+
 Yêu cầu dịch:
 - Dịch tự nhiên sang tiếng Việt, đúng ý và đúng sắc thái; không dịch từng chữ máy móc.
 - Không để sót chữ Trung/Nhật/Hàn trong dòng tiếng Việt; tên riêng phải phiên âm nhất quán.
@@ -388,7 +399,10 @@ Yêu cầu dịch:
 Yêu cầu timing:
 - Mỗi cue là một câu/ý tự nhiên, thường 1–6 giây và không quá 84 ký tự tiếng Việt.
 - start_ms/end_ms là số nguyên mili-giây, 0 <= start_ms < end_ms.
-- Cue theo thứ tự và không chồng lấn.
+- Khi có phụ đề gốc trên hình, start_ms/end_ms phải bám theo thời gian xuất hiện của cue gốc để bản dịch xuất hiện cùng lúc.
+- Khi không có phụ đề gốc, không làm tròn tất cả cue về giây tròn và không kéo cue kế tiếp sát cue trước; nếu audio có khoảng nghỉ thì phải giữ gap thật.
+- Cue theo thứ tự và không chồng lấn, trừ khi có hai người thực sự nói đồng thời.
+- Không đặt timing_precision_ms=10 chỉ để tạo vẻ chính xác. Dùng 1000 nếu chỉ chắc đến từng giây, 100 nếu có bằng chứng gần 0,1 giây; bước alignment audio phía sau mới lượng tử hóa về 10 ms.
 
 CHỈ trả về một JSON hợp lệ, không Markdown, không giải thích:
 {{
@@ -596,10 +610,14 @@ CHỈ trả về một JSON hợp lệ, không Markdown, không giải thích:
                     raise GeminiSubtitleError("Gemini trả về quá 500 cue phụ đề")
 
             context.update(95, "validating_result", "Đang kiểm tra phụ đề Gemini")
+            document_precision = max(
+                100,
+                *(int(cue.get("timing_precision_ms", 100)) for cue in combined_cues),
+            )
             document = SubtitleDocumentV2(
                 language="vi",
                 timing_source="gemini_estimate",
-                timing_precision_ms=100,
+                timing_precision_ms=document_precision,
                 segments=combined_cues,
             ).model_dump(mode="json")
             warnings.extend(validate_cues(document["segments"]))

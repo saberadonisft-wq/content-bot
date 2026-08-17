@@ -104,6 +104,17 @@ def test_source_catalog_is_manifest_driven_and_operation_specific(monkeypatch) -
     assert by_id["x"]["state"] == "ready"
     assert by_id["tiktok"]["global_search"] is False
     assert by_id["facebook"]["watchlist_filter"] is True
+    licensed_weibo = next(
+        operation
+        for operation in by_id["weibo"]["operations"]
+        if operation["provider_id"] == "licensed_weibo"
+        and operation["id"] == "search"
+    )
+    assert licensed_weibo["budget_limits"] == {
+        "max_items": 100,
+        "max_requests": 100,
+        "deadline_seconds": 900,
+    }
 
 
 def test_keyword_api_resolves_legacy_alias_without_persisting_it() -> None:

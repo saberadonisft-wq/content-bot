@@ -87,7 +87,7 @@ OBSERVED_DOM_RUNTIME_SPECS: dict[str, ObservedDomRuntimeSpec] = {
         "Weibo",
         "cbce_weibo",
         "weibo_post_v1",
-        frozenset({"weibo.com", "weibo.cn"}),
+        frozenset({"weibo.com", "weibo.cn", "m.weibo.cn"}),
         frozenset({"passport.weibo.com"}),
         ("weibo.com", "weibo.cn", "sinaimg.cn", "sinaimg.com"),
         frozenset({"post"}),

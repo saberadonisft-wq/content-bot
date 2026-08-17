@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..config import settings
 from . import SOURCE_REGISTRY
 from .adapters import NavigationPolicy, OwnedBrowserPage
 from .adapters.bilibili import (
@@ -56,7 +57,10 @@ from .adapters.weibo import (
     WeiboDomSearchProvider,
     WeiboSearchAdapter,
 )
-from .observed_dom_contract import load_observed_dom_contract
+from .licensed.mediacrawler.facade import LicensedSearchFacade
+from .licensed.mediacrawler.policy import assert_licensed_reuse_allowed
+from .licensed.mediacrawler.weibo_api import LicensedWeiboApiSearchProvider
+from .observed_dom_contract import DomContractUnavailable, load_observed_dom_contract
 from .observed_dom_runtime import OBSERVED_DOM_RUNTIME_SPECS
 from .runtime import (
     BrowserLaunchRequest,
@@ -190,16 +194,16 @@ class ObservedDomWorkerRequest:
     profile_root: Path
     pseudonym_key_ref: Path
     contract_root: Path
+    provider_id: str = ""
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> ObservedDomWorkerRequest:
         action = str(payload.get("action") or "")
-        source_id = action.removesuffix("_search")
-        if (
-            action != f"{source_id}_search"
-            or source_id not in OBSERVED_DOM_RUNTIME_SPECS
-        ):
+        licensed = action == "licensed_weibo_search"
+        source_id = "weibo" if licensed else action.removesuffix("_search")
+        if (not licensed and action != f"{source_id}_search") or source_id not in OBSERVED_DOM_RUNTIME_SPECS:
             raise ValueError("Unsupported reviewed DOM worker action")
+        provider_id = "licensed_weibo" if licensed else OBSERVED_DOM_RUNTIME_SPECS[source_id].provider_id
         terms_value = payload.get("terms")
         if not isinstance(terms_value, (list, tuple)):
             raise TypeError("Worker search terms must be an array")
@@ -223,16 +227,17 @@ class ObservedDomWorkerRequest:
         if cursor is not None and not isinstance(cursor, str):
             raise ValueError("Worker cursor must be a string")
         return cls(
-            source_id,
-            terms,
-            max_items,
-            max_requests,
-            deadline,
-            cursor,
-            _required_path(payload, "browser_executable"),
-            _required_path(payload, "profile_root"),
-            _required_path(payload, "pseudonym_key_ref"),
-            _required_path(payload, "contract_root"),
+            source_id=source_id,
+            terms=terms,
+            max_items=max_items,
+            max_requests=max_requests,
+            deadline_seconds=deadline,
+            initial_cursor=cursor,
+            browser_executable=_required_path(payload, "browser_executable"),
+            profile_root=_required_path(payload, "profile_root"),
+            pseudonym_key_ref=_required_path(payload, "pseudonym_key_ref"),
+            contract_root=_required_path(payload, "contract_root"),
+            provider_id=provider_id,
         )
 
 
@@ -603,16 +608,30 @@ async def run_observed_dom_worker(
     writer: WorkerWriter,
 ) -> None:
     runtime_spec = OBSERVED_DOM_RUNTIME_SPECS[request.source_id]
+    provider_id = request.provider_id or runtime_spec.provider_id
     if (
         start.source_id != runtime_spec.source_id
-        or start.provider_id != runtime_spec.provider_id
+        or start.provider_id != provider_id
         or start.operation != "search"
     ):
         raise ValueError("Worker identity does not match reviewed DOM provider")
-    contract = load_observed_dom_contract(
-        request.contract_root,
-        request.source_id,
-    )
+    contract = None
+    if provider_id != "licensed_weibo":
+        contract = load_observed_dom_contract(
+            request.contract_root,
+            request.source_id,
+        )
+    else:
+        try:
+            contract = load_observed_dom_contract(
+                request.contract_root,
+                request.source_id,
+            )
+        except DomContractUnavailable:
+            # The licensed mobile API can authenticate through the visible
+            # profile without a reviewed result-card selector.  If a contract
+            # exists, its login sentinels are still reused for better UX.
+            contract = None
     profile = ProfileNamespace(request.profile_root, SOURCE_REGISTRY).profile(
         request.source_id, "default"
     )
@@ -628,7 +647,7 @@ async def run_observed_dom_worker(
             runtime_spec.source_id,
             runtime_spec.allowed_hosts,
             runtime_spec.login_hosts,
-            login_selectors=contract.login_selectors,
+            login_selectors=contract.login_selectors if contract is not None else (),
             login_detection_grace_ms=2_000,
         ),
     )
@@ -641,7 +660,31 @@ async def run_observed_dom_worker(
         {"message": f"{runtime_spec.label} browser session is authenticated."},
     )
     pseudonymizer = IdentityPseudonymizer(key)
-    if runtime_spec.mode == "weibo_post_v1":
+    if provider_id == "licensed_weibo":
+        if runtime_spec.source_id != "weibo":
+            raise ValueError("Licensed provider is only wired for Weibo")
+        provider = LicensedWeiboApiSearchProvider(
+            owned,
+            on_auth_required=auth_required,
+            on_authenticated=authenticated,
+        )
+        delegate = WeiboSearchAdapter(
+            provider,
+            pseudonymizer,
+            provider_id="licensed_weibo",
+        )
+        adapter: SearchAdapter = LicensedSearchFacade(
+            source_id="weibo",
+            provider_id="licensed_weibo",
+            delegate=delegate,
+            reuse_root=Path(__file__).resolve().parent / "licensed" / "mediacrawler",
+            policy=assert_licensed_reuse_allowed(
+                {
+                    "non_commercial_learning": settings.content_bot_licensed_reuse_noncommercial_only,
+                }
+            ),
+        )
+    elif runtime_spec.mode == "weibo_post_v1":
         if not isinstance(contract.selectors, WeiboDomContract):
             raise ValueError("Reviewed Weibo contract has the wrong selector mode")
         provider = WeiboDomSearchProvider(
@@ -679,22 +722,12 @@ async def run_observed_dom_worker(
             metric_ids=runtime_spec.metric_ids,
             identity_builder=runtime_spec.identity_builder,
         )
-    context = RunContext(
-        run_id=str(start.run_id),
-        keyword_id=0,
-        source_id=runtime_spec.source_id,
-        provider_id=runtime_spec.provider_id,
-        operation="search",
-        target={"kind": "keyword"},
-        terms=request.terms,
-        filters={
-            "coverage": "reviewed_dom_contract",
-            "contract_digest": contract.artifact_digest,
-        },
-        budgets=RunBudgets(
-            max_items=request.max_items,
-            max_requests=request.max_requests,
-            deadline_seconds=request.deadline_seconds,
+    context = _observed_dom_search_context(
+        start,
+        request,
+        provider_id=provider_id,
+        contract_digest=(
+            contract.artifact_digest if contract is not None else None
         ),
     )
     await run_search_adapter_worker(
@@ -704,6 +737,39 @@ async def run_observed_dom_worker(
         writer,
         initial_cursor=request.initial_cursor,
         page_size=runtime_spec.page_size,
+    )
+
+
+def _observed_dom_search_context(
+    start: WorkerEnvelope,
+    request: ObservedDomWorkerRequest,
+    *,
+    provider_id: str,
+    contract_digest: str | None,
+) -> RunContext:
+    licensed = provider_id == "licensed_weibo"
+    return RunContext(
+        run_id=str(start.run_id),
+        keyword_id=0,
+        source_id=request.source_id,
+        provider_id=provider_id,
+        operation="search",
+        target={"kind": "keyword"},
+        terms=request.terms,
+        filters={
+            "coverage": (
+                "licensed_mobile_api" if licensed else "reviewed_dom_contract"
+            ),
+            "contract_digest": contract_digest,
+            "reuse_basis": (
+                "licensed_upstream_selective" if licensed else "project_reviewed_dom"
+            ),
+        },
+        budgets=RunBudgets(
+            max_items=request.max_items,
+            max_requests=request.max_requests,
+            deadline_seconds=request.deadline_seconds,
+        ),
     )
 
 
@@ -1095,6 +1161,7 @@ async def _execute(
     cancellation = CancellationToken()
     writer = WorkerWriter(start)
     _start_control_reader(start, cancellation, asyncio.get_running_loop())
+    heartbeat_task = asyncio.create_task(_worker_heartbeat(writer))
     try:
         if isinstance(request, ObservedDomWorkerRequest):
             await run_observed_dom_worker(start, request, cancellation, writer)
@@ -1122,6 +1189,16 @@ async def _execute(
         _emit_terminal_error(writer, failure)
         sys.stderr.write(safe_diagnostic(f"{type(exc).__name__}: {exc}") + "\n")
         return 2
+    finally:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+
+async def _worker_heartbeat(writer: WorkerWriter) -> None:
+    """Keep the parent supervisor alive during interactive browser waits."""
+    while True:
+        await asyncio.sleep(10)
+        writer.emit(WorkerMessageKind.HEARTBEAT, {"phase": "running"})
 
 
 def _start_control_reader(
@@ -1183,7 +1260,10 @@ def _request_from_payload(
     action = str(payload.get("action") or "")
     if (
         action.endswith("_search")
-        and action.removesuffix("_search") in OBSERVED_DOM_RUNTIME_SPECS
+        and (
+            action.removesuffix("_search") in OBSERVED_DOM_RUNTIME_SPECS
+            or action == "licensed_weibo_search"
+        )
     ):
         return ObservedDomWorkerRequest.from_payload(payload)
     if payload.get("action") in {

@@ -9,6 +9,7 @@ from __future__ import annotations
 from .contracts import (
     AuthMode,
     Coverage,
+    CrawlBudgets,
     DomainRule,
     ExecutionLane,
     ImplementationState,
@@ -34,6 +35,7 @@ def _operation(
     codec: str | None = "cbce.checkpoint.v1",
     metrics: tuple[str, ...] = (),
     cta: str | None = None,
+    budget_limits: CrawlBudgets | None = None,
 ) -> ProviderOperationSpec:
     return ProviderOperationSpec(
         operation=operation,
@@ -46,6 +48,7 @@ def _operation(
         handler_key=handler,
         metric_ids=metrics,
         cta=cta,
+        budget_limits=budget_limits,
     )
 
 
@@ -228,6 +231,34 @@ def _planned_browser_provider(
     )
 
 
+def _licensed_weibo_provider() -> ProviderManifest:
+    return _provider(
+        "licensed_weibo",
+        "MediaCrawler licensed Weibo API facade",
+        (
+            _operation(
+                Operation.SEARCH,
+                TargetKind.KEYWORD,
+                coverage=Coverage.PARTIAL,
+                auth=AuthMode.BROWSER_PROFILE,
+                schedule=SchedulePolicy.MANUAL_ONLY,
+                handler="connector:weibo:search",
+                codec="cbce.licensed.weibo.v1",
+                metrics=("like_count", "comment_count", "share_count"),
+                cta="Enable the non-commercial licensed provider and complete Weibo login in the visible profile.",
+                budget_limits=CrawlBudgets(
+                    max_items=100,
+                    max_requests=100,
+                    deadline_seconds=900,
+                ),
+            ),
+        ),
+        access="licensed_noncommercial_learning",
+        lane=ExecutionLane.ISOLATED_BROWSER,
+        policy=PolicyState.ALLOWED,
+    )
+
+
 def _bilibili_open_provider() -> ProviderManifest:
     return _provider(
         "bilibili_open_platform",
@@ -350,6 +381,7 @@ SOURCE_MANIFESTS: tuple[SourceManifest, ...] = (
             (
                 _bridge_provider(source_id),
                 *((_bilibili_open_provider(),) if source_id == "bilibili" else ()),
+                *((_licensed_weibo_provider(),) if source_id == "weibo" else ()),
                 _planned_browser_provider(
                     source_id,
                     search_implemented=source_id

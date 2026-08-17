@@ -585,8 +585,8 @@ class SubtitleRenderRequestV2(BaseModel):
 
     @model_validator(mode="after")
     def require_subtitles(self) -> SubtitleRenderRequestV2:
-        if not self.document.segments:
-            raise ValueError("At least one subtitle cue is required")
+        if not self.document.segments and self.overlay is None and not self.masks:
+            raise ValueError("At least one subtitle cue, overlay, or mask is required")
         return self
 
 

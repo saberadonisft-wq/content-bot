@@ -89,23 +89,25 @@ class MongoStore:
         """Connect on application startup instead of while Python imports modules."""
         if self.is_available:
             return True
-        if not settings.mongodb_uri:
-            return False
-        configure_mongodb_dns()
+        uri = settings.mongodb_uri or "mongodb://localhost:27017"
         kwargs: dict[str, Any] = {
             "tz_aware": True,
-            "serverSelectionTimeoutMS": 1000,
-            "connectTimeoutMS": 1000,
-            "tlsCAFile": certifi.where(),
+            "serverSelectionTimeoutMS": 2000,
+            "connectTimeoutMS": 2000,
         }
+        if uri.startswith("mongodb+srv://") or "tls=true" in uri.lower() or "ssl=true" in uri.lower():
+            configure_mongodb_dns()
+            kwargs["tlsCAFile"] = certifi.where()
+
         try:
-            client = MongoClient(settings.mongodb_uri, **kwargs)
+            client = MongoClient(uri, **kwargs)
             client.admin.command("ping")
             self.client = client
             self.db = self.client[settings.mongodb_database]
-            print("[MongoStore] Connected to MongoDB Atlas successfully.")
+            target_name = "Local MongoDB" if "localhost" in uri or "127.0.0.1" in uri else "MongoDB Atlas"
+            print(f"[MongoStore] Connected to {target_name} successfully.")
         except Exception as err:
-            print(f"[MongoStore] Warning: MongoDB Atlas connection failed ({err}). Storage is unavailable.")
+            print(f"[MongoStore] Warning: MongoDB connection failed ({err}). Persistence is unavailable.")
             self.client = None
             self.db = DummyDatabase()
             self._available = False

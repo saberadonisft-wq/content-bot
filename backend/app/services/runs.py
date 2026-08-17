@@ -364,7 +364,8 @@ class RunManager:
             ),
             None,
         )
-        max_items = keyword.get("max_items_per_source", 500)
+        requested_max_items = keyword.get("max_items_per_source", 500)
+        max_items = requested_max_items
         uses_browser = connector.capabilities.requires_login
         requested_operation = (
             Operation.SCAN_CHANNEL if channel else Operation.SEARCH
@@ -381,6 +382,17 @@ class RunManager:
             if SOURCE_REGISTRY.get(source_run["source_id"])
             else None
         )
+        budget_cap_detail: str | None = None
+        if selected_provider and selected_provider[1].budget_limits is not None:
+            max_items = min(
+                requested_max_items,
+                selected_provider[1].budget_limits.max_items,
+            )
+            if max_items < requested_max_items:
+                budget_cap_detail = (
+                    f"Provider budget capped this run at {max_items} items "
+                    f"(requested {requested_max_items})."
+                )
         if selected_provider:
             rollout = cbce_provider_rollout_status(
                 source_run["source_id"],
@@ -464,7 +476,9 @@ class RunManager:
         semaphore = self._browser_semaphore if uses_browser else self._semaphore
         fetched_count = 0
         ingested_count = 0
-        warning_messages: list[str] = []
+        warning_messages: list[str] = (
+            [budget_cap_detail] if budget_cap_detail is not None else []
+        )
         checkpoint = dict(source_run.get("checkpoint") or {})
         provider_id = selected_provider[0] if selected_provider else "legacy_connector"
         operation_name = "scan_channel" if channel else "search"
@@ -519,7 +533,7 @@ class RunManager:
             keyword_id=keyword["id"],
             name=keyword["name"],
             include_terms=include_terms,
-            max_items=keyword.get("max_items_per_source", 500),
+            max_items=max_items,
             checkpoint_tracker=tracker,
             legacy_checkpoint=checkpoint,
         )

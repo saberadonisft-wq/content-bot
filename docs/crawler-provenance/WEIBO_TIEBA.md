@@ -53,6 +53,17 @@ These are behavioral requirements only. No MediaCrawler endpoint wrapper, signat
 - Tieba minimum-operation cutover evidence now consists of two aggregate-only 2/2 canaries separated by 3666 seconds, configured active-provider resolution and passing clean-room/rollback audits. The non-responsive legacy overlap remains recorded as an evidence limitation; it does not justify claims beyond the partial DOM coverage in the manifest.
 - Child-comment persistence remains disabled until an independently observed stable child identity exists; root IDs, indexes or body hashes are not substituted.
 
+## Licensed Weibo runtime hardening — 2026-08-15
+
+- `licensed_weibo` remains explicit opt-in and manual-only. Its selected provider identity now survives the connector → isolated worker → run context → normalized record boundary; a mismatched identity fails before browser navigation.
+- The operation advertises and enforces `100` items / `100` requests per run. Larger topic budgets are reduced before the worker starts and are recorded as a run warning instead of failing inside the licensed facade.
+- Disabling non-commercial reuse returns `disabled_by_policy` with `LICENSED_REUSE_POLICY`; source catalog and run planning remain available and no licensed worker is opened.
+- Mobile API pagination respects the terminal `has_more` signal, preserves same-page offsets and moves directly to the next search term without a speculative empty request.
+- Licensed source-map entries now bind local content with SHA-256 and require the exact upstream snapshot commit, unique safe paths and timezone-aware review timestamps. Cutover audit applies both this integrity check and the runtime reuse policy.
+- A bounded live canary on 2026-08-15 (`2` items / `2` requests / `45s`) reached the licensed worker and returned typed `AUTH_REQUIRED` with zero observed or persisted items. A subsequent manual-login window remained unauthenticated and ended `DEADLINE_EXCEEDED`; heartbeat remained healthy. Reports are aggregate-only under `data/cbce-canary-reports/`; no provider cutover is claimed until an operator completes Weibo login and repeats the canary successfully.
+- The worker protocol now emits a bounded heartbeat every 10 seconds while an owned browser is waiting for login, so the parent supervisor does not misclassify a legitimate interactive session as a transport failure.
+- The post-heartbeat bounded canary (`licensed-weibo-2026-08-15-e.json`) also ended deterministically as `DEADLINE_EXCEEDED` with `0` items and `persisted=false`; there was no `Worker heartbeat timed out`. This confirms the remaining gate is external session authorization, not worker supervision.
+
 ## RunManager dedupe evidence — 2026-08-13
 
 - A deterministic Tieba regression runs the same canonical thread through two completed batches. The second observation updates the stored metric and appends a trend snapshot but keeps one content item, one keyword match and `new_item_count=0`.

@@ -80,28 +80,47 @@ import {
 import { useSubtitleHistory } from "./subtitles/useSubtitleHistory";
 import "./subtitle-studio.css";
 
-const GEMINI_PROMPT_TEMPLATE = `Bạn là biên tập viên phụ đề tiếng Việt. Hãy nghe toàn bộ video và tạo transcript theo từng câu nói.
+const GEMINI_PROMPT_TEMPLATE = `Bạn là biên tập viên phụ đề chuyên nghiệp cho video hội thoại. Hãy xem và nghe TOÀN BỘ video, xác định lời thoại theo audio và dịch sang tiếng Việt. Kết quả sẽ được đưa qua một bước forced alignment riêng, vì vậy bạn phải trung thực về timing và không được bịa độ chính xác.
 
-MỤC TIÊU
-- Chép đúng lời nói, không tóm tắt, không tự thêm thông tin.
-- Giữ các từ đệm có nghe thấy như “ờ”, “ừm”, “à” khi chúng ảnh hưởng ngữ điệu.
-- Mỗi đoạn phải có mốc bắt đầu và kết thúc tính từ đầu video.
-- Mốc thời gian được biểu diễn bằng số nguyên mili-giây.
+MỤC TIÊU VÀ THỨ TỰ ƯU TIÊN
+1. Xác định đúng đoạn hội thoại thực sự được nói, không tóm tắt và không tự thêm lời.
+2. Xác định ngôn ngữ gốc, người nói, lượt thoại và ngữ cảnh hình ảnh.
+3. Chép nguyên văn lời gốc nếu nghe/đọc đủ rõ.
+4. Dịch tự nhiên, đúng ý và đúng sắc thái sang tiếng Việt.
+5. Ước lượng mốc thời gian theo âm thanh thực tế; mốc cuối cùng sẽ do audio alignment hiệu chỉnh.
 
-QUY TẮC TIMING
-1. start_ms là lúc âm đầu tiên của câu bắt đầu; end_ms là lúc âm cuối cùng kết thúc.
-2. start_ms < end_ms, không dùng số âm, các đoạn phải theo thứ tự thời gian.
-3. Không để hai đoạn chồng lấn. Nếu hai người nói đè nhau, tách speaker nhưng vẫn ghi đúng khoảng nghe thấy.
-4. Không bịa ba chữ số mili-giây. Nếu hệ thống chỉ xác định được đến giây, đặt timing_precision_ms = 1000 và dùng phần mili-giây 000.
-5. Nếu xác định được gần 100 ms, đặt timing_precision_ms = 100. Chỉ đặt timing_precision_ms = 1 khi thật sự có dữ liệu ở độ phân giải mili-giây.
-6. Nếu không nghe rõ một từ, ghi “[không rõ]”; không đoán.
+QUY TẮC NGUỒN VÀ BẢN DỊCH
+- \`text\` luôn là phụ đề tiếng Việt dùng để hiển thị.
+- Nếu nhận diện được lời gốc, có thể đặt nguyên văn vào \`secondary_text\` để lưu làm dữ liệu đối chiếu/alignment; trường này là metadata nội bộ và không được hiển thị trên video.
+- Nếu video có phụ đề gốc hiển thị trên hình, phụ đề gốc là nguồn transcript và mốc căn chính. Bám sát từng dòng, thứ tự, điểm bắt đầu và điểm kết thúc nhìn thấy của phụ đề gốc.
+- Mỗi cue tiếng Việt phải dùng đúng thời gian của cue phụ đề gốc tương ứng nhưng chỉ hiển thị bản dịch tiếng Việt. Không dồn nhiều cue gốc thành một cue dịch và không tự tách một cue gốc thành nhiều cue dịch nếu không có bằng chứng rõ ràng.
+- Khi có phụ đề gốc, giữ nguyên ranh giới cue gốc ngay cả khi câu dịch dài/ngắn khác nhau; bản dịch phải theo đúng cue đó, không theo độ dài chữ tiếng Việt.
+- Nếu phụ đề gốc và audio lệch nhau, ghi nhận mốc theo phần xuất hiện thực tế trên hình, đánh dấu \`needs_review: true\` và giảm \`confidence\`; không tự làm tất cả cue liền nhau.
+- Giữ nguyên tên riêng, chức danh, đại từ, quan hệ nhân vật và thuật ngữ nhất quán.
+- Không đoán chữ bị che, bị nuốt âm hoặc bị tiếng ồn che. Dùng “[không rõ]” đúng tại vị trí không chắc chắn.
+- Không dùng phụ đề/chữ trên hình làm bằng chứng duy nhất nếu nó không khớp với audio.
+- Không tạo cue cho nhạc, hiệu ứng âm thanh hoặc chữ trên màn hình nếu không phải lời thoại.
 
-QUY TẮC CHIA CÂU
-- Một segment chứa một ý nói tự nhiên, ưu tiên 1–6 giây.
-- Không quá 84 ký tự mỗi segment; ưu tiên vị trí dấu câu và khoảng nghỉ để tách.
-- Không thêm lời mở đầu, giải thích, Markdown hoặc code fence.
+QUY TẮC TIMING — RẤT QUAN TRỌNG
+- Tất cả mốc tính từ đầu video, dùng integer milliseconds.
+- Nếu có phụ đề gốc hiển thị trên hình, \`start_ms\`/\`end_ms\` phải bám theo thời điểm cue gốc xuất hiện để bản dịch xuất hiện đồng thời; nếu không có phụ đề gốc, dùng âm đầu tiên và sau âm cuối cùng của lời thoại.
+- Dựa vào waveform/audio và khoảng im lặng, không dựa máy móc vào dấu phẩy, dấu chấm hay độ dài bản dịch.
+- Nếu giữa hai câu có im lặng, bắt buộc để khoảng trống: \`next.start_ms > previous.end_ms\`. Không kéo cue chạm nhau chỉ để lấp timeline.
+- Không dùng khoảng trống để che việc không nghe rõ; khi không chắc phải đặt \`needs_review: true\`.
+- Không để cue chồng lấn nếu không có hai người thực sự nói đồng thời.
+- \`timing_precision_ms\` mô tả độ tin cậy của Gemini: dùng 1000 nếu chỉ nhìn/nghe được gần từng giây; dùng 100 nếu xác định được gần 0,1 giây. Không đặt 10 hoặc 1 chỉ vì trường dữ liệu cho phép; 10 ms sẽ do bộ căn audio tạo ra.
+- Không làm tròn tất cả cue thành các mốc đều kết thúc đúng giây hoặc nối liên tục.
 
-CHỈ TRẢ VỀ MỘT JSON HỢP LỆ THEO MẪU
+QUY TẮC CHIA CUE
+- Một cue là một lượt nói hoặc một ý tự nhiên, thường dài 1–6 giây.
+- Tách khi đổi người nói, có khoảng nghỉ rõ, đổi ý hoặc câu quá dài.
+- Không quá 84 ký tự tiếng Việt mỗi cue; ưu tiên tách tại khoảng nghỉ tự nhiên, không cắt giữa một cụm từ.
+- Không tạo cue cực ngắn chỉ vì một tiếng động hoặc một từ không chắc chắn.
+- Giữ thứ tự thời gian và ID tăng dần: s0001, s0002, …
+- \`confidence\` phản ánh mức chắc chắn của cả lời thoại và timing, không được mặc định tất cả là 0.95.
+
+ĐỊNH DẠNG ĐẦU RA
+Chỉ trả về MỘT JSON hợp lệ, không Markdown, không code fence, không giải thích ngoài JSON:
 {
   "schema_version": 2,
   "language": "vi",
@@ -112,19 +131,23 @@ CHỈ TRẢ VỀ MỘT JSON HỢP LỆ THEO MẪU
     {
       "id": "s0001",
       "start_ms": 0,
-      "end_ms": 3000,
-      "text": "Nội dung phụ đề.",
-      "confidence": 0.90
+      "end_ms": 2450,
+      "text": "Bản dịch tiếng Việt.",
+      "secondary_text": "Lời thoại nguyên văn nếu xác định được.",
+      "confidence": 0.82,
+      "needs_review": false
     }
   ]
 }
 
-Trước khi trả kết quả, tự kiểm tra:
-- JSON parse được.
-- ID không trùng.
-- start_ms/end_ms là integer.
-- Không có đoạn rỗng, đảo thời gian hoặc chồng lấn.
-- Không có văn bản nào ngoài JSON.`;
+TỰ KIỂM TRA TRƯỚC KHI TRẢ KẾT QUẢ
+- JSON parse được và chỉ có một object JSON ở cấp cao nhất.
+- schema_version = 2, language = “vi”, timebase = “milliseconds”.
+- ID không trùng, đúng thứ tự, không có segment rỗng.
+- start_ms/end_ms là integer, 0 <= start_ms < end_ms.
+- Không có cue chồng lấn ngoài trường hợp hai người thực sự nói đè nhau.
+- Khoảng im lặng thật được giữ nguyên, không nối các cue thành một dải liên tục.
+- Không bịa timestamp 10 ms, không bịa lời thoại và không có văn bản nào ngoài JSON.`;
 
 const DEFAULT_OPTIONS: SubtitleBurnOptions = {
   font_name: "Arimo",
@@ -397,11 +420,12 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
   );
   const overlayNeedsUpload = Boolean(overlayImage && !overlayId && !overlayUploading);
   const overlayReady = !overlayImage || Boolean(overlayId && !overlayUploading);
+  const hasRenderContent = sortedCues.length > 0 || Boolean(overlayId) || subtitleMasks.length > 0;
   const selectedMask = subtitleMasks.find((mask) => mask.id === selectedMaskId) ?? null;
   const canRender = Boolean(
     videoId &&
       overlayReady &&
-      sortedCues.length > 0 &&
+      hasRenderContent &&
       sortedCues.every(
         (cue) => cue.text.trim() && cue.start_ms >= 0 && cue.end_ms > cue.start_ms,
       ),
@@ -1040,7 +1064,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
       setError(
         overlayNeedsUpload
           ? "Hãy chờ ảnh phủ tải xong hoặc chọn lại ảnh phủ trước khi xuất."
-          : "Chưa có cue phụ đề hợp lệ để xuất video.",
+          : "Cần ít nhất một cue phụ đề hoặc ảnh phủ hợp lệ để xuất video.",
       );
       return;
     }
@@ -1188,7 +1212,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
                 : overlayNeedsUpload
                   ? "Hãy chọn lại ảnh phủ để đồng bộ với file xuất"
                   : !canRender
-                    ? "Cần video và cue hợp lệ trước khi xuất"
+                    ? "Cần video và ít nhất một cue hoặc ảnh phủ hợp lệ trước khi xuất"
                     : "Xuất video có phụ đề và ảnh phủ"
             }
           >

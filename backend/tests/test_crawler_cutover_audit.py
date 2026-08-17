@@ -143,7 +143,7 @@ def test_current_cutover_audit_fails_closed_without_external_evidence(
     assert by_source["youtube"]["next_canary_eligible_at"] is None
     assert by_source["youtube"]["canary_wait_seconds"] == 0
     assert "ACTIVE_PROVIDER_IS_LEGACY" in by_source["xhs"]["blockers"]
-    assert by_source["weibo"]["candidate_provider_id"] == "cbce_weibo"
+    assert by_source["weibo"]["candidate_provider_id"] == "licensed_weibo"
     assert "NONLEGACY_IMPLEMENTATION_MISSING" not in by_source["weibo"]["blockers"]
     assert "ACTIVE_PROVIDER_IS_LEGACY" in by_source["weibo"]["blockers"]
     assert "TWO_SEPARATED_CANARIES_MISSING" in by_source["weibo"]["blockers"]

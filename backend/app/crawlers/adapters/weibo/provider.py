@@ -89,9 +89,14 @@ class WeiboSearchAdapter:
         self,
         provider: WeiboSearchProvider,
         pseudonymizer: IdentityPseudonymizer,
+        *,
+        provider_id: str = "cbce_weibo",
     ) -> None:
+        if not provider_id.strip():
+            raise ValueError("Weibo adapter provider identity cannot be empty")
         self.provider = provider
         self.pseudonymizer = pseudonymizer
+        self.provider_id = provider_id
         self._cancellation: CancellationToken | None = None
 
     async def open(self, context: RunContext, cancellation: CancellationToken) -> None:
@@ -124,7 +129,12 @@ class WeiboSearchAdapter:
         )
         return Page(
             tuple(
-                normalize_weibo_post(post, self.pseudonymizer) for post in page.items
+                normalize_weibo_post(
+                    post,
+                    self.pseudonymizer,
+                    provider_id=self.provider_id,
+                )
+                for post in page.items
             ),
             page.next_cursor,
             page.has_more,
@@ -138,7 +148,11 @@ class WeiboSearchAdapter:
 def normalize_weibo_post(
     post: WeiboPost,
     pseudonymizer: IdentityPseudonymizer,
+    *,
+    provider_id: str = "cbce_weibo",
 ) -> ContentRecord:
+    if not provider_id.strip():
+        raise ValueError("Weibo record provider identity cannot be empty")
     try:
         target = parse_weibo_target(post.canonical_url)
     except ValueError as exc:
@@ -188,7 +202,7 @@ def normalize_weibo_post(
         metrics=metrics,
         media=media,
         provenance={
-            "provider_id": "cbce_weibo",
+            "provider_id": provider_id,
             "contract_version": "cbce.weibo.post.v1",
         },
     )

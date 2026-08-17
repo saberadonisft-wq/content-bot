@@ -6,7 +6,7 @@
 ##>
 
 param(
-    [ValidateSet("backend", "frontend", "doctor", "setup-mediacrawler", "setup-subtitles")]
+    [ValidateSet("backend", "frontend", "doctor", "setup-mediacrawler", "setup-subtitles", "update", "rollback")]
     [string]$Action = "backend",
     [ValidateSet("tiny", "base", "small", "medium", "large-v3")]
     [string]$SubtitleModel = "small",
@@ -14,12 +14,182 @@ param(
     [ValidateRange(1024, 65535)]
     [int]$BackendPort = 8000,
     [ValidateRange(1024, 65535)]
-    [int]$FrontendPort = 5173
+    [int]$FrontendPort = 5173,
+    [string]$AuthServerUrl = "",
+    [switch]$SkipUpdateCheck,
+    [switch]$ForceUpdate
 )
 
 $ErrorActionPreference = "Stop"
 $taskRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $taskRoot
+
+function Get-CurrentAppVersion {
+    $versionFile = Join-Path $taskRoot "backend\app\version.py"
+    if (Test-Path -LiteralPath $versionFile) {
+        $content = Get-Content -LiteralPath $versionFile -Raw
+        if ($content -match 'APP_VERSION\s*=\s*["'']([^"'']+)["'']') {
+            return $matches[1].Trim()
+        }
+    }
+    return "0.1.0"
+}
+
+function Get-AuthServerEndpoint {
+    if ($AuthServerUrl) { return $AuthServerUrl.TrimEnd('/') }
+    
+    $envFile = Join-Path $taskRoot "backend\.env"
+    if (Test-Path -LiteralPath $envFile) {
+        $authUrlLine = Select-String -Path $envFile -Pattern '^CONTENT_BOT_AUTH_SERVER_URL\s*=\s*(\S+)' | Select-Object -First 1
+        if ($authUrlLine -and $authUrlLine.Matches.Groups[1].Value) {
+            return $authUrlLine.Matches.Groups[1].Value.TrimEnd('/')
+        }
+    }
+    return "http://127.0.0.1:8080"
+}
+
+function Invoke-SelfUpdate([switch]$Interactive) {
+    if ($SkipUpdateCheck) { return }
+
+    $currentVersion = Get-CurrentAppVersion
+    $authUrl = Get-AuthServerEndpoint
+    $checkUrl = $authUrl + "/api/v1/update/check?current_version=" + $currentVersion + "&channel=stable"
+
+    Write-Host ("Checking for updates (Current: v" + $currentVersion + ")...") -ForegroundColor DarkGray
+    try {
+        $update = Invoke-RestMethod -Uri $checkUrl -TimeoutSec 5 -ErrorAction Stop
+    } catch {
+        Write-Host ("Update check skipped (Auth server unreachable at " + $authUrl + ").") -ForegroundColor DarkGray
+        return
+    }
+
+    if (-not $update.update_available) {
+        Write-Host ("Content Bot is up to date (v" + $currentVersion + ").") -ForegroundColor Green
+        return
+    }
+
+    Write-Host ""
+    Write-Host "=================================================================" -ForegroundColor Cyan
+    Write-Host ("   NEW UPDATE AVAILABLE: v" + $update.latest_version + " (Current: v" + $currentVersion + ")") -ForegroundColor Yellow
+    Write-Host "=================================================================" -ForegroundColor Cyan
+    if ($update.changelog) {
+        Write-Host ""
+        Write-Host "Changelog:" -ForegroundColor White
+        Write-Host $update.changelog -ForegroundColor Gray
+    }
+    Write-Host ""
+
+    if (-not $ForceUpdate -and -not $update.mandatory) {
+        $prompt = Read-Host "Do you want to download and install this update now? (Y/n)"
+        if ($prompt -and $prompt -notmatch '^[Yy]') {
+            Write-Host "Update skipped. Starting application..." -ForegroundColor DarkGray
+            return
+        }
+    }
+
+    $updatesDir = Join-Path $taskRoot "data\updates"
+    $backupsDir = Join-Path $taskRoot "data\backups"
+    $zipFile = Join-Path $updatesDir ("content-bot-" + $update.latest_version + ".zip")
+    $extractedDir = Join-Path $updatesDir "extracted"
+
+    New-Item -ItemType Directory -Path $updatesDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $backupsDir -Force | Out-Null
+
+    Write-Host "Downloading update package from Cloudflare R2 / Storage..." -ForegroundColor Cyan
+    Write-Host ("Download URL: " + $update.download_url) -ForegroundColor DarkGray
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+        $webClient = New-Object System.Net.WebClient
+        $webClient.DownloadFile($update.download_url, $zipFile)
+    } catch {
+        Write-Error ("Failed to download update: " + $_.Exception.Message)
+        return
+    }
+
+    Write-Host "Verifying package SHA256 integrity..." -ForegroundColor Cyan
+    $downloadedHash = (Get-FileHash -LiteralPath $zipFile -Algorithm SHA256).Hash.ToLower()
+    $expectedHash = $update.sha256.ToLower().Trim()
+
+    if ($downloadedHash -ne $expectedHash) {
+        Remove-Item -LiteralPath $zipFile -Force -ErrorAction SilentlyContinue
+        throw ("SHA256 mismatch! Expected: " + $expectedHash + " Actual: " + $downloadedHash)
+    }
+    Write-Host "SHA256 verification passed." -ForegroundColor Green
+
+    # Backup current codebase
+    $timestamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
+    $backupFolder = Join-Path $backupsDir ("v" + $currentVersion + "-" + $timestamp)
+    Write-Host ("Creating backup at " + $backupFolder + "...") -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path $backupFolder -Force | Out-Null
+
+    foreach ($folder in "backend", "frontend", "scripts", "auth-server") {
+        $sourcePath = Join-Path $taskRoot $folder
+        if (Test-Path -LiteralPath $sourcePath) {
+            $destPath = Join-Path $backupFolder $folder
+            New-Item -ItemType Directory -Path $destPath -Force | Out-Null
+            robocopy $sourcePath $destPath /E /XD .venv node_modules __pycache__ .pytest_cache /XF *.pyc .env /NJH /NJS /NDL /NC /NS | Out-Null
+        }
+    }
+
+    # Extract update package
+    if (Test-Path -LiteralPath $extractedDir) {
+        Remove-Item -LiteralPath $extractedDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "Extracting update archive..." -ForegroundColor Cyan
+    Expand-Archive -LiteralPath $zipFile -DestinationPath $extractedDir -Force
+
+    # Overwrite workspace files
+    Write-Host "Applying updated source files..." -ForegroundColor Cyan
+    robocopy $extractedDir $taskRoot /E /XD .venv node_modules data vendor .git .vscode /XF .env /NJH /NJS /NDL /NC /NS | Out-Null
+
+    # Cleanup temporary update files
+    Remove-Item -LiteralPath $extractedDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $zipFile -Force -ErrorAction SilentlyContinue
+
+    Write-Host ""
+    Write-Host "Source updated successfully! Refreshing dependencies..." -ForegroundColor Green
+
+    Initialize-BackendEnvironment
+    Initialize-FrontendEnvironment
+
+    Write-Host ""
+    Write-Host "=================================================================" -ForegroundColor Green
+    Write-Host ("   UPDATE COMPLETED SUCCESSFULLY: v" + $update.latest_version + "!") -ForegroundColor Green
+    Write-Host "=================================================================" -ForegroundColor Green
+    Write-Host ""
+}
+
+function Invoke-Rollback {
+    $backupsDir = Join-Path $taskRoot "data\backups"
+    if (-not (Test-Path -LiteralPath $backupsDir)) {
+        throw "No backup directories found in data\backups."
+    }
+
+    $backupList = Get-ChildItem -LiteralPath $backupsDir -Directory | Sort-Object CreationTime -Descending
+    if (-not $backupList) {
+        throw "No previous backups available for rollback."
+    }
+
+    $latestBackup = $backupList[0]
+    Write-Host ("Latest backup: " + $latestBackup.Name + " (Created: " + $latestBackup.CreationTime + ")") -ForegroundColor Yellow
+    $prompt = Read-Host "Do you want to restore this backup? (Y/n)"
+    if ($prompt -and $prompt -notmatch '^[Yy]') {
+        Write-Host "Rollback cancelled." -ForegroundColor Gray
+        return
+    }
+
+    Write-Host ("Restoring files from " + $latestBackup.FullName + "...") -ForegroundColor Cyan
+    robocopy $latestBackup.FullName $taskRoot /E /XD .venv node_modules data vendor .git /XF .env /NJH /NJS /NDL /NC /NS | Out-Null
+
+    Write-Host "Reinstalling dependencies after rollback..." -ForegroundColor Cyan
+    Initialize-BackendEnvironment
+    Initialize-FrontendEnvironment
+
+    Write-Host ""
+    Write-Host "=================================================================" -ForegroundColor Green
+    Write-Host ("   ROLLBACK COMPLETED TO " + $latestBackup.Name + "!") -ForegroundColor Green
+    Write-Host "=================================================================" -ForegroundColor Green
+}
 
 function Test-LocalListener([int]$Port) {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
@@ -111,8 +281,9 @@ function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
     $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
     if ($pythonCommand) {
         $pythonVersion = (& python --version 2>&1) -join " "
-        $pythonMinor = [version]((& python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>&1) -join "")
-        Add-Check "Python" $(if ($pythonMinor -ge [version]"3.11") { "pass" } else { "fail" }) "$pythonVersion; 3.11+ required." $true
+        $pythonMinor = [version]((& python -c "import sys; print(str(sys.version_info.major) + '.' + str(sys.version_info.minor))" 2>&1) -join "")
+        $pyState = if ($pythonMinor -ge [version]"3.11") { "pass" } else { "fail" }
+        Add-Check "Python" $pyState ($pythonVersion + "; 3.11+ required.") $true
     } else {
         Add-Check "Python" "fail" "Python 3.11+ is required." $true
     }
@@ -120,7 +291,8 @@ function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
     if ($nodeCommand) {
         $nodeVersion = ((& node --version 2>&1) -join " ").TrimStart("v")
-        Add-Check "Node.js" $(if ([version]$nodeVersion -ge [version]"20.0") { "pass" } else { "fail" }) "v$nodeVersion; 20+ required." $true
+        $nodeState = if ([version]$nodeVersion -ge [version]"20.0") { "pass" } else { "fail" }
+        Add-Check "Node.js" $nodeState ("v" + $nodeVersion + "; 20+ required.") $true
     } else {
         Add-Check "Node.js" "fail" "Node.js 20+ is required." $true
     }
@@ -141,7 +313,7 @@ function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
 
     if ($Deep -and $mediaRuntime) {
         $mediaPython = "vendor\mediacrawler\.venv\Scripts\python.exe"
-        $probeScript = "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('ok')"
+        $probeScript = 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print("ok")'
         $probeOutput = (& $mediaPython -c $probeScript 2>&1) -join " "
         if ($LASTEXITCODE -eq 0 -and $probeOutput -match "ok") {
             Add-Check "Chromium launch" "pass" "Bundled Chromium launched successfully."
@@ -159,15 +331,18 @@ function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
     }
     Add-Check "YouTube key" $(if ($youtubeConfigured) { "pass" } else { "optional" }) $(if ($youtubeConfigured) { "YOUTUBE_API_KEY is present (value hidden)." } else { "Optional." })
 
+    $mongoLocal = Get-NetTCPConnection -LocalPort 27017 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    Add-Check "Local MongoDB" $(if ($mongoLocal) { "pass" } else { "optional" }) $(if ($mongoLocal) { "Listening locally on port 27017 (PID " + $mongoLocal.OwningProcess + ")." } else { "Not detected on port 27017; install with 'winget install MongoDB.Server' or start service 'net start MongoDB'." })
+
     foreach ($port in 8000, 5173) {
         $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        Add-Check "Port $port" $(if ($listener) { "pass" } else { "idle" }) $(if ($listener) { "Listening locally (PID $($listener.OwningProcess))." } else { "Available." })
+        Add-Check "Port $port" $(if ($listener) { "pass" } else { "idle" }) $(if ($listener) { "Listening locally (PID " + $listener.OwningProcess + ")." } else { "Available." })
     }
 
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/health" -TimeoutSec 3
         $null = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/ready" -TimeoutSec 3
-        Add-Check "API health" "pass" "Healthy and ready; $($health.sources) sources registered."
+        Add-Check "API health" "pass" ("Healthy and ready; " + $health.sources + " sources registered.")
     } catch {
         Add-Check "API health" "fail" "API is not healthy or MongoDB is not ready; inspect the Backend task terminal." $true
     }
@@ -176,7 +351,7 @@ function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
         $diagnosticsRoot = Join-Path $taskRoot "data\diagnostics"
         New-Item -ItemType Directory -Path $diagnosticsRoot -Force | Out-Null
         $timestamp = [DateTimeOffset]::Now.ToString("yyyyMMdd-HHmmss-fff")
-        $diagnosticsPath = Join-Path $diagnosticsRoot "doctor-$timestamp.json"
+        $diagnosticsPath = Join-Path $diagnosticsRoot ("doctor-" + $timestamp + ".json")
         [pscustomobject]@{
             generated_at = [DateTimeOffset]::Now.ToString("o")
             checks = @($checks)
@@ -188,7 +363,7 @@ function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
         $checks | ConvertTo-Json -Depth 3
     } else {
         $checks | Format-Table -AutoSize
-        if ($Save) { Write-Host "Saved redacted diagnostics: $diagnosticsPath" }
+        if ($Save) { Write-Host ("Saved redacted diagnostics: " + $diagnosticsPath) }
     }
 
     $requiredFailure = $checks | Where-Object { $_.required -and $_.state -eq "fail" }
@@ -211,7 +386,8 @@ function Invoke-SetupMediaCrawler {
 
     & $runtime -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) { throw "Unable to upgrade MediaCrawler pip." }
-    $dependencies = & $runtime -c "import pathlib,tomllib; p=pathlib.Path(r'$crawlerRoot')/'pyproject.toml'; print(chr(10).join(tomllib.loads(p.read_text(encoding='utf-8'))['project']['dependencies']))"
+    $pyCode = 'import pathlib,tomllib; p=pathlib.Path(r"' + $crawlerRoot + '")/"pyproject.toml"; print("\n".join(tomllib.loads(p.read_text(encoding="utf-8"))["project"]["dependencies"]))'
+    $dependencies = & $runtime -c $pyCode
     if ($LASTEXITCODE -ne 0) { throw "Unable to read MediaCrawler dependencies." }
     & $runtime -m pip install $dependencies
     if ($LASTEXITCODE -ne 0) { throw "Unable to install MediaCrawler dependencies." }
@@ -247,13 +423,18 @@ function Invoke-SetupSubtitles([string]$Model, [switch]$DownloadModel) {
 
 try {
     switch ($Action) {
-        "backend" { Invoke-Backend }
+        "backend" {
+            Invoke-SelfUpdate
+            Invoke-Backend
+        }
         "frontend" { Invoke-Frontend }
-        "doctor" { Invoke-Doctor }
+        "doctor" { Invoke-Doctor -Json:$Json -Deep:$Deep -Save:$Save }
         "setup-mediacrawler" { Invoke-SetupMediaCrawler }
         "setup-subtitles" { Invoke-SetupSubtitles -Model $SubtitleModel -DownloadModel:$DownloadSubtitleModel }
+        "update" { Invoke-SelfUpdate -Interactive }
+        "rollback" { Invoke-Rollback }
     }
 } catch {
-    Write-Error "Content Bot could not start: $($_.Exception.Message)"
+    Write-Error ("Content Bot execution error: " + $_.Exception.Message)
     exit 1
 }

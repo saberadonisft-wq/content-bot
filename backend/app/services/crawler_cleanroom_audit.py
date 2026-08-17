@@ -40,7 +40,11 @@ class _FileSignature:
 
 
 def audit_cleanroom_similarity(project_root: Path) -> dict[str, Any]:
-    """Compare implementation expressions without emitting source fragments."""
+    """Compare CBCE-original implementation expressions without source fragments.
+
+    Source-derived modules under the licensed reuse zone have a separate
+    license/provenance gate and must not be misreported as clean-room code.
+    """
     root = project_root.resolve()
     project_files = _project_files(root)
     vendor_files = _source_files(root / "vendor" / "mediacrawler")
@@ -123,6 +127,8 @@ def audit_cleanroom_similarity(project_root: Path) -> dict[str, Any]:
             "minimum_exact_long_lines": _MIN_EXACT_LONG_LINES,
         },
         "source_fragments_emitted": False,
+        "excluded_project_roots": ["backend/app/crawlers/licensed/mediacrawler"],
+        "scope": "cbce_original_only",
         "passed": bool(project_signatures)
         and bool(vendor_signatures)
         and not suspicious,
@@ -130,7 +136,12 @@ def audit_cleanroom_similarity(project_root: Path) -> dict[str, Any]:
 
 
 def _project_files(root: Path) -> tuple[Path, ...]:
-    candidates = list(_source_files(root / "backend" / "app" / "crawlers"))
+    crawler_root = root / "backend" / "app" / "crawlers"
+    candidates = [
+        path
+        for path in _source_files(crawler_root)
+        if "licensed" not in path.relative_to(crawler_root).parts
+    ]
     services = root / "backend" / "app" / "services"
     if services.is_dir():
         candidates.extend(

@@ -8,6 +8,7 @@ from app.services.subtitle_alignment import (
     ObservedWord,
     TranscriptToken,
     _align_energy_window,
+    _quantize_word_timings,
     apply_display_padding,
     build_audio_windows,
     match_transcript_words,
@@ -45,6 +46,20 @@ def test_word_match_ignores_punctuation_and_keeps_order() -> None:
     assert [matches[index][0] for index in sorted(matches)] == [0, 1, 2]
     assert matches[0][1] == 1.0
     assert matches[2][1] == 1.0
+
+
+def test_forced_alignment_word_timings_use_ten_ms_resolution() -> None:
+    words = _quantize_word_timings(
+        [
+            {"id": "w1", "start_ms": 103, "end_ms": 207},
+            {"id": "w2", "start_ms": 208, "end_ms": 259},
+        ]
+    )
+
+    assert [(word["start_ms"], word["end_ms"]) for word in words] == [
+        (100, 210),
+        (210, 260),
+    ]
 
 
 def test_audio_windows_are_chunked_and_do_not_span_large_silence() -> None:

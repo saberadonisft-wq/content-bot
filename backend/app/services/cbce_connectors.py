@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from ..config import settings
+from ..crawlers.licensed.mediacrawler.policy import (
+    LicensedReuseError,
+    assert_licensed_reuse_allowed,
+)
+from ..crawlers.licensed.mediacrawler.source_map import load_source_map
 from ..crawlers.observed_dom_contract import (
     DomContractUnavailable,
     load_observed_dom_contract,
@@ -106,6 +111,12 @@ class CbceWorkerSearchConnector(SourceConnector):
     def _extra_worker_payload(self) -> dict[str, Any]:
         return {}
 
+    def _worker_budgets(self, query: SearchQuery) -> tuple[int, int]:
+        return (
+            query.max_items,
+            query.request_limit(query.max_items, maximum=1_000),
+        )
+
     async def search(
         self,
         query: SearchQuery,
@@ -126,6 +137,12 @@ class CbceWorkerSearchConnector(SourceConnector):
         key_store = PseudonymKeyStore(settings.data_dir / "cbce-secrets")
         key_store.load_or_create()
         initial_cursor = query.resume_cursor("provider", stream="search")
+        max_items, max_requests = self._worker_budgets(query)
+        if max_items < query.max_items and query.warning_callback:
+            await query.warning_callback(
+                "PROVIDER_BUDGET_CAPPED",
+                f"{self.label} is limited to {max_items} items per run.",
+            )
         run_id = f"cbce-{self.source_id}-{uuid.uuid4().hex}"
         start = WorkerEnvelope(
             kind=WorkerMessageKind.START,
@@ -138,8 +155,8 @@ class CbceWorkerSearchConnector(SourceConnector):
             payload={
                 "action": self.spec.action,
                 "terms": query.search_terms,
-                "max_items": query.max_items,
-                "max_requests": query.request_limit(query.max_items, maximum=1_000),
+                "max_items": max_items,
+                "max_requests": max_requests,
                 "deadline_seconds": query.deadline_limit(
                     settings.mediacrawler_timeout_seconds
                 ),
@@ -211,12 +228,13 @@ class CbceWorkerSearchConnector(SourceConnector):
                         "provider", message.payload.get("cursor"), stream="search"
                     )
                     continue
+                if message.kind is WorkerMessageKind.COMPLETE:
+                    break
                 if message.kind in {
-                    WorkerMessageKind.COMPLETE,
                     WorkerMessageKind.CANCELLED,
                     WorkerMessageKind.ERROR,
                 }:
-                    break
+                    raise _worker_failure(message)
             await process_task
         except BaseException:
             if not process_task.done():
@@ -368,6 +386,100 @@ class CbceObservedDomConnector(CbceWorkerSearchConnector):
 
     def _extra_worker_payload(self) -> dict[str, Any]:
         return {"contract_root": str(settings.content_bot_cbce_contract_root)}
+
+
+class CbceLicensedWeiboConnector(CbceWorkerSearchConnector):
+    """Weibo search using the licensed upstream mobile API vocabulary.
+
+    This is opt-in only.  The worker still owns the browser/profile and the
+    parent still owns persistence, budgets and cancellation.
+    """
+
+    def __init__(
+        self,
+        process_supervisor: WorkerProcessSupervisor | None = None,
+    ) -> None:
+        super().__init__(
+            CbceSearchSpec(
+                "weibo",
+                "Weibo (licensed provider)",
+                "licensed_weibo",
+                "licensed_weibo_search",
+                ("like_count", "comment_count", "share_count"),
+                "licensed_mobile_api",
+            ),
+            process_supervisor,
+        )
+
+    @property
+    def configured(self) -> bool:
+        if not settings.content_bot_cbce_enabled:
+            return False
+        try:
+            assert_licensed_reuse_allowed(
+                {
+                    "non_commercial_learning": settings.content_bot_licensed_reuse_noncommercial_only,
+                }
+            )
+            load_source_map(
+                Path(__file__).resolve().parents[1]
+                / "crawlers"
+                / "licensed"
+                / "mediacrawler"
+            )
+        except (LicensedReuseError, OSError, ValueError):
+            return False
+        return cbce_browser_preflight()["ready"]
+
+    async def healthcheck(self) -> ConnectorStatus:
+        if not settings.content_bot_cbce_enabled:
+            return ConnectorStatus("disabled", "CBCE is disabled.")
+        try:
+            assert_licensed_reuse_allowed(
+                {
+                    "non_commercial_learning": settings.content_bot_licensed_reuse_noncommercial_only,
+                }
+            )
+            load_source_map(
+                Path(__file__).resolve().parents[1]
+                / "crawlers"
+                / "licensed"
+                / "mediacrawler"
+            )
+        except LicensedReuseError as exc:
+            return ConnectorStatus(
+                "disabled_by_policy",
+                str(exc),
+                reason_code="LICENSED_REUSE_POLICY",
+            )
+        except (OSError, ValueError) as exc:
+            return ConnectorStatus(
+                "setup_required",
+                str(exc),
+                reason_code="LICENSED_REUSE_PROVENANCE",
+            )
+        status = await super().healthcheck()
+        if status.state != "ready":
+            return status
+        return ConnectorStatus(
+            "ready",
+            "Licensed Weibo mobile API facade is locally ready; live auth and rate behavior remain manual-canary gates.",
+        )
+
+    def _extra_worker_payload(self) -> dict[str, Any]:
+        return {"contract_root": str(settings.content_bot_cbce_contract_root)}
+
+    def _worker_budgets(self, query: SearchQuery) -> tuple[int, int]:
+        policy = assert_licensed_reuse_allowed(
+            {
+                "non_commercial_learning": settings.content_bot_licensed_reuse_noncommercial_only,
+            }
+        )
+        max_items = min(query.max_items, policy.max_items)
+        return (
+            max_items,
+            query.request_limit(max_items, maximum=policy.max_requests),
+        )
 
 
 class CbceTiebaConnector(CbceWorkerSearchConnector):

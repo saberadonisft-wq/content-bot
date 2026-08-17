@@ -54,6 +54,19 @@ def _options(**updates) -> dict:
     return {**base, **updates}
 
 
+def test_video_filter_graph_allows_overlay_only_render(tmp_path: Path) -> None:
+    graph, output_label = _video_filter_graph(
+        None,
+        Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo",
+        {"width": 320, "height": 180},
+        _options(),
+    )
+
+    assert "subtitles=" not in graph
+    assert "[0:v]setpts=PTS-STARTPTS[vout]" in graph
+    assert output_label == "[vout]"
+
+
 def test_render_cache_key_changes_for_timing_style_and_profile() -> None:
     media = {"fingerprint": "a" * 64, "audio_hash": "b" * 64}
     base = precision_render_cache_key(_document(), media, _options())

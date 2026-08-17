@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     content_bot_frontend_url: str = "http://127.0.0.1:5173/"
     content_bot_crawler_retention_days: int = 90
     content_bot_crawler_retention_interval_hours: int = 24
+    content_bot_auth_enabled: bool = False
+    content_bot_auth_server_url: str = ""
+    content_bot_auth_public_key: str = ""
     youtube_api_key: str | None = None
     youtube_region_code: str = "VN"
     youtube_relevance_language: str = "vi"
@@ -81,6 +84,11 @@ class Settings(BaseSettings):
     content_bot_cbce_provider_overrides: str = "{}"
     content_bot_cbce_browser_executable_path: Path | None = None
     content_bot_cbce_contract_root: Path = Path("data/crawler-contracts-v1")
+    # MediaCrawler-derived modules are enabled only for this project's
+    # explicitly non-commercial learning/research deployment.  A commercial
+    # build must set this false and fail closed until those modules are
+    # replaced or separately relicensed.
+    content_bot_licensed_reuse_noncommercial_only: bool = True
     mediacrawler_command: str | None = None
     mediacrawler_profile_dir: Path = Path("data/browser-profile")
     mediacrawler_timeout_seconds: int = 600

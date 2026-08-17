@@ -1,12 +1,129 @@
-# Kế hoạch xây dựng Content Bot Crawler Engine độc lập
+# Kế hoạch xây dựng Content Bot Crawler Engine tích hợp chọn lọc
 
-> Trạng thái 2026-08-13: kế hoạch đang ở Phase 11, tức giai đoạn thứ 12/12 vì lộ trình đánh số từ 0 đến 11. Nền tảng/adapter tối thiểu cho đủ 17 nguồn đã có mã và regression; cutover/xóa MediaCrawler vẫn chờ các gate live-auth/approval/two-canary được ghi ở cuối tài liệu.
+> Trạng thái 2026-08-14: Phase 11 đã có nền tảng/adapter tối thiểu cho đủ 17 nguồn và 7/17 nguồn đã qua cutover gate. Chủ dự án xác nhận định hướng hiện tại là học tập/nghiên cứu phi thương mại; kế hoạch được điều chỉnh để cho phép tái sử dụng có ghi nhận các phần MediaCrawler mà CBCE còn yếu.
 >
 > Ngày khảo sát: 2026-08-12
 >
 > MediaCrawler được khảo sát tại commit: 071c8c0acaece3e82f2532cffb19faeddc9ec1c3, ngày 2026-08-05
 >
 > Phạm vi đích: đủ 17 nguồn hiện có trên dashboard — YouTube, Game news, Steam reviews, Bluesky, Mastodon, Reddit, X, Xiaohongshu/RedNote, Douyin, Kuaishou, Bilibili, Weibo, Baidu Tieba, Zhihu, TikTok, Facebook và Instagram
+
+## 0. Điều chỉnh chiến lược 2026-08-14 — tái sử dụng MediaCrawler có giấy phép
+
+Quyết định mới thay thế giả định “có khả năng thương mại nên phải clean-room tuyệt đối” trong các phần cũ của tài liệu:
+
+- Content Bot hiện được phát triển cho mục đích học tập/nghiên cứu phi thương mại.
+- `NON-COMMERCIAL LEARNING LICENSE 1.1` của snapshot cho phép sử dụng, sao chép, sửa đổi và merge phần mềm trong phạm vi đó.
+- Mọi phần tái sử dụng phải giữ copyright/license ở vị trí hợp lý, không dùng cho crawl quy mô lớn hoặc gây gián đoạn nền tảng, và không được chuyển sang mục đích thương mại nếu chưa có chấp thuận bằng văn bản.
+- License MediaCrawler không thay thế điều khoản của từng nền tảng. Auth/challenge vẫn do người dùng xử lý; không bổ sung proxy rotation, challenge solver hoặc crawl không giới hạn.
+- Nếu định hướng sử dụng đổi sang thương mại, toàn bộ provider dẫn xuất phải bị tắt cho đến khi có quyền bằng văn bản hoặc được thay bằng implementation độc lập/provider chính thức.
+
+Các câu “không sao chép MediaCrawler” ở phần kế hoạch clean-room cũ được giữ như lịch sử quyết định, nhưng không còn áp dụng cho **licensed reuse zone** dưới đây. Chúng vẫn áp dụng cho CBCE core và các provider X, TikTok, Facebook, Instagram vốn không có trong snapshot.
+
+### 0.1 Ranh giới kiến trúc mới
+
+Không copy nguyên ứng dụng MediaCrawler vào lõi. CBCE tiếp tục sở hữu registry, run planner, worker protocol, browser/profile ownership, cancellation, budget, checkpoint, normalization, Mongo, UI, redaction và retention. Mã dẫn xuất chỉ đóng vai trò platform transport/parser nằm sau một facade:
+
+~~~text
+RunManager / Registry / CBCE budgets
+               |
+               v
+LicensedMediaCrawlerProvider facade
+               |
+               v
+Selected platform client/login/sign/parser modules
+               |
+               v
+Canonical ContentRecord / CommentRecord events
+~~~
+
+Cấu trúc đề xuất:
+
+~~~text
+backend/app/crawlers/licensed/mediacrawler/
+  LICENSE
+  NOTICE.md
+  SOURCE_MAP.json
+  common/
+  xhs/
+  douyin/
+  kuaishou/
+  bilibili/
+  weibo/
+  tieba/
+  zhihu/
+~~~
+
+Mỗi file dẫn xuất phải ghi snapshot commit, đường dẫn nguồn, loại thay đổi và license. `SOURCE_MAP.json` dùng để kiểm tra tự động rằng không có file dẫn xuất mất provenance.
+
+### 0.2 Phần được reuse và phần không mang sang
+
+Được reuse có chọn lọc khi operation cần:
+
+- Platform `client.py`, `login.py`, `field.py`, extractor/parser và exception mapping.
+- Request signing/session bridge cần thiết cho XHS, Douyin, Kuaishou, Bilibili, Tieba và Zhihu.
+- GraphQL document, endpoint/payload contract, URL parser và model/constant phụ thuộc trực tiếp của bảy adapter.
+- Logic search, detail, creator, root comments và child comments còn thiếu trong CBCE.
+
+Không mang sang vì CBCE đã có implementation tốt hơn hoặc vì không phù hợp phạm vi:
+
+- `main.py`, CLI, WebUI, API server, scheduler, config module mutable và ContextVar toàn cục.
+- Store/exporter CSV/JSON/SQL/Mongo của MediaCrawler.
+- Proxy pool/rotation, anti-detection bundle, fingerprint spoofing và tự động vượt CAPTCHA/slider/challenge.
+- Process manager/CDP attach vào browser cá nhân; CBCE Job Object, profile v2 và worker protocol vẫn là owner duy nhất.
+- Logic follower/following graph, creator PII đầy đủ và media download không có budget/retention.
+
+### 0.3 Ma trận sửa phần yếu
+
+| Nguồn | CBCE hiện tại | Phần ưu tiên reuse | Đích sau sửa |
+|---|---|---|---|
+| Weibo | Search contract có nhưng active legacy, thiếu authenticated parity | client/login/field/help; search, detail, creator, long text, comments | Search/detail/creator/root comments chạy qua CBCE worker |
+| XHS | Target/auth/search shell, chưa có provider live ổn định | client/login/extractor/signing; detail, creator, root/child comments | Thay legacy search và bổ sung detail/creator/comments có budget |
+| Douyin | Target/auth/search shell, thiếu request provider | client/login/help và signing dependency; detail/creator/comments | Search/detail/creator/comments hữu hạn, slider vẫn thủ công |
+| Kuaishou | Target/auth/search shell, thiếu GraphQL/session provider | client/login/graphql/help; creator/comments | Search/detail/creator/comments trong worker cô lập |
+| Zhihu | Target parser và challenge detection, chưa có live provider | client/login/help/field/constants/signing; ba content kind/comments | Search/detail/creator/comments với shared semaphore/budget |
+| Bilibili | Search đã cutover; detail/creator/comments còn partial theo operation | client/help/login cho WBI, time-range, detail/creator/comment pagination | Giữ CBCE DOM search; licensed provider bổ sung operation còn thiếu |
+| Tieba | Search/detail/forum/creator/root comments đã mạnh; child còn thiếu | client/extractor cho child comments và sort/type nếu cần | Chỉ lấp child comment/sort gap, không thay phần CBCE đã tốt hơn |
+
+X, TikTok, Facebook và Instagram không được lấy từ MediaCrawler vì snapshot không có các adapter này; tiếp tục dùng provider chính thức và gate quyền hiện tại.
+
+### 0.4 Lộ trình thực hiện mới
+
+**R0 — License/provenance và audit**
+
+1. Thêm licensed reuse zone, `LICENSE`, `NOTICE.md` và `SOURCE_MAP.json`.
+2. Đổi clean-room audit thành audit hai vùng: core phải độc lập; licensed zone phải có source mapping/license đầy đủ.
+3. Thêm runtime policy `noncommercial_research_only`; provider dẫn xuất fail closed nếu policy không được xác nhận.
+4. Giữ hard cap item/request/time/comment/media và cấm scheduled interactive crawl.
+
+Gate: license text được giữ nguyên; mọi file dẫn xuất có mapping; không có secret/fixture người dùng trong source; audit pass.
+
+**R1 — Facade tích hợp dùng chung**
+
+1. Xây `LicensedMediaCrawlerProvider` chạy trong CBCE worker hiện tại.
+2. Chuyển config mutable thành immutable request context, không import MediaCrawler store/config/core.
+3. Cookie chỉ bridge trong RAM từ application-owned profile; không argv/log/Mongo.
+4. Bọc mọi page bằng CBCE exact budgets, no-progress guard, typed error và persistence-before-checkpoint.
+
+Gate: fake licensed adapter pass worker/cancel/redaction/checkpoint suite; không có direct DB write hoặc orphan process.
+
+**R2 — Năm nguồn đang active legacy**
+
+Triển khai theo thứ tự `weibo -> xhs -> douyin -> kuaishou -> zhihu`. Mỗi nguồn làm lần lượt search, detail, creator, root comments rồi child comments. Không bật operation chỉ vì file đã được copy; handler, normalizer, budget và tests phải có thật.
+
+Gate từng nguồn: exact max, repeated cursor, auth/challenge, canonical identity, privacy, cancel và hai aggregate-only canary ở hai thời điểm khác nhau.
+
+**R3 — Bilibili và Tieba parity**
+
+Giữ provider CBCE đang chạy cho operation đã tốt hơn. Chỉ route operation còn thiếu sang licensed provider, sau đó so sánh canonical ID/count/metric completeness. Không thay search đang ổn chỉ để đồng nhất implementation.
+
+Gate: Bilibili detail/creator/comment pagination và Tieba child comments đạt contract; không regression hai search cutover hiện tại.
+
+**R4 — Cutover và thu gọn vendor runtime**
+
+Chuyển provider theo từng source/operation. Khi bảy nguồn không còn cần bridge subprocess, gỡ legacy bridge/app runtime nhưng giữ license, notice, source map và snapshot provenance của phần đã dẫn xuất. Không được mô tả licensed provider là clean-room.
+
+Gate cuối: 17-source audit pass theo operation; bảy browser source không gọi legacy bridge; backend/frontend/security tests pass; rollback và profile migration được xác nhận riêng.
 
 ## 1. Kết luận điều hành
 
@@ -15,7 +132,7 @@ Content Bot không nên nhúng, fork rồi đổi tên, hoặc mang toàn bộ M
 Phạm vi 17 nguồn gồm ba nhóm:
 
 - **Giữ và nâng cấp sáu connector hiện hữu:** YouTube, Game news, Steam reviews, Bluesky, Mastodon và Reddit.
-- **Thay bridge MediaCrawler bằng bảy adapter độc lập:** Xiaohongshu/RedNote, Douyin, Kuaishou, Bilibili, Weibo, Baidu Tieba và Zhihu.
+- **Thay bridge MediaCrawler bằng bảy provider tích hợp chọn lọc:** giữ CBCE core, tái sử dụng có license các client/login/signing/parser cần thiết cho Xiaohongshu/RedNote, Douyin, Kuaishou, Bilibili, Weibo, Baidu Tieba và Zhihu.
 - **Bổ sung bốn nguồn bằng provider chính thức theo quyền:** X, TikTok, Facebook và Instagram.
 
 Engine mới chỉ học các ý tưởng kiến trúc cấp cao đã chứng minh hữu ích:
@@ -28,7 +145,7 @@ Engine mới chỉ học các ý tưởng kiến trúc cấp cao đã chứng mi
 - Đăng nhập bằng cửa sổ trình duyệt hiển thị, lưu profile riêng theo nền tảng.
 - Hủy tác vụ và đóng đúng cây tiến trình do ứng dụng tạo ra.
 
-Engine mới không tái sử dụng mã, selector, endpoint catalog, payload, chữ ký request, fingerprint, GraphQL document, fixture hay thuật toán vượt challenge của MediaCrawler. Việc xóa thư mục vendor sau khi sao chép mã không làm mất nghĩa vụ của một sản phẩm phái sinh.
+Engine không mang toàn bộ MediaCrawler vào lõi. Phần CBCE core vẫn độc lập; phần platform mà CBCE yếu hơn có thể được dẫn xuất trong licensed reuse zone, giữ nguyên notice/license/provenance và chỉ hoạt động trong phạm vi học tập/nghiên cứu phi thương mại. Challenge automation, fingerprint spoofing và crawl không giới hạn vẫn bị loại.
 
 Content Bot đã có phần lớn lớp ứng dụng cần thiết: RunManager, EventBus, MongoDB, checkpoint, dedupe, metric snapshot và UI theo dõi tiến trình. Vì vậy không xây lại CLI, FastAPI, WebUI, scheduler hoặc hệ thống lưu trữ riêng giống MediaCrawler.
 
@@ -132,7 +249,7 @@ CSV, JSON, JSONL, Excel, SQL, Mongo hoặc media files
 6. Chuẩn hóa theo từng nền tảng.
 7. Ghi thẳng vào sink được chọn.
 
-Tieba là ví dụ khác biệt: một số JSON request được thực thi ngay trong page bằng browser fetch. XHS, Douyin, Kuaishou, Bilibili và Zhihu có cơ chế ký request riêng. Đây là các vùng không được sao chép sang engine mới.
+Tieba là ví dụ khác biệt: một số JSON request được thực thi ngay trong page bằng browser fetch. XHS, Douyin, Kuaishou, Bilibili và Zhihu có cơ chế ký request riêng. Theo chiến lược mới, các phần này chỉ được đưa vào licensed reuse zone và chạy sau CBCE facade; không được trộn vào core hoặc bỏ notice/provenance.
 
 ### 2.4 Điểm mạnh đáng tái tạo
 
@@ -171,23 +288,16 @@ Tieba là ví dụ khác biệt: một số JSON request được thực thi nga
 
 [License của snapshot MediaCrawler đã khảo sát](https://github.com/NanmiCoder/MediaCrawler/blob/071c8c0acaece3e82f2532cffb19faeddc9ec1c3/LICENSE) là giấy phép học tập phi thương mại, không phải giấy phép permissive thông dụng. Bản được khảo sát cho phép sao chép/sửa/merge cho mục đích học tập phi thương mại, yêu cầu giữ notice và không cấp quyền thương mại nếu chưa có chấp thuận bằng văn bản.
 
-Do đó:
+Chủ dự án đã xác nhận mục đích hiện tại là học tập/nghiên cứu phi thương mại. Vì vậy có thể sử dụng, sao chép, sửa đổi và merge mã MediaCrawler trong phạm vi license, với các điều kiện bắt buộc:
 
-- Có thể dùng nghiên cứu này như đặc tả hành vi và bài học kiến trúc.
-- Không chép Python, JavaScript, TypeScript, comment, test, fixture hoặc cấu trúc module đặc thù.
-- Không đổi tên class/function rồi coi là mã mới.
-- Không chép chữ ký XHS, a_bogus Douyin, capture hook Kuaishou, WBI Bilibili, MD5 secret Tieba hay x-zse/x-zst Zhihu.
-- Không chép selector login, anti-detection script, fingerprint, endpoint constants hoặc GraphQL document.
-- Mọi dependency bên thứ ba được cân nhắc phải được review trực tiếp theo license riêng của dependency đó.
+1. Giữ copyright và toàn văn license ở vị trí hợp lý trong mọi bản sao/phần dẫn xuất.
+2. Ghi source commit/path và phần sửa đổi của từng file.
+3. Không dùng cho crawl quy mô lớn, không gây gián đoạn nền tảng và không gây ảnh hưởng không phù hợp tới bên thứ ba.
+4. Không dùng thương mại nếu chưa có chấp thuận bằng văn bản của chủ sở hữu quyền.
+5. Dependency hoặc asset có license riêng vẫn phải được review riêng; license của repo không tự động thay thế quyền của bên thứ ba.
+6. Không gọi phần dẫn xuất là clean-room. Audit phải phân biệt rõ CBCE-original và MediaCrawler-derived.
 
-Nếu dự án có mục đích thương mại, nên áp dụng clean-room nghiêm:
-
-1. Nhóm nghiên cứu chỉ phát hành capability, input/output, error-state và test requirement.
-2. Người triển khai không đọc source vendor; dựa trên tài liệu chính thức và traffic/DOM do chính tài khoản thử nghiệm được phép của dự án tạo ra.
-3. Mỗi endpoint, field, selector hoặc dependency có một bản ghi provenance.
-4. Fixture do dự án tự thu, được sanitize và không lấy từ test của MediaCrawler.
-5. Trước cutover có similarity scan và review thủ công.
-6. Khi còn nghi ngờ về quyền sử dụng, dừng provider đó và xin đánh giá pháp lý.
+Nếu định hướng sau này chuyển sang thương mại, provider dẫn xuất phải được tắt hoặc thay thế cho đến khi quyền sử dụng được giải quyết. Đây là policy gate tương lai, không phải giả định hiện tại.
 
 ### 3.2 X
 
@@ -249,7 +359,7 @@ Nếu permission/review chưa đạt, operation phải trả permission_required
 
 - Bao phủ đủ 17 source ID trong một registry duy nhất, giữ tương thích dữ liệu hiện hữu.
 - Giữ và nâng cấp sáu connector public/API hiện có thay vì viết lại không cần thiết.
-- Thay bảy MediaCrawler bridge bằng adapter độc lập.
+- Thay bảy MediaCrawler bridge bằng provider CBCE tích hợp chọn lọc mã MediaCrawler được phép dùng trong phạm vi phi thương mại.
 - Bổ sung X, TikTok, Facebook và Instagram bằng provider chính thức theo quyền.
 - Hỗ trợ các mode khi provider cho phép: search, detail, creator, root comments, child comments và media metadata.
 - Hỗ trợ keyword target và saved-channel target qua cùng manifest/run planner.
@@ -351,8 +461,8 @@ Ký hiệu:
 | reddit / Reddit | Submission search | Subreddit/user feed | Submission; comment tree có budget ở phase sau | Link/media metadata | Reddit official OAuth | Client credentials; user OAuth nếu scope cần |
 | x / X | Theo tier/quyền X API | User timeline | Post/conversation/replies theo quyền | Media metadata | X API; oEmbed chỉ cho embed | Bearer/OAuth; browser disabled |
 | xhs / Xiaohongshu | Theo web session được phép | Creator feed | Detail; root + child có budget | Metadata; download tùy chọn | Browser DOM/fetch được nghiên cứu độc lập | QR/cookie profile; challenge thủ công |
-| douyin / Douyin | Theo provider/session | Creator feed | ID/URL/short URL; root + child | Metadata; download tùy chọn | Provider độc lập; không chép a_bogus | QR/cookie/phone nếu được hỗ trợ; slider thủ công |
-| kuaishou / Kuaishou | Theo provider/session | Creator feed | Detail; root + child | Metadata trước | Provider độc lập; không chép capture hook | QR/cookie profile |
+| douyin / Douyin | Theo provider/session | Creator feed | ID/URL/short URL; root + child | Metadata; download tùy chọn | CBCE facade + licensed MediaCrawler client/signing; không tự động slider | QR/cookie/phone nếu được hỗ trợ; slider thủ công |
+| kuaishou / Kuaishou | Theo provider/session | Creator feed | Detail; root + child | Metadata trước | CBCE facade + licensed MediaCrawler client/GraphQL/session helper | QR/cookie profile |
 | bilibili / Bilibili | Keyword/time range | Creator videos; dynamics riêng | BV/URL; root + child | Metadata; bounded download | Public/official khi có; DOM/fetch fallback | Anonymous khi đủ; QR/cookie khi cần |
 | weibo / Weibo | Theo loại search | Creator feed | Detail/long text; root, child có thể partial | Ảnh/video metadata theo provider | Public/mobile web trong phiên được phép | QR/cookie domain-scoped |
 | tieba / Baidu Tieba | Keyword và forum là hai operation | Creator feed | Thread; root + child | Không ở MVP | DOM/browser fetch độc lập | QR/cookie profile |
@@ -948,7 +1058,7 @@ Thiết kế mới:
 - Bắt đầu bằng content search/detail/creator video và comments.
 - Tách dynamics thành capability content_kind=dynamics, không dùng cờ creator có nghĩa đảo.
 - Ưu tiên nguồn public/chính thức; browser DOM/fetch chỉ trong phiên được phép.
-- Không chép WBI mixin key/table/salt hoặc wrapper endpoint.
+- WBI/client wrapper còn thiếu có thể được reuse trong licensed zone; giữ source mapping và không đưa config/store của MediaCrawler vào core.
 - Dùng canonical BV/AV relation nhưng external_id chọn một dạng ổn định.
 - Media download là capability tùy chọn, có byte quota.
 
@@ -1007,7 +1117,7 @@ Gate: card trực tiếp, nested group, quảng cáo, long text và parser drift
 - Tách mode keyword search và forum listing; không tự động chạy cả hai.
 - Detail và creator là mode riêng.
 - Search type/sort phải thực sự được provider dùng hoặc manifest đánh unsupported.
-- Browser same-origin transport là primitive; không chép MD5 secret, tbs/sign flow, header impersonation hay anti-detection script.
+- Browser same-origin transport vẫn do CBCE sở hữu; MD5/tbs/sign flow cần thiết có thể reuse trong licensed zone, nhưng không mang anti-detection script hoặc header impersonation không cần thiết.
 - Root/child comments dùng budget chung và công thức page không off-by-one.
 - Không hardcode fingerprint khác với browser thật.
 - Không hỗ trợ media ở phase đầu.
@@ -1019,7 +1129,7 @@ Gate: boundary 1/29/30/31 item, comment count 9/10/11/20, repeated page, deleted
 - Manifest phân biệt domain Xiaohongshu và RedNote quốc tế.
 - Search có sort general/popularity/time, detail giữ context token chỉ trong session, creator feed có exact cap.
 - Detail có thể dùng DOM/embedded state fallback do dự án tự nghiên cứu.
-- Không chép X-S/X-T wrapper, xhshow wrapper, crypto helper hoặc fixture.
+- X-S/X-T, xhshow wrapper và crypto helper cần thiết có thể reuse trong licensed zone; không copy fixture chứa dữ liệu phiên/người dùng.
 - CAPTCHA/risk page chuyển waiting_for_user/challenge_required.
 - Root/child comment budget rõ ràng.
 - image_list/tag_list giữ kiểu list, không double encode.
@@ -1031,7 +1141,7 @@ Gate: page cuối có has_more=false vẫn được xử lý; max=1/19/20/21 ch�
 ### 11.12 Douyin
 
 - Search, detail ID/URL/short URL và creator là ba flow độc lập.
-- Không chép libs/douyin.js, a_bogus implementation, fingerprint cố định hoặc slider solver.
+- `libs/douyin.js`/a_bogus implementation cần thiết có thể reuse trong licensed zone; fingerprint cố định và slider solver vẫn bị loại.
 - Chọn official/public/DOM provider có provenance; nếu một action bắt buộc cơ chế chưa thể triển khai hợp lệ thì khai unsupported.
 - Browser và transport giữ session identity nhất quán.
 - Creator không bao giờ crawl vô hạn.
@@ -1043,7 +1153,7 @@ Gate: short redirect allowlist, exact max, creator cap, child budget, cancel khi
 ### 11.13 Kuaishou
 
 - Search, detail và creator.
-- Không chép GraphQL documents, Object.prototype hook, encode capture hoặc endpoint payload từ MediaCrawler.
+- GraphQL document/endpoint payload cần thiết có thể reuse trong licensed zone. Hook phạm vi toàn cục hoặc capture mechanism chỉ được giữ nếu không có primitive hẹp hơn và phải chạy trong worker cô lập; không sửa browser fingerprint.
 - Browser và HTTP cùng proxy/identity nếu static proxy được dùng.
 - Không dùng blocking sleep trong async.
 - Comment failure không được tự cancel toàn bộ task rồi bỏ dữ liệu im lặng.
@@ -1059,7 +1169,7 @@ Gate: rate-limit backoff kiểm thử bằng fake clock; task lỗi cô lập; r
 - Creator cho phép chọn answers, articles, videos hoặc all, nhưng vẫn có global budget.
 - Shared semaphore thực sự dùng chung giữa các detail task.
 - Comment có root/child/total cap.
-- Không chép libs/zhihu.js hoặc x-zse/x-zst implementation.
+- `libs/zhihu.js` và x-zse/x-zst implementation cần thiết có thể reuse trong licensed zone với dependency/license mapping riêng.
 - Auth state phân biệt cookie đăng nhập và cookie/signing requirement; báo đúng reauth/risk.
 - Không log raw response.
 - Storage luôn dùng content_id chuẩn, không trộn note_id.
@@ -1709,8 +1819,8 @@ Chỉ thực hiện sau Phase 11 và trong commit riêng:
 - Chuyển hoặc lưu trữ profile cũ chỉ sau khi người dùng xác nhận; không xóa tự động.
 - Cập nhật test bridge cũ thành test worker protocol mới.
 - Chạy tìm kiếm toàn repo với mediacrawler/MediaCrawler.
-- Cho phép tài liệu audit này còn nhắc tên MediaCrawler như nguồn nghiên cứu; không coi đó là runtime dependency.
-- Chạy license/dependency/similarity scan.
+- Giữ `LICENSE`, `NOTICE.md`, `SOURCE_MAP.json` và provenance MediaCrawler cho mọi phần dẫn xuất; không xóa các notice này khi gỡ legacy runtime.
+- Chạy audit hai vùng: similarity scan cho CBCE-original và license/source-map audit cho MediaCrawler-derived.
 - Chạy backend test suite, frontend test/build và launcher doctor.
 - Kiểm tra git status để không xóa nhầm thay đổi hiện có của người dùng.
 
@@ -1727,7 +1837,7 @@ Chỉ thực hiện sau Phase 11 và trong commit riêng:
 | Cursor global hiện chưa persist | Cao | Cao | Phase 1 checkpoint migration + resume tests |
 | Registry/channel/domain tiếp tục drift | Trung | Cao | Một SourceManifest + generated/parity tests |
 | DOM/internal contract đổi | Cao | Cao | Fixture version, parser telemetry, circuit breaker |
-| License contamination | Trung | Rất cao | Clean-room, provenance ledger, similarity/manual review |
+| Mất notice/provenance của mã dẫn xuất | Trung | Cao | Licensed zone, source map, header check và license audit |
 | Challenge/risk-control | Cao | Trung-cao | Manual state, low rate, không bypass |
 | Session/profile hỏng | Trung | Cao | Profile lock, v2 namespace, backup có xác nhận |
 | Orphan browser trên Windows | Trung | Cao | Job Object, ownership registry, integration test |
@@ -1818,11 +1928,11 @@ Engine chỉ được coi hoàn tất khi:
 
 - Registry có đúng 17 source ID ổn định, không duplicate và không card no-op báo ready.
 - Sáu connector hiện hữu pass regression keyword/channel và dùng chung registry/checkpoint.
-- Bảy source MediaCrawler cũ chạy bằng adapter độc lập, không còn runtime vendor.
+- Bảy source MediaCrawler cũ chạy qua provider CBCE/licensed facade, không còn phụ thuộc legacy bridge subprocess.
 - X, TikTok, Facebook và Instagram có ít nhất một provider/operation đã implemented, dù availability có thể là permission_required với đường cấu hình/phê duyệt rõ ràng.
 - permission_required chỉ được chấp nhận khi adapter, config flow, probe và contract tests đã tồn tại và có thể chuyển sang ready bằng credential/approval hợp lệ; static UnconfiguredConnector/no-op không đạt.
 - Mỗi operation hiển thị đúng coverage, implementation state và runtime availability; operation tối thiểu cam kết của mỗi source không còn planned.
-- Không có code, selector, signing, fixture hoặc payload constants sao chép từ MediaCrawler.
+- CBCE-original không lẫn mã vendor không khai báo; mọi code/selector/signing/payload được reuse nằm trong licensed zone, có notice, source map và phạm vi phi thương mại rõ ràng.
 - Search/channel/detail/creator/comments/media hoạt động đúng nơi manifest tuyên bố; unsupported không silent no-op.
 - Exact item/comment/request/time/media budget được kiểm thử.
 - Global/channel checkpoint và upsert idempotent qua batch mới, crash và retry.
@@ -1835,13 +1945,13 @@ Engine chỉ được coi hoàn tất khi:
 - Facebook/Instagram không quảng cáo global search và không browser fallback khi thiếu quyền.
 - UI được điều khiển bởi manifest: action, CTA, auth instruction, metric và coverage disclaimer.
 - Backend, integration, security, provenance và frontend build gates đều đạt.
-- MediaCrawler submodule và bridge đã được gỡ mà không xóa nhầm profile/dữ liệu người dùng.
+- Legacy MediaCrawler app/bridge có thể được gỡ mà không xóa nhầm profile/dữ liệu người dùng; license/notice/source-map của phần dẫn xuất phải tiếp tục được giữ.
 
 ## 22. Các quyết định cần chốt trước Phase 1
 
 | Quyết định | Mặc định đề xuất |
 |---|---|
-| Mục đích thương mại hay nội bộ phi thương mại | Coi là có khả năng thương mại và áp clean-room nghiêm |
+| Mục đích thương mại hay nội bộ phi thương mại | Đã xác nhận học tập/nghiên cứu phi thương mại; cho phép reuse theo license 1.1 |
 | X provider | X API; browser disabled |
 | TikTok provider | Display API trước; Research API khi được duyệt |
 | Facebook provider | Owned Pages trước; PPCA sau approval; research tách biệt |
@@ -1857,18 +1967,18 @@ Engine chỉ được coi hoàn tất khi:
 | Comments | Root trước, child có budget ở phase sau |
 | Media | Metadata trước, download opt-in có quota |
 | Cutover | Theo từng source/operation bằng feature flag |
-| Xóa vendor | Chỉ sau acceptance + provenance/similarity audit |
+| Xóa legacy runtime/vendor checkout | Chỉ sau acceptance + audit hai vùng; luôn giữ license/notice/source-map của phần dẫn xuất |
 
 ## 23. Bước tiếp theo được khuyến nghị
 
-Không bắt đầu bằng việc sao chép adapter Bilibili hay XHS. Bước kế tiếp nên là Phase 0:
+Nền tảng CBCE đã hoàn thành; bước tiếp theo là track R0–R4 ở mục 0:
 
-1. Chốt policy và clean-room.
-2. Tạo SourceManifest đủ 17 nguồn, canonical IDs, operation matrix và run planner.
-3. Bọc sáu connector hiện hữu; sửa checkpoint global/channel và registry drift trước.
-4. Chạy song song hai lane: X API provider để thay đường 402, và fake browser adapter để hoàn thiện worker protocol/cancellation/redaction.
-5. Dùng Bilibili làm browser vertical slice đầu tiên sau khi runtime pass.
-6. External Meta/TikTok approval và provider scaffolding chạy song song từ Phase 0.
+1. Tạo licensed reuse zone, copy license nguyên văn và thiết lập source-map audit.
+2. Xây facade dùng lại CBCE worker/profile/budget/checkpoint thay vì copy `core.py`, store hoặc config toàn cục.
+3. Làm Weibo trước để khóa mẫu tích hợp, sau đó XHS, Douyin, Kuaishou và Zhihu.
+4. Chỉ lấp operation còn thiếu của Bilibili/Tieba; không thay phần CBCE đã qua cutover.
+5. Chạy contract test và hai canary cho từng source/operation trước khi đổi provider.
+6. X/TikTok/Facebook/Instagram tiếp tục lane provider chính thức, không liên quan đến reuse MediaCrawler.
 
 ## 24. Nhật ký triển khai
 
@@ -2323,3 +2433,28 @@ Phase hiện tại là **Phase 11, giai đoạn thứ 12/12 và cũng là phase 
 - Frontend ESLint, `28/28` tests và production build đều pass; không sửa chức năng phụ đề.
 
 Cách này tạo một nền móng dùng được cho đủ 17 nguồn và cho phép gỡ MediaCrawler sạch sẽ, thay vì thay một dependency lớn bằng nhiều bản sao khó bảo trì hoặc chỉ thêm card không có backend thật.
+
+### 2026-08-14 — Chuyển từ clean-room tuyệt đối sang licensed reuse phi thương mại
+
+- Chủ dự án xác nhận Content Bot hiện phục vụ học tập/nghiên cứu phi thương mại. Giả định “có khả năng thương mại” trước đây không còn là policy hiện hành.
+- Kế hoạch R0–R4 được thêm tại mục 0: giữ CBCE core/runtime, tạo licensed reuse zone và dùng chọn lọc client/login/signing/parser của MediaCrawler để lấp phần yếu.
+- Năm nguồn ưu tiên là Weibo, XHS, Douyin, Kuaishou và Zhihu vì vẫn active legacy. Bilibili/Tieba chỉ reuse cho operation còn thiếu; search CBCE đã cutover không bị thay ngược.
+- Audit tương lai phải tách CBCE-original khỏi MediaCrawler-derived. Vùng dẫn xuất bắt buộc giữ license, copyright, source commit/path và danh sách sửa đổi; không được gọi là clean-room.
+- X, TikTok, Facebook và Instagram tiếp tục provider chính thức vì snapshot MediaCrawler không có các adapter này.
+- Challenge solver, proxy rotation, fingerprint spoofing, crawl không giới hạn, store/exporter và config mutable của MediaCrawler vẫn ngoài phạm vi.
+
+### 2026-08-14 — R0/R1 licensed reuse boundary đã triển khai
+
+- Tạo `backend/app/crawlers/licensed/mediacrawler/` với bản sao nguyên văn `LICENSE`, `NOTICE.md` và `SOURCE_MAP.json` khóa snapshot `071c8c0acaece3e82f2532cffb19faeddc9ec1c3`.
+- Thêm runtime policy mặc định `CONTENT_BOT_LICENSED_REUSE_NONCOMMERCIAL_ONLY=true`; nếu policy bị tắt hoặc bật proxy rotation/challenge solving/large-scale thì provider dẫn xuất fail closed.
+- Thêm loader kiểm tra license, provenance, commit, review timestamp và đường dẫn tương đối an toàn trước khi facade mở delegate.
+- Thêm `LicensedSearchFacade`: delegate chỉ nhận `RunContext`, không nhận Mongo/scheduler/secret; facade giữ lifecycle, policy và cắt page đúng item budget. Sao chép có kiểm soát vocabulary Weibo `SearchType` làm entry đầu tiên trong source map.
+- Regression gate riêng đạt `4 passed`; Ruff và `git diff --check` sạch. Chưa đổi provider mặc định, chưa mở Weibo licensed provider và chưa xóa legacy bridge; bước kế tiếp là gắn facade vào Weibo worker rồi chạy canary manual nhỏ.
+- Đã nối tiếp `licensed_weibo` vào `cbce.worker.v1`: mobile API request/card parsing chạy trong phiên browser sở hữu bởi CBCE, có exact cursor/item/request/deadline boundary và không đi qua proxy pool/CDP/mutable config của vendor. Provider chỉ được chọn bằng override `weibo.search=licensed_weibo`; legacy vẫn là default.
+- Licensed facade áp trần học tập `100` item và `100` request cho mỗi run, ngoài các budget chung của CBCE. Parent planner/connector giảm yêu cầu lớn hơn về đúng trần và công bố giới hạn qua source catalog; tắt policy non-commercial trả `disabled_by_policy` và không khởi chạy worker.
+- Provider identity của `licensed_weibo` được giữ nguyên qua connector, worker context, checkpoint và record provenance. Terminal mobile page chỉ tăng page khi API báo còn dữ liệu; nếu không, cursor chuyển sang term kế tiếp mà không tiêu request rỗng.
+- `SOURCE_MAP.json` khóa SHA-256 của từng file dẫn xuất, buộc entry commit trùng snapshot commit và từ chối path trùng, timestamp thiếu timezone hoặc nội dung đã đổi sau review.
+- Clean-room similarity audit nay loại trừ riêng vùng licensed và cutover audit kiểm tra source map/license khi candidate là provider dẫn xuất. Full backend regression sau hardening đạt `785 passed, 2 skipped`; frontend lint/build cũng pass. Bounded live canary Weibo ngày 2026-08-15 đã chạy qua worker nhưng trả typed `AUTH_REQUIRED` với zero items, nên chưa đổi cutover và cần operator hoàn tất login rồi chạy lại canary.
+- Worker protocol bổ sung heartbeat 10 giây trong lúc browser chờ auth; regression focused gate đạt `36 passed` sau thay đổi và không còn lỗi `Worker heartbeat timed out` trong flow login boundary.
+- Canary xác nhận sau khi heartbeat được bật (`licensed-weibo-2026-08-15-e.json`, giới hạn `2/2/45s`): worker chờ có kiểm soát và kết thúc bằng `DEADLINE_EXCEEDED`, `0` item, `persisted=false`; không còn lỗi supervisor timeout. Đây vẫn là bằng chứng phiên Weibo chưa cung cấp response xác thực, không phải pass.
+- Cutover audit với override tạm thời `weibo.search=licensed_weibo` hiện còn đúng hai gate Weibo: `TWO_SEPARATED_CANARIES_MISSING` (cần hai canary `passed` cách nhau tối thiểu một giờ) và rollback drill stale; provider mặc định/legacy không bị đổi.

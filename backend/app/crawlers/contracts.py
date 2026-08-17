@@ -152,6 +152,7 @@ class ProviderOperationSpec:
     content_kinds: tuple[str, ...] = ()
     metric_ids: tuple[str, ...] = ()
     cta: str | None = None
+    budget_limits: CrawlBudgets | None = None
 
 
 @dataclass(frozen=True, slots=True)

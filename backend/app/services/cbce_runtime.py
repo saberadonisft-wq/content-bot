@@ -10,6 +10,11 @@ from typing import Any
 from ..config import settings
 from ..crawlers import SOURCE_REGISTRY
 from ..crawlers.contracts import ImplementationState, Operation
+from ..crawlers.licensed.mediacrawler.policy import (
+    LicensedReuseError,
+    assert_licensed_reuse_allowed,
+)
+from ..crawlers.licensed.mediacrawler.source_map import SourceMapError, load_source_map
 from ..crawlers.observed_dom_contract import (
     DOM_SOURCE_SPECS,
     DomContractUnavailable,
@@ -94,7 +99,8 @@ def cbce_provider_rollout_status(
     operation: Operation | str,
 ) -> dict[str, Any] | None:
     """Return the local rollout gate for a clean-room browser provider."""
-    if not provider_id.startswith("cbce_"):
+    licensed_provider = provider_id == "licensed_weibo"
+    if not provider_id.startswith("cbce_") and not licensed_provider:
         return None
     operation_id = operation if isinstance(operation, Operation) else Operation(operation)
     if not settings.content_bot_cbce_enabled:
@@ -113,6 +119,31 @@ def cbce_provider_rollout_status(
             "reason_code": "PROVIDER_NOT_SELECTED",
             "detail": "Select this experimental provider explicitly for this operation before running it.",
         }
+    if licensed_provider:
+        try:
+            assert_licensed_reuse_allowed(
+                {
+                    "non_commercial_learning": settings.content_bot_licensed_reuse_noncommercial_only,
+                }
+            )
+            load_source_map(
+                Path(__file__).resolve().parents[1]
+                / "crawlers"
+                / "licensed"
+                / "mediacrawler"
+            )
+        except LicensedReuseError:
+            return {
+                "ready": False,
+                "reason_code": "LICENSED_REUSE_POLICY",
+                "detail": "Licensed provider is disabled by runtime reuse policy.",
+            }
+        except (OSError, SourceMapError, ValueError):
+            return {
+                "ready": False,
+                "reason_code": "LICENSED_REUSE_PROVENANCE",
+                "detail": "Licensed provider provenance is not ready.",
+            }
     if (
         operation_id is not Operation.SEARCH
         and overrides.get(SOURCE_REGISTRY.resolve_id(source_id), {}).get("search")
@@ -124,7 +155,7 @@ def cbce_provider_rollout_status(
             "detail": "Select the clean-room source provider before enabling its additional operation.",
         }
     preflight = cbce_browser_preflight()
-    if preflight["ready"] and source_id in DOM_SOURCE_SPECS:
+    if preflight["ready"] and source_id in DOM_SOURCE_SPECS and not licensed_provider:
         try:
             load_observed_dom_contract(
                 settings.content_bot_cbce_contract_root,

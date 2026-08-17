@@ -1,0 +1,51 @@
+{
+  "schema_version": "cbce.licensed-source-map.v1",
+  "upstream": {
+    "repository": "NanmiCoder/MediaCrawler",
+    "commit": "071c8c0acaece3e82f2532cffb19faeddc9ec1c3",
+    "snapshot_date": "2026-08-05",
+    "license_file": "LICENSE",
+    "license_name": "NON-COMMERCIAL LEARNING LICENSE 1.1",
+    "copyright": "Copyright (c) [2024] [relakkes@gmail.com]"
+  },
+  "project_policy": {
+    "purpose": "non_commercial_learning_and_research",
+    "large_scale_crawling": false,
+    "challenge_solving": false,
+    "proxy_rotation": false,
+    "commercial_use": false
+  },
+  "reuse_zone": "backend/app/crawlers/licensed/mediacrawler",
+  "entries": [
+    {
+      "upstream_path": "media_platform/weibo/field.py",
+      "local_path": "weibo_field.py",
+      "source_commit": "071c8c0acaece3e82f2532cffb19faeddc9ec1c3",
+      "sha256": "e0c62e76fae1a01765c4804814d534beb2bc2d2b3f1e22b3b0a7c3237735055b",
+      "reuse_kind": "selective_copy_with_notice",
+      "adaptation_notes": "Only the bounded search-type enum is retained; CLI, mutable config and stores remain excluded.",
+      "reviewer": "content-bot",
+      "reviewed_at": "2026-08-14T00:00:00+07:00"
+    },
+    {
+      "upstream_path": "media_platform/weibo/client.py + media_platform/weibo/help.py",
+      "local_path": "weibo_api.py",
+      "source_commit": "071c8c0acaece3e82f2532cffb19faeddc9ec1c3",
+      "sha256": "6474dfa0ffa510dfb285dcb09771c3d0aa6c99434d0c96640fd36667495f5bbd",
+      "reuse_kind": "selective_adaptation",
+      "adaptation_notes": "Retains mobile search endpoint/card vocabulary only; removes upstream mutable config, proxy pool, store, logging and unbounded workflows.",
+      "reviewer": "content-bot",
+      "reviewed_at": "2026-08-14T00:00:00+07:00"
+    }
+  ],
+  "required_entry_fields": [
+    "upstream_path",
+    "local_path",
+    "source_commit",
+    "sha256",
+    "reuse_kind",
+    "adaptation_notes",
+    "reviewer",
+    "reviewed_at"
+  ]
+}

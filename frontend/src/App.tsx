@@ -8,13 +8,16 @@ import {
   Film,
   LoaderCircle,
   LogIn,
+  LogOut,
   Play,
   Plus,
   Radar,
   RefreshCw,
   Search,
   Settings2,
+  ShieldCheck,
   Trash2,
+  Users,
   Video,
   Waypoints,
   X,
@@ -34,8 +37,15 @@ import {
   SourceRun,
   TikTokOAuthStatus,
   TrendClusters,
+  UpdateCheckResponse,
   runEventsUrl,
 } from "./api";
+import { useAuth } from "./AuthContext";
+import { LoginPage } from "./LoginPage";
+import { PendingApprovalPage } from "./PendingApprovalPage";
+import { AdminUsersModal } from "./AdminUsersModal";
+import { SettingsModal } from "./SettingsModal";
+import { UpdateBanner, UpdateModal } from "./UpdateModal";
 
 const SubtitleStudio = lazy(() =>
   import("./SubtitleStudio").then((module) => ({ default: module.SubtitleStudio })),
@@ -233,6 +243,44 @@ const safeExternalUrl = (value: string) => {
 };
 
 export default function App() {
+  const {
+    user,
+    isAuthenticated,
+    isPending,
+    isApproved,
+    isBanned,
+    isLoading: authLoading,
+    isAdmin,
+    logout,
+  } = useAuth();
+  const [adminModalOpen, setAdminModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    const checkUpdates = async () => {
+      try {
+        const res = await api.checkForUpdate();
+        if (isMounted && res && res.update_available) {
+          setUpdateInfo(res);
+        }
+      } catch {
+        // Silently ignore update check errors
+      }
+    };
+    void checkUpdates();
+    const interval = setInterval(() => {
+      void checkUpdates();
+    }, 30 * 60 * 1000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   const [view, setView] = useState<View>(() => {
     const requestedView = new URLSearchParams(window.location.search).get("view");
     if (requestedView === "subtitles") return "subtitles";
@@ -774,6 +822,25 @@ export default function App() {
     ? `${API_BASE}/export.csv?${exportParams}`
     : "#";
 
+  if (authLoading) {
+    return (
+      <div className="auth-container">
+        <div style={{ textAlign: "center", color: "#94a3b8" }}>
+          <LoaderCircle size={36} className="animate-spin" style={{ margin: "0 auto 16px", color: "#38bdf8" }} />
+          <div>Đang kết nối hệ thống xác thực...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
+  if (isPending || !isApproved || isBanned) {
+    return <PendingApprovalPage />;
+  }
+
   return (
     <div className={`canva-home-app ${view === "subtitles" ? "editor-mode" : "home-mode"}`}>
       <aside className="canva-home-sidebar">
@@ -813,16 +880,74 @@ export default function App() {
             </button>
           </nav>
 
-        <div className="canva-home-sidebar-footer">
-          <div className="canva-home-profile">V</div>
-          <div style={{flex: 1}}>
-            <div style={{fontSize: 13, fontWeight: 600}}>VHC Team</div>
-            <div style={{fontSize: 11, color: '#6b7280'}}>Gói Pro</div>
+        <div className="canva-home-sidebar-footer" style={{ flexDirection: "column", gap: 10, alignItems: "stretch", padding: "14px 12px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {user?.avatar_url ? (
+              <img
+                src={user.avatar_url}
+                alt="Avatar"
+                style={{ width: 34, height: 34, borderRadius: "50%", objectFit: "cover" }}
+              />
+            ) : (
+              <div className="canva-home-profile" style={{ width: 34, height: 34, fontSize: 13, background: "#0f5ea8", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "50%" }}>
+                {(user?.display_name || user?.email || "U").charAt(0).toUpperCase()}
+              </div>
+            )}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {user?.display_name || user?.email?.split("@")[0]}
+              </div>
+              <div style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}>
+                <span className={`role-tag role-tag-${user?.role || "user"}`}>
+                  {(user?.role || "user").toUpperCase()}
+                </span>
+                <span style={{ color: "#6b7280", fontSize: 10 }}>{user?.auth_provider}</span>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            <button
+              type="button"
+              className="button secondary"
+              style={{ flex: 1, minWidth: 80, fontSize: 11, padding: "5px 8px", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}
+              onClick={() => setSettingsModalOpen(true)}
+              title="Quản lý Master Password & API Keys cục bộ"
+            >
+              <Settings2 size={13} color="#7c3aed" /> Cài đặt API
+            </button>
+            {isAdmin && (
+              <button
+                type="button"
+                className="button secondary"
+                style={{ flex: 1, minWidth: 80, fontSize: 11, padding: "5px 8px", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}
+                onClick={() => setAdminModalOpen(true)}
+                title="Quản lý người dùng & phê duyệt"
+              >
+                <Users size={13} color="#0f5ea8" /> Quản lý User
+              </button>
+            )}
+            <button
+              type="button"
+              className="button secondary"
+              style={{ fontSize: 11, padding: "5px 8px", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}
+              onClick={logout}
+              title="Đăng xuất khỏi hệ thống"
+            >
+              <LogOut size={13} color="#b42318" /> Đăng xuất
+            </button>
           </div>
         </div>
       </aside>
       
-      <main className="canva-home-main">
+      <main className="canva-home-main" style={{ display: "flex", flexDirection: "column" }}>
+        {updateInfo?.update_available && !updateDismissed && (
+          <UpdateBanner
+            updateInfo={updateInfo}
+            onOpenModal={() => setUpdateModalOpen(true)}
+            onDismiss={() => setUpdateDismissed(true)}
+          />
+        )}
         {view === "topics" && (
           <TopicsWorkspace
             selected={selected}
@@ -938,6 +1063,19 @@ export default function App() {
           setPaletteOpen(false);
           void startRun();
         }}
+      />
+      <AdminUsersModal
+        isOpen={adminModalOpen}
+        onClose={() => setAdminModalOpen(false)}
+      />
+      <SettingsModal
+        isOpen={settingsModalOpen}
+        onClose={() => setSettingsModalOpen(false)}
+      />
+      <UpdateModal
+        open={updateModalOpen}
+        onClose={() => setUpdateModalOpen(false)}
+        updateInfo={updateInfo}
       />
       {toast && (
         <div role="status" className="toast">
@@ -2269,6 +2407,11 @@ function Sources({
                 <span className="mono">
                   {authLabel}
                 </span>
+                {primary?.budget_limits && (
+                  <span className="mono">
+                    Tối đa {primary.budget_limits.max_items} bài / lượt
+                  </span>
+                )}
               </div>
               {source.id === "tiktok" ? (
                 <div className="source-oauth-controls" aria-busy={tiktokBusy}>

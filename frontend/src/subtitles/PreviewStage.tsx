@@ -712,9 +712,6 @@ export function PreviewStage({
               >
                 {options.uppercase ? activeCue.text.toUpperCase() : activeCue.text}
               </span>
-              {activeCue.secondary_text && (
-                <span className="preview-subtitle-secondary">{activeCue.secondary_text}</span>
-              )}
             </div>
           )}
         </div>

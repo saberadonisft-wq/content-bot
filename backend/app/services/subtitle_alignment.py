@@ -23,9 +23,10 @@ from typing import Any, Literal
 import imageio_ffmpeg
 
 ALIGNMENT_CACHE_VERSION = 1
-ALIGNMENT_ALGORITHM_VERSION = "2026-08-energy-word-v1"
+ALIGNMENT_ALGORITHM_VERSION = "2026-08-alignment-10ms-v2"
 PCM_SAMPLE_RATE = 16_000
 ENERGY_FRAME_MS = 10
+ALIGNMENT_PRECISION_MS = 10
 _TOKEN_RE = re.compile(r"[^\W_]+(?:[’'][^\W_]+)*", re.UNICODE)
 
 AlignmentEngine = Literal["auto", "energy", "faster_whisper"]
@@ -77,6 +78,28 @@ class AlignmentSettings:
     whisper_model_dir: Path | None = None
     whisper_allow_download: bool = False
     cpu_threads: int = 4
+
+
+def _quantize_alignment_ms(value: float) -> int:
+    """Store forced-alignment timestamps at the canonical 10 ms resolution."""
+    return max(0, round(float(value) / ALIGNMENT_PRECISION_MS) * ALIGNMENT_PRECISION_MS)
+
+
+def _quantize_word_timings(
+    words: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Quantize word intervals while keeping them ordered and non-empty."""
+    quantized: list[dict[str, Any]] = []
+    previous_end = 0
+    for word in words:
+        start = max(previous_end, _quantize_alignment_ms(int(word["start_ms"])))
+        end = _quantize_alignment_ms(int(word["end_ms"]))
+        if end <= start:
+            end = start + ALIGNMENT_PRECISION_MS
+        item = {**word, "start_ms": start, "end_ms": end}
+        quantized.append(item)
+        previous_end = end
+    return quantized
 
 
 def _emit(
@@ -442,7 +465,7 @@ def _words_for_range(
             }
         )
         previous_end = end
-    return words
+    return _quantize_word_timings(words)
 
 
 def _align_energy_window(
@@ -525,7 +548,7 @@ def _align_energy_window(
                 "start_ms": speech_start,
                 "end_ms": speech_end,
                 "timing_source": "forced_alignment",
-                "timing_precision_ms": ENERGY_FRAME_MS,
+                "timing_precision_ms": ALIGNMENT_PRECISION_MS,
                 "confidence": round(confidence, 4),
                 "needs_review": confidence < 0.6,
                 "words": _words_for_range(cue, speech_start, speech_end, confidence),
@@ -571,8 +594,12 @@ def _transcribe_pcm(
     observed: list[ObservedWord] = []
     for segment in segments:
         for word in segment.words or []:
-            start_ms = window.start_ms + round(float(word.start) * 1000)
-            end_ms = window.start_ms + round(float(word.end) * 1000)
+            start_ms = _quantize_alignment_ms(
+                window.start_ms + round(float(word.start) * 1000)
+            )
+            end_ms = _quantize_alignment_ms(
+                window.start_ms + round(float(word.end) * 1000)
+            )
             if end_ms <= start_ms:
                 continue
             observed.append(
@@ -691,7 +718,9 @@ def _align_whisper_window(
                 }
             )
             continue
-        words = _interpolated_word_timings(cue, local_tokens, local_matches)
+        words = _quantize_word_timings(
+            _interpolated_word_timings(cue, local_tokens, local_matches)
+        )
         speech_start = words[0]["start_ms"]
         speech_end = words[-1]["end_ms"]
         confidence = sum(float(word["confidence"]) for word in words) / len(words)
@@ -705,7 +734,7 @@ def _align_whisper_window(
                 "end_ms": speech_end,
                 "words": words,
                 "timing_source": "forced_alignment",
-                "timing_precision_ms": 20,
+                "timing_precision_ms": ALIGNMENT_PRECISION_MS,
                 "confidence": round(confidence, 4),
                 "needs_review": match_ratio < 0.7 or confidence < 0.65,
             }
@@ -735,8 +764,13 @@ def apply_display_padding(
         speech_end = cue.get("speech_end_ms")
         if not isinstance(speech_start, int) or not isinstance(speech_end, int):
             continue
-        cue["start_ms"] = max(0, speech_start - lead_in_ms)
-        cue["end_ms"] = min(duration_ms, speech_end + tail_ms)
+        cue["start_ms"] = _quantize_alignment_ms(
+            max(0, speech_start - lead_in_ms)
+        )
+        cue["end_ms"] = min(
+            duration_ms,
+            _quantize_alignment_ms(speech_end + tail_ms),
+        )
 
     for left, right in pairwise(ordered):
         if left["end_ms"] <= right["start_ms"]:
@@ -744,7 +778,9 @@ def apply_display_padding(
         left_speech_end = int(left.get("speech_end_ms", left["end_ms"]))
         right_speech_start = int(right.get("speech_start_ms", right["start_ms"]))
         if left_speech_end <= right_speech_start:
-            boundary = (left_speech_end + right_speech_start) // 2
+            boundary = _quantize_alignment_ms(
+                (left_speech_end + right_speech_start) // 2
+            )
             left["end_ms"] = max(left_speech_end, min(left["end_ms"], boundary))
             right["start_ms"] = min(
                 right_speech_start,
@@ -885,7 +921,7 @@ def align_subtitle_document(
     next_document["segments"] = merged
     if aligned_by_id:
         next_document["timing_source"] = "forced_alignment"
-        next_document["timing_precision_ms"] = 20 if resolved_engine == "faster_whisper" else 10
+        next_document["timing_precision_ms"] = ALIGNMENT_PRECISION_MS
     result = {
         "document": next_document,
         "warnings": warnings,

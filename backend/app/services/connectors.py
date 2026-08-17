@@ -3184,27 +3184,38 @@ def default_connectors() -> dict[str, SourceConnector]:
         overrides = provider_overrides()
         from .cbce_connectors import (
             CbceBilibiliConnector,
+            CbceLicensedWeiboConnector,
             CbceObservedDomConnector,
             CbceTiebaConnector,
         )
 
-        selected_sources = {
-            source_id
+        selected_search_providers = {
+            source_id: operations.get("search")
             for source_id, operations in overrides.items()
-            if operations.get("search") == f"cbce_{source_id}"
+            if operations.get("search")
         }
         connectors = [
             (
-                CbceTiebaConnector()
-                if connector.source_id == "tieba"
+                CbceLicensedWeiboConnector()
+                if selected_search_providers.get(connector.source_id)
+                == "licensed_weibo"
                 else (
-                    CbceBilibiliConnector()
-                    if connector.source_id == "bilibili"
-                    else CbceObservedDomConnector(connector.source_id)
+                    CbceTiebaConnector()
+                    if connector.source_id == "tieba"
+                    and selected_search_providers.get(connector.source_id)
+                    == "cbce_tieba"
+                    else (
+                        CbceBilibiliConnector()
+                        if connector.source_id == "bilibili"
+                        and selected_search_providers.get(connector.source_id)
+                        == "cbce_bilibili"
+                        else CbceObservedDomConnector(connector.source_id)
+                        if selected_search_providers.get(connector.source_id)
+                        == f"cbce_{connector.source_id}"
+                        else connector
+                    )
                 )
             )
-            if connector.source_id in selected_sources
-            else connector
             for connector in connectors
         ]
     result = {connector.source_id: connector for connector in connectors}

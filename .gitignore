@@ -3,8 +3,13 @@ backend/.venv/
 frontend/node_modules/
 frontend/dist/
 data/
+backend/data/
+auth-server/data/
 .env
 backend/.env
+auth-server/.env
+*.enc
+*.key
 vendor/*
 !vendor/
 !vendor/mediacrawler

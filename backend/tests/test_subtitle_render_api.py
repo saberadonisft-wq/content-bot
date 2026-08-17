@@ -60,6 +60,29 @@ def test_preview_ass_uses_percentage_anchor_and_output_aspect(
     assert r"\pos(320,540)" in response.ass
 
 
+def test_render_request_allows_overlay_without_subtitle_cues() -> None:
+    request = SubtitleRenderRequestV2(
+        video_id="a" * 12,
+        document={
+            "schema_version": 2,
+            "language": "vi",
+            "timebase": "milliseconds",
+            "timing_source": "manual",
+            "timing_precision_ms": 1,
+            "segments": [],
+        },
+        overlay={
+            "overlay_id": "b" * 64,
+            "x": 14,
+            "y": 12,
+            "width": 22,
+        },
+    )
+
+    assert request.document.segments == []
+    assert request.overlay is not None
+
+
 def test_render_endpoint_submits_progress_and_attachable_result(
     tmp_path: Path,
     monkeypatch,

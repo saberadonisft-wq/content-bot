@@ -19,6 +19,11 @@ from ..crawlers.contracts import (
     ProviderManifest,
     ProviderOperationSpec,
 )
+from ..crawlers.licensed.mediacrawler.policy import (
+    LicensedReuseError,
+    assert_licensed_reuse_allowed,
+)
+from ..crawlers.licensed.mediacrawler.source_map import SourceMapError, load_source_map
 from ..crawlers.registry import SourceRegistry
 from .crawler_canary import REPORT_SCHEMA
 from .crawler_cleanroom_audit import (
@@ -403,6 +408,25 @@ class CrawlerCutoverAuditor:
         blockers: list[str] = []
         if candidate_provider_id is None:
             blockers.append("NONLEGACY_IMPLEMENTATION_MISSING")
+        if candidate_provider_id and candidate_provider_id.startswith("licensed_"):
+            try:
+                assert_licensed_reuse_allowed(
+                    {
+                        "non_commercial_learning": settings.content_bot_licensed_reuse_noncommercial_only,
+                    }
+                )
+                load_source_map(
+                    self.project_root
+                    / "backend"
+                    / "app"
+                    / "crawlers"
+                    / "licensed"
+                    / "mediacrawler"
+                )
+            except LicensedReuseError:
+                blockers.append("LICENSED_POLICY_DISABLED")
+            except (OSError, SourceMapError, ValueError):
+                blockers.append("LICENSED_PROVENANCE_INVALID")
         if active_provider_id is None:
             blockers.append("ACTIVE_PROVIDER_MISSING")
         elif any(

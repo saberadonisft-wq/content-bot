@@ -37,6 +37,11 @@ export type SourceOperation = {
   auth_modes: string[];
   schedule_policy: string;
   target_kinds: string[];
+  budget_limits: {
+    max_items: number;
+    max_requests: number;
+    deadline_seconds: number;
+  } | null;
 };
 
 export type SourceMetric = {
@@ -308,10 +313,19 @@ export type RunProgressEvent = {
   operation?: string | null;
 };
 
+function getAuthHeader(): Record<string, string> {
+  const token = localStorage.getItem("content_bot_access_token");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: {
+      "Content-Type": "application/json",
+      ...getAuthHeader(),
+      ...init?.headers,
+    },
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
@@ -609,6 +623,7 @@ export const api = {
     formData.append("file", file);
     const response = await fetch(`${API_BASE}/subtitles/upload`, {
       method: "POST",
+      headers: getAuthHeader(),
       body: formData,
       signal,
     });
@@ -623,6 +638,7 @@ export const api = {
     formData.append("file", file);
     const response = await fetch(`${API_BASE}/subtitles/overlays`, {
       method: "POST",
+      headers: getAuthHeader(),
       body: formData,
       signal,
     });
@@ -749,4 +765,97 @@ export const api = {
     }),
   deleteVideo: (id: string, type: string) =>
     request<void>(`/videos/${id}?type=${type}`, { method: "DELETE" }),
+
+  getCredentialStatus: (signal?: AbortSignal) =>
+    request<CredentialStatus>("/credentials/status", { signal }),
+
+  setupMasterPassword: (
+    masterPassword: string,
+    initialCredentials?: Record<string, string>,
+  ) =>
+    request<{ success: boolean; message: string; status: CredentialStatus }>(
+      "/credentials/setup",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          master_password: masterPassword,
+          initial_credentials: initialCredentials,
+        }),
+      },
+    ),
+
+  unlockCredentials: (masterPassword: string) =>
+    request<{ success: boolean; message: string; status: CredentialStatus }>(
+      "/credentials/unlock",
+      {
+        method: "POST",
+        body: JSON.stringify({ master_password: masterPassword }),
+      },
+    ),
+
+  lockCredentials: () =>
+    request<{ success: boolean; message: string; status: CredentialStatus }>(
+      "/credentials/lock",
+      {
+        method: "POST",
+      },
+    ),
+
+  changeMasterPassword: (oldPassword: string, newPassword: string) =>
+    request<{ success: boolean; message: string; status: CredentialStatus }>(
+      "/credentials/change-password",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          old_password: oldPassword,
+          new_password: newPassword,
+        }),
+      },
+    ),
+
+  updateCredentials: (credentials: Record<string, string>) =>
+    request<{ success: boolean; message: string; status: CredentialStatus }>(
+      "/credentials",
+      {
+        method: "PUT",
+        body: JSON.stringify({ credentials }),
+      },
+    ),
+
+  getAppVersion: (signal?: AbortSignal) =>
+    request<{ version: string }>("/version", { signal }),
+
+  checkForUpdate: (channel: "stable" | "beta" = "stable", signal?: AbortSignal) =>
+    request<UpdateCheckResponse>(`/update/check?channel=${channel}`, { signal }),
 };
+
+export type CredentialStatus = {
+  is_master_password_set: boolean;
+  is_unlocked: boolean;
+  configured_keys: Record<string, boolean>;
+  masked_keys: Record<string, string>;
+  platforms: {
+    youtube: boolean;
+    x_twitter: boolean;
+    reddit: boolean;
+    meta_instagram: boolean;
+    facebook_page: boolean;
+    tiktok: boolean;
+    gemini: boolean;
+    mongodb: boolean;
+  };
+};
+
+export type UpdateCheckResponse = {
+  update_available: boolean;
+  current_version: string;
+  latest_version: string;
+  channel?: "stable" | "beta";
+  download_url?: string;
+  sha256?: string;
+  file_size?: number;
+  changelog?: string;
+  mandatory?: boolean;
+  published_at?: string;
+};
+
