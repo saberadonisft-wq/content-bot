@@ -2,6 +2,37 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "Content Bot: Auth Server",
+      "type": "shell",
+      "command": "${workspaceFolder}\\scripts\\launcher.ps1",
+      "args": ["-Action", "auth"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "runOptions": {
+        "instanceLimit": 1
+      },
+      "problemMatcher": {
+        "owner": "content-bot-auth",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Starting Content Bot auth server",
+          "endsPattern": "Uvicorn running on"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "content-bot",
+        "clear": true,
+        "showReuseMessage": false
+      }
+    },
+    {
       "label": "Content Bot: Backend",
       "type": "shell",
       "command": "${workspaceFolder}\\scripts\\launcher.ps1",
@@ -66,6 +97,7 @@
     {
       "label": "Content Bot: Start",
       "dependsOn": [
+        "Content Bot: Auth Server",
         "Content Bot: Backend",
         "Content Bot: Frontend"
       ],
@@ -75,6 +107,27 @@
         "isDefault": true
       },
       "problemMatcher": []
+    },
+    {
+      "label": "Content Bot: Desktop Dev",
+      "type": "shell",
+      "command": "${workspaceFolder}\\scripts\\launcher.ps1",
+      "args": ["-Action", "desktop"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "runOptions": {
+        "instanceLimit": 1
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "content-bot-desktop",
+        "clear": true,
+        "showReuseMessage": false
+      }
     },
     {
       "label": "Content Bot: Doctor",

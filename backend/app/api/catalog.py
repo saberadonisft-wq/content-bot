@@ -14,8 +14,8 @@ from ..crawlers.contracts import (
     Operation,
     SchedulePolicy,
 )
-from ..mongo import MongoStore
-from ..schemas import KeywordInput, KeywordOutput, SourceOutput
+from ..mongo import PersistenceStore
+from ..schemas import KeywordInput, KeywordOutput, LiveWallConfig, SourceOutput
 from ..services.cbce_runtime import (
     cbce_provider_rollout_status,
     provider_overrides,
@@ -38,6 +38,7 @@ def _keyword_output(keyword: dict) -> KeywordOutput:
         exclude_terms=keyword.get("exclude_terms", []),
         source_ids=keyword.get("source_ids", []),
         channels=channels,
+        live_wall=_normalized_live_wall(keyword.get("live_wall"), channels),
         enabled=keyword.get("enabled", True),
         interval_minutes=keyword.get("interval_minutes", 360),
         max_items_per_source=keyword.get("max_items_per_source", 500),
@@ -47,15 +48,33 @@ def _keyword_output(keyword: dict) -> KeywordOutput:
     )
 
 
+def _normalized_live_wall(
+    value: object, channels: list[dict],
+) -> LiveWallConfig:
+    try:
+        configured = LiveWallConfig.model_validate(value or {})
+    except ValueError:
+        configured = LiveWallConfig()
+    existing_ids = {str(channel.get("id") or "") for channel in channels}
+    return LiveWallConfig(
+        channel_ids=[
+            channel_id
+            for channel_id in configured.channel_ids
+            if channel_id in existing_ids
+        ],
+        slots=configured.slots,
+    )
+
+
 def build_catalog_router(
-    get_store: Callable[[], MongoStore],
+    get_store: Callable[[], PersistenceStore],
     connectors: dict[str, SourceConnector],
     run_manager: RunManager,
 ) -> APIRouter:
     SOURCE_REGISTRY.validate_bindings(
         connectors,
         CHANNEL_SCANNERS,
-        renderer_ids={"x"},
+        renderer_ids={"x", "tiktok"},
     )
     router = APIRouter(prefix="/api/v1")
 
@@ -300,6 +319,7 @@ def build_catalog_router(
                 "source_ids": source_ids,
                 "source_selection_version": 2,
                 "channels": channels,
+                "live_wall": LiveWallConfig().model_dump(mode="json"),
                 "source_checkpoints": {},
                 "enabled": payload.enabled,
                 "interval_minutes": payload.interval_minutes,
@@ -323,6 +343,7 @@ def build_catalog_router(
             raise HTTPException(409, "A keyword with that name already exists")
         now = utcnow()
         channels = normalized_channels(payload, existing)
+        live_wall = _normalized_live_wall(existing.get("live_wall"), channels)
         source_ids = selected_global_sources(payload, channels)
         invalid = set(source_ids).difference(connectors)
         if invalid:
@@ -337,6 +358,7 @@ def build_catalog_router(
                 "source_ids": source_ids,
                 "source_selection_version": 2,
                 "channels": channels,
+                "live_wall": live_wall.model_dump(mode="json"),
                 "enabled": payload.enabled,
                 "interval_minutes": payload.interval_minutes,
                 "max_items_per_source": payload.max_items_per_source,
@@ -347,6 +369,37 @@ def build_catalog_router(
             },
         )
         run_manager.rescore_keyword(keyword_id)
+        return _keyword_output(row)
+
+    @router.put(
+        "/keywords/{keyword_id}/live-wall",
+        response_model=KeywordOutput,
+    )
+    def update_live_wall(keyword_id: int, payload: LiveWallConfig):
+        storage = get_store()
+        existing = storage.keyword(keyword_id)
+        if not existing:
+            raise HTTPException(404, "Keyword not found")
+        channel_ids = {
+            str(channel.get("id") or "") for channel in existing.get("channels", [])
+        }
+        unknown = [
+            channel_id for channel_id in payload.channel_ids if channel_id not in channel_ids
+        ]
+        if unknown:
+            raise HTTPException(
+                422,
+                f"Unknown channel IDs for this keyword: {', '.join(unknown)}",
+            )
+        row = storage.update_keyword(
+            keyword_id,
+            {
+                "live_wall": payload.model_dump(mode="json"),
+                "updated_at": utcnow(),
+            },
+        )
+        if row is None:
+            raise HTTPException(404, "Keyword not found")
         return _keyword_output(row)
 
     @router.delete("/keywords/{keyword_id}", status_code=204)

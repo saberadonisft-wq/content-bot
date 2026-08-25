@@ -21,13 +21,16 @@ def test_registry_has_exact_canonical_order_and_aliases() -> None:
 def test_connector_registry_matches_manifest_ids_without_noop_claims() -> None:
     connectors = default_connectors()
     assert tuple(connectors) == CANONICAL_SOURCE_IDS
-    SOURCE_REGISTRY.validate_bindings(connectors, CHANNEL_SCANNERS, renderer_ids={"x"})
+    SOURCE_REGISTRY.validate_bindings(
+        connectors, CHANNEL_SCANNERS, renderer_ids={"x", "tiktok"}
+    )
     assert SOURCE_REGISTRY.executable("x", Operation.RENDER_EMBED)
     assert SOURCE_REGISTRY.executable("x", Operation.SEARCH)
     assert SOURCE_REGISTRY.executable("x", Operation.SCAN_CHANNEL)
     assert not SOURCE_REGISTRY.executable("tiktok", Operation.SEARCH)
     assert SOURCE_REGISTRY.executable("tiktok", Operation.SCAN_CHANNEL)
     assert SOURCE_REGISTRY.executable("tiktok", Operation.FETCH_DETAIL)
+    assert SOURCE_REGISTRY.executable("tiktok", Operation.RENDER_EMBED)
     assert not SOURCE_REGISTRY.executable("facebook", Operation.SEARCH)
     assert SOURCE_REGISTRY.executable("facebook", Operation.SCAN_CHANNEL)
     assert SOURCE_REGISTRY.executable("instagram", Operation.SEARCH)
@@ -103,6 +106,11 @@ def test_source_catalog_is_manifest_driven_and_operation_specific(monkeypatch) -
     assert by_id["x"]["watchlist_filter"] is True
     assert by_id["x"]["state"] == "ready"
     assert by_id["tiktok"]["global_search"] is False
+    tiktok_operations = {
+        (operation["provider_id"], operation["id"]): operation
+        for operation in by_id["tiktok"]["operations"]
+    }
+    assert tiktok_operations[("tiktok_embed", "render_embed")]["enabled"] is True
     assert by_id["facebook"]["watchlist_filter"] is True
     licensed_weibo = next(
         operation

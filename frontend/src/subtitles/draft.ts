@@ -1,7 +1,8 @@
 import type { SubtitleBurnOptions, SubtitleCueV2 } from "../api";
 import { normalizeOverlayLayout } from "./overlay";
 import { normalizeSubtitleMasks } from "./masks";
-import type { OverlayLayout, SubtitleMaskRegion } from "./types";
+import type { OverlayLayout, SubtitleMaskRegion, VideoClip } from "./types";
+import { normalizeVideoClips } from "./video-clips";
 
 export type SavedSubtitleDraft = {
   version: 2;
@@ -19,6 +20,7 @@ export type SavedSubtitleDraft = {
   overlayName: string;
   overlayLayout: OverlayLayout;
   subtitleMasks: SubtitleMaskRegion[];
+  videoClips: VideoClip[];
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -173,6 +175,7 @@ export const normalizeSavedDraft = (
         : "",
     overlayLayout: normalizeOverlayLayout(value.overlayLayout),
     subtitleMasks: normalizeSubtitleMasks(value.subtitleMasks),
+    videoClips: normalizeVideoClips(value.videoClips, Number(value.mediaDurationMs) || 0),
   };
 };
 

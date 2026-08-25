@@ -25,7 +25,7 @@ from .subtitles import (
     subtitles_to_srt,
 )
 
-PRECISION_RENDERER_VERSION = "2026-08-subtitle-v3.4-mask-roi"
+PRECISION_RENDERER_VERSION = "2026-08-subtitle-v3.5-video-cuts"
 SRT_PLAYRES_X = 384
 SRT_PLAYRES_Y = 288
 RenderProgress = Callable[[int, str, str], None]
@@ -539,6 +539,58 @@ def _video_filter_graph(
     output_width = target[0] if target else int(media["width"])
     graph_parts: list[str] = []
     current_video = "[0:v]"
+    video_segments: list[tuple[int, int]] = []
+    cuts_active = False
+    if options.get("video_segments"):
+        video_segments, cuts_active = _effective_video_segments(media, options)
+    if cuts_active:
+        video_labels: list[str] = []
+        for index, (start_ms, end_ms) in enumerate(video_segments):
+            label = f"cut_video_{index}"
+            graph_parts.append(
+                f"[0:v]trim=start={start_ms / 1000:.3f}:end={end_ms / 1000:.3f},"
+                f"setpts=PTS-STARTPTS[{label}]"
+            )
+            video_labels.append(f"[{label}]")
+        if len(video_labels) == 1:
+            current_video = video_labels[0]
+        else:
+            graph_parts.append(
+                f"{''.join(video_labels)}concat=n={len(video_labels)}:v=1:a=0[cut_video]"
+            )
+            current_video = "[cut_video]"
+        if media.get("has_audio"):
+            audio_labels: list[str] = []
+            for index, (start_ms, end_ms) in enumerate(video_segments):
+                label = f"cut_audio_{index}"
+                graph_parts.append(
+                    f"[0:a]atrim=start={start_ms / 1000:.3f}:end={end_ms / 1000:.3f},"
+                    f"asetpts=PTS-STARTPTS[{label}]"
+                )
+                audio_labels.append(f"[{label}]")
+            if len(audio_labels) == 1:
+                graph_parts.append(f"{audio_labels[0]}anull[acut]")
+            else:
+                graph_parts.append(
+                    f"{''.join(audio_labels)}concat=n={len(audio_labels)}:v=0:a=1[acut]"
+                )
+            audio_filters = ["asetpts=PTS-STARTPTS"]
+            volume = float(options.get("volume", 1))
+            fade_in_ms = int(options.get("fade_in_ms", 0))
+            fade_out_ms = int(options.get("fade_out_ms", 0))
+            if speed != 1:
+                audio_filters.append(f"atempo={speed}")
+            if volume != 1:
+                audio_filters.append(f"volume={volume:.4f}")
+            if fade_in_ms > 0:
+                audio_filters.append(f"afade=t=in:st=0:d={fade_in_ms / 1000:.3f}")
+            if fade_out_ms > 0:
+                output_duration_ms = _output_duration_ms(media, options)
+                fade_start = max(0, output_duration_ms - fade_out_ms) / 1000
+                audio_filters.append(
+                    f"afade=t=out:st={fade_start:.3f}:d={fade_out_ms / 1000:.3f}"
+                )
+            graph_parts.append(f"[acut]{','.join(audio_filters)}[aout]")
 
     # Mask coordinates are percentages of the source frame shown in the editor.
     # Apply them before any aspect-ratio padding/cropping so preview and export
@@ -600,29 +652,101 @@ def _video_filter_graph(
 
 
 def _output_duration_ms(media: dict[str, Any], options: dict[str, Any]) -> int:
-    start_ms = int(options.get("trim_start_ms", 0))
-    end_ms = min(
-        int(media["duration_ms"]),
-        int(options.get("trim_end_ms") or media["duration_ms"]),
-    )
-    if end_ms <= start_ms:
-        raise SubtitleRenderError("Render trim range is empty")
+    segments, _ = _effective_video_segments(media, options)
+    source_duration_ms = sum(end_ms - start_ms for start_ms, end_ms in segments)
     speed = Decimal(str(options.get("video_speed", 1)))
     return int(
-        (Decimal(end_ms - start_ms) / speed).quantize(
+        (Decimal(source_duration_ms) / speed).quantize(
             Decimal(1),
             rounding=ROUND_HALF_UP,
         )
     )
 
 
+def _effective_video_segments(
+    media: dict[str, Any],
+    options: dict[str, Any],
+) -> tuple[list[tuple[int, int]], bool]:
+    duration_ms = int(media["duration_ms"])
+    trim_start_ms = max(0, int(options.get("trim_start_ms", 0)))
+    trim_end_ms = min(
+        duration_ms,
+        int(options.get("trim_end_ms") or duration_ms),
+    )
+    raw_segments = options.get("video_segments") or []
+    segments: list[tuple[int, int]] = []
+    if raw_segments:
+        for segment in raw_segments:
+            start_ms = max(trim_start_ms, int(segment["start_ms"]))
+            end_ms = min(trim_end_ms, duration_ms, int(segment["end_ms"]))
+            if end_ms <= start_ms:
+                continue
+            if segments and start_ms < segments[-1][1]:
+                raise SubtitleRenderError("Video segments overlap")
+            if segments and start_ms == segments[-1][1]:
+                segments[-1] = (segments[-1][0], end_ms)
+            else:
+                segments.append((start_ms, end_ms))
+    elif trim_end_ms > trim_start_ms:
+        segments = [(trim_start_ms, trim_end_ms)]
+    if not segments:
+        raise SubtitleRenderError("Render video segments are empty")
+    cuts_active = segments != [(trim_start_ms, trim_end_ms)]
+    return segments, cuts_active
+
+
+def _transform_cues_for_video_segments(
+    cues: list[dict[str, Any]],
+    segments: list[tuple[int, int]],
+    video_speed: Decimal,
+) -> list[dict[str, Any]]:
+    transformed: list[dict[str, Any]] = []
+    source_offset_ms = 0
+    id_counts: dict[str, int] = {}
+    for start_ms, end_ms in segments:
+        segment_cues = transform_project_cues(
+            cues,
+            trim_start_ms=start_ms,
+            trim_end_ms=end_ms,
+            video_speed=video_speed,
+        )
+        output_offset_ms = int(
+            (Decimal(source_offset_ms) / video_speed).quantize(
+                Decimal(1),
+                rounding=ROUND_HALF_UP,
+            )
+        )
+        for cue in segment_cues:
+            mapped = dict(cue)
+            mapped["start_ms"] += output_offset_ms
+            mapped["end_ms"] += output_offset_ms
+            if mapped.get("speech_start_ms") is not None:
+                mapped["speech_start_ms"] += output_offset_ms
+            if mapped.get("speech_end_ms") is not None:
+                mapped["speech_end_ms"] += output_offset_ms
+            for word in mapped.get("words") or []:
+                word["start_ms"] += output_offset_ms
+                word["end_ms"] += output_offset_ms
+            cue_id = str(mapped.get("id", "cue"))
+            id_counts[cue_id] = id_counts.get(cue_id, 0) + 1
+            if id_counts[cue_id] > 1:
+                mapped["id"] = f"{cue_id}-part-{id_counts[cue_id]}"
+            transformed.append(mapped)
+        source_offset_ms += end_ms - start_ms
+    return transformed
+
+
 def _audio_arguments(
     media: dict[str, Any],
     options: dict[str, Any],
     output_duration_ms: int,
+    *,
+    audio_source: str = "0:a:0?",
 ) -> tuple[list[str], bool]:
     if not media.get("has_audio"):
         return ["-an"], False
+    if audio_source != "0:a:0?":
+        return ["-map", audio_source, "-c:a", "aac", "-b:a", "160k"], False
     speed = Decimal(str(options.get("video_speed", 1)))
     volume = float(options.get("volume", 1))
     fade_in_ms = int(options.get("fade_in_ms", 0))
@@ -658,7 +782,7 @@ def _audio_arguments(
         filters.append(f"afade=t=out:st={fade_start:.3f}:d={fade_out_ms / 1000:.3f}")
     return [
         "-map",
-        "0:a:0?",
+        audio_source,
         "-af",
         ",".join(filters),
         "-c:a",
@@ -807,11 +931,11 @@ def render_precision_video(
         int(options.get("trim_end_ms") or media["duration_ms"]),
         int(media["duration_ms"]),
     )
-    transformed = transform_project_cues(
+    video_segments, cuts_active = _effective_video_segments(media, options)
+    transformed = _transform_cues_for_video_segments(
         document.get("segments", []),
-        trim_start_ms=trim_start_ms,
-        trim_end_ms=trim_end_ms,
-        video_speed=Decimal(str(options.get("video_speed", 1))),
+        video_segments,
+        Decimal(str(options.get("video_speed", 1))),
     )
     if options.get("uppercase"):
         for cue in transformed:
@@ -876,12 +1000,14 @@ def render_precision_video(
                 media,
                 options,
                 output_duration_ms,
+                audio_source="[aout]" if cuts_active and media.get("has_audio") else "0:a:0?",
             )
             input_args: list[str] = []
-            if trim_start_ms > 0:
-                input_args.extend(["-ss", f"{trim_start_ms / 1000:.3f}"])
-            source_clip_ms = min(trim_end_ms, int(media["duration_ms"])) - trim_start_ms
-            input_args.extend(["-t", f"{source_clip_ms / 1000:.3f}"])
+            if not cuts_active:
+                if trim_start_ms > 0:
+                    input_args.extend(["-ss", f"{trim_start_ms / 1000:.3f}"])
+                source_clip_ms = min(trim_end_ms, int(media["duration_ms"])) - trim_start_ms
+                input_args.extend(["-t", f"{source_clip_ms / 1000:.3f}"])
 
             last_error: SubtitleRenderError | None = None
             selected_encoder: EncoderName | None = None

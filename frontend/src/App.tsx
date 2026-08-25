@@ -9,13 +9,15 @@ import {
   LoaderCircle,
   LogIn,
   LogOut,
+  Monitor,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   Plus,
   Radar,
   RefreshCw,
   Search,
   Settings2,
-  ShieldCheck,
   Trash2,
   Users,
   Video,
@@ -40,12 +42,13 @@ import {
   UpdateCheckResponse,
   runEventsUrl,
 } from "./api";
-import { useAuth } from "./AuthContext";
+import { useAuth } from "./useAuth";
 import { LoginPage } from "./LoginPage";
 import { PendingApprovalPage } from "./PendingApprovalPage";
 import { AdminUsersModal } from "./AdminUsersModal";
 import { SettingsModal } from "./SettingsModal";
 import { UpdateBanner, UpdateModal } from "./UpdateModal";
+import { LiveChannelWall, XTimelineEmbed } from "./LiveChannelWall";
 
 const SubtitleStudio = lazy(() =>
   import("./SubtitleStudio").then((module) => ({ default: module.SubtitleStudio })),
@@ -55,7 +58,13 @@ const VideoLibrary = lazy(() =>
 );
 
 type View = "topics" | "library" | "subtitles";
-type LibraryTab = "channels" | "connections" | "videos";
+type LibraryTab = "channels" | "live" | "connections" | "videos";
+const LIBRARY_TABS: { id: LibraryTab; label: string; icon: typeof Database }[] = [
+  { id: "channels", label: "Kênh theo dõi", icon: Waypoints },
+  { id: "live", label: "Trực tiếp", icon: Monitor },
+  { id: "connections", label: "Kết nối nền tảng", icon: Database },
+  { id: "videos", label: "Video", icon: Video },
+];
 const splitTerms = (value: string) =>
   value
     .split(",")
@@ -81,45 +90,6 @@ const channelErrorDetail = (channel: ChannelSubscription) =>
     ? "X API chưa có credits hoặc access tier phù hợp. Kênh vẫn có thể mở để xem; chỉ thử quét lại sau khi đã cấp quyền trong X Developer Console."
     : channel.last_error;
 
-function XTimelineEmbed({ url }: { url: string }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const loadWidgets = () => {
-      const twitter = (
-        window as Window & {
-          twttr?: { widgets?: { load: (element?: HTMLElement) => void } };
-        }
-      ).twttr;
-      twitter?.widgets?.load(containerRef.current ?? undefined);
-    };
-    const existing = document.querySelector<HTMLScriptElement>(
-      'script[src="https://platform.twitter.com/widgets.js"]',
-    );
-    if (existing) {
-      loadWidgets();
-      existing.addEventListener("load", loadWidgets);
-      return () => existing.removeEventListener("load", loadWidgets);
-    }
-    const script = document.createElement("script");
-    script.src = "https://platform.twitter.com/widgets.js";
-    script.async = true;
-    script.addEventListener("load", loadWidgets);
-    document.head.appendChild(script);
-    return () => script.removeEventListener("load", loadWidgets);
-  }, [url]);
-  return (
-    <div className="x-timeline-embed" ref={containerRef}>
-      <a
-        className="twitter-timeline"
-        data-height="480"
-        data-chrome="noheader nofooter"
-        href={url}
-      >
-        Đang tải bài đăng công khai từ X…
-      </a>
-    </div>
-  );
-}
 const fmt = (value?: string | null) =>
   value
     ? new Intl.DateTimeFormat("vi-VN", {
@@ -255,9 +225,18 @@ export default function App() {
   } = useAuth();
   const [adminModalOpen, setAdminModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<"overview" | "gemini">("overview");
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => window.localStorage.getItem("content-bot.sidebar-collapsed") === "true",
+  );
+
+  const openSettings = (tab: "overview" | "gemini" = "overview") => {
+    setSettingsInitialTab(tab);
+    setSettingsModalOpen(true);
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -295,7 +274,7 @@ export default function App() {
     const requestedTab = params.get("tab");
     if (requestedView === "videos") return "videos";
     if (requestedView === "sources") return "connections";
-    return ["channels", "connections", "videos"].includes(requestedTab ?? "")
+    return ["channels", "live", "connections", "videos"].includes(requestedTab ?? "")
       ? (requestedTab as LibraryTab)
       : "channels";
   });
@@ -335,6 +314,13 @@ export default function App() {
     else url.searchParams.delete("tab");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }, [libraryTab, view]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "content-bot.sidebar-collapsed",
+      String(sidebarCollapsed),
+    );
+  }, [sidebarCollapsed]);
 
   const selected =
     keywords.find((keyword) => keyword.id === selectedId) ?? null;
@@ -842,10 +828,24 @@ export default function App() {
   }
 
   return (
-    <div className={`canva-home-app ${view === "subtitles" ? "editor-mode" : "home-mode"}`}>
-      <aside className="canva-home-sidebar">
+    <div className={`canva-home-app ${view === "subtitles" ? "editor-mode" : "home-mode"} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+      {!sidebarCollapsed && <aside id="primary-sidebar" className="canva-home-sidebar">
         <div className="canva-home-sidebar-header">
-          <Radar size={24} color="#7c3aed" /> Content Bot
+          <span className="canva-home-brand">
+            <Radar size={24} color="#7c3aed" />
+            <span>Content Bot</span>
+          </span>
+          <button
+            className="canva-home-sidebar-toggle"
+            type="button"
+            aria-controls="primary-sidebar"
+            aria-expanded="true"
+            aria-label="Ẩn thanh điều hướng"
+            title="Ẩn thanh điều hướng"
+            onClick={() => setSidebarCollapsed(true)}
+          >
+            <PanelLeftClose size={19} />
+          </button>
         </div>
           
           <button 
@@ -911,7 +911,7 @@ export default function App() {
               type="button"
               className="button secondary"
               style={{ flex: 1, minWidth: 80, fontSize: 11, padding: "5px 8px", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}
-              onClick={() => setSettingsModalOpen(true)}
+              onClick={() => openSettings()}
               title="Quản lý Master Password & API Keys cục bộ"
             >
               <Settings2 size={13} color="#7c3aed" /> Cài đặt API
@@ -938,7 +938,21 @@ export default function App() {
             </button>
           </div>
         </div>
-      </aside>
+      </aside>}
+
+      {sidebarCollapsed && (
+        <button
+          className="canva-home-sidebar-show"
+          type="button"
+          aria-controls="primary-sidebar"
+          aria-expanded="false"
+          aria-label="Hiện thanh điều hướng"
+          title="Hiện thanh điều hướng"
+          onClick={() => setSidebarCollapsed(false)}
+        >
+          <PanelLeftOpen size={20} />
+        </button>
+      )}
       
       <main className="canva-home-main" style={{ display: "flex", flexDirection: "column" }}>
         {updateInfo?.update_available && !updateDismissed && (
@@ -946,6 +960,16 @@ export default function App() {
             updateInfo={updateInfo}
             onOpenModal={() => setUpdateModalOpen(true)}
             onDismiss={() => setUpdateDismissed(true)}
+          />
+        )}
+        {view !== "subtitles" && (
+          <ContentLibraryTabs
+            active={view === "library"}
+            tab={libraryTab}
+            onTabChange={(nextTab) => {
+              setLibraryTab(nextTab);
+              setView("library");
+            }}
           />
         )}
         {view === "topics" && (
@@ -1001,7 +1025,6 @@ export default function App() {
         {view === "library" && (
           <ContentLibrary
             tab={libraryTab}
-            onTabChange={setLibraryTab}
             sources={sources}
             loading={loading}
             selected={selected}
@@ -1019,7 +1042,7 @@ export default function App() {
         )}
         {view === "subtitles" && (
           <Suspense fallback={<main className="app-shell">Đang tải Subtitle Studio…</main>}>
-            <SubtitleStudio onBack={() => setView("topics")} />
+            <SubtitleStudio onBack={() => setView("topics")} onOpenSettings={() => openSettings("gemini")} />
           </Suspense>
         )}
       </main>
@@ -1069,8 +1092,10 @@ export default function App() {
         onClose={() => setAdminModalOpen(false)}
       />
       <SettingsModal
+        key={`${settingsInitialTab}-${settingsModalOpen ? "open" : "closed"}`}
         isOpen={settingsModalOpen}
         onClose={() => setSettingsModalOpen(false)}
+        initialTab={settingsInitialTab}
       />
       <UpdateModal
         open={updateModalOpen}
@@ -1785,7 +1810,6 @@ function Empty({
 }
 function ContentLibrary({
   tab,
-  onTabChange,
   sources,
   loading,
   selected,
@@ -1801,7 +1825,6 @@ function ContentLibrary({
   onCancel,
 }: {
   tab: LibraryTab;
-  onTabChange: (tab: LibraryTab) => void;
   sources: Source[];
   loading: boolean;
   selected: Keyword | null;
@@ -1816,11 +1839,6 @@ function ContentLibrary({
   onConnectionsChanged: () => Promise<void>;
   onCancel: () => void;
 }) {
-  const tabs: { id: LibraryTab; label: string; icon: typeof Database }[] = [
-    { id: "channels", label: "Kênh theo dõi", icon: Waypoints },
-    { id: "connections", label: "Kết nối nền tảng", icon: Database },
-    { id: "videos", label: "Video", icon: Video },
-  ];
   return (
     <>
       <section className="page-head content-library-head">
@@ -1833,25 +1851,10 @@ function ContentLibrary({
         </div>
         {selected && <span className="library-topic-context">Chủ đề: {selected.name}</span>}
       </section>
-      <div className="content-library-tabs" role="tablist" aria-label="Nguồn và video">
-        {tabs.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            aria-selected={tab === id}
-            aria-controls={`library-panel-${id}`}
-            className={`content-library-tab ${tab === id ? "active" : ""}`}
-            onClick={() => onTabChange(id)}
-          >
-            <Icon size={17} /> {label}
-          </button>
-        ))}
-      </div>
       <section
         id={`library-panel-${tab}`}
         className="content-library-panel"
-        role="tabpanel"
+        aria-label={LIBRARY_TABS.find((item) => item.id === tab)?.label}
       >
         {tab === "channels" && (
           <RegisteredChannels
@@ -1862,6 +1865,14 @@ function ContentLibrary({
             pendingChannelId={pendingChannelId}
             onRunChannel={onRunChannel}
             onRunChannels={onRunChannels}
+          />
+        )}
+        {tab === "live" && (
+          <LiveChannelWall
+            key={selected?.id ?? "none"}
+            selected={selected}
+            sources={sources}
+            onChanged={onConnectionsChanged}
           />
         )}
         {tab === "connections" && (
@@ -1886,6 +1897,35 @@ function ContentLibrary({
         )}
       </section>
     </>
+  );
+}
+
+function ContentLibraryTabs({
+  active,
+  tab,
+  onTabChange,
+}: {
+  active: boolean;
+  tab: LibraryTab;
+  onTabChange: (tab: LibraryTab) => void;
+}) {
+  return (
+    <nav className="content-library-tabs persistent" aria-label="Nguồn và video">
+      {LIBRARY_TABS.map(({ id, label, icon: Icon }) => {
+        const isCurrent = active && tab === id;
+        return (
+          <button
+            key={id}
+            type="button"
+            aria-current={isCurrent ? "page" : undefined}
+            className={`content-library-tab ${isCurrent ? "active" : ""}`}
+            onClick={() => onTabChange(id)}
+          >
+            <Icon size={17} aria-hidden="true" /> {label}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   AlertCircle,
   Ban,
@@ -12,7 +12,8 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { AuthUser, useAuth } from "./AuthContext";
+import { type AuthUser } from "./auth-context";
+import { useAuth } from "./useAuth";
 
 interface AdminUsersModalProps {
   isOpen: boolean;
@@ -30,8 +31,9 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchUsers = async () => {
+  const fetchUsers = useCallback(async () => {
     if (!accessToken) return;
+    await Promise.resolve();
     setLoading(true);
     setError(null);
     try {
@@ -51,13 +53,13 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({
     } finally {
       setLoading(false);
     }
-  };
+  }, [accessToken, authServerUrl, filter]);
 
   useEffect(() => {
-    if (isOpen) {
-      fetchUsers();
-    }
-  }, [isOpen, filter]);
+    if (!isOpen) return undefined;
+    const timer = window.setTimeout(() => void fetchUsers(), 0);
+    return () => window.clearTimeout(timer);
+  }, [isOpen, fetchUsers]);
 
   if (!isOpen) return null;
 

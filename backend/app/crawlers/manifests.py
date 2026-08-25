@@ -412,6 +412,20 @@ SOURCE_MANIFESTS: tuple[SourceManifest, ...] = (
     ),
     _source("tiktok", "TikTok", 15, ("tiktok.com",), (
         _provider(
+            "tiktok_embed",
+            "TikTok Creator Profile Embed",
+            (
+                _operation(
+                    Operation.RENDER_EMBED,
+                    TargetKind.ACCOUNT,
+                    handler="renderer:tiktok",
+                    codec=None,
+                ),
+            ),
+            access="public_embed",
+            lane=ExecutionLane.EMBED_ONLY,
+        ),
+        _provider(
             "tiktok_display",
             "TikTok Display API",
             tuple(

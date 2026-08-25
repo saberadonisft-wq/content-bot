@@ -28,11 +28,57 @@
 .canva-home-sidebar-header {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 20px;
   font-weight: 700;
   color: #111827;
   margin-bottom: 24px;
+}
+
+.canva-home-brand {
+  align-items: center;
+  display: inline-flex;
+  gap: 12px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.canva-home-sidebar-toggle,
+.canva-home-sidebar-show {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 9px;
+  color: #4b5563;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 44px;
+  height: 44px;
+  justify-content: center;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+  width: 44px;
+}
+
+.canva-home-sidebar-toggle:hover,
+.canva-home-sidebar-show:hover {
+  background: #f3f4f6;
+  border-color: #a78bfa;
+  color: #7c3aed;
+}
+
+.canva-home-sidebar-toggle:focus-visible,
+.canva-home-sidebar-show:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.45);
+  outline-offset: 2px;
+}
+
+.canva-home-sidebar-show {
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.14);
+  left: 12px;
+  position: fixed;
+  top: 12px;
+  z-index: 30;
 }
 
 .canva-home-create-btn {
@@ -123,6 +169,10 @@
 /* Padding for main content when NOT in editor mode */
 .canva-home-app.home-mode .canva-home-main {
   padding: 32px;
+}
+
+.canva-home-app.sidebar-collapsed.home-mode .canva-home-main {
+  padding-left: 68px;
 }
 
 .canva-home-header {
@@ -267,6 +317,12 @@
     font-size: 18px;
   }
 
+  .canva-home-sidebar-toggle {
+    flex-basis: 40px;
+    height: 40px;
+    width: 40px;
+  }
+
   .canva-home-create-btn {
     width: 100%;
     margin-bottom: 10px;
@@ -294,6 +350,10 @@
   .canva-home-app.home-mode .canva-home-main {
     padding: 16px;
     min-width: 0;
+  }
+
+  .canva-home-app.sidebar-collapsed.home-mode .canva-home-main {
+    padding-left: 64px;
   }
 
   .canva-home-header {

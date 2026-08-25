@@ -26,6 +26,7 @@ from .connectors import (
     get_with_retries,
     stable_external_id,
 )
+from .credential_resolver import credential
 from .feed_ingestion import parse_feed_templates
 from .mastodon_api import (
     MastodonRequestBudget,
@@ -89,13 +90,13 @@ def channel_mode(source_id: str) -> str:
     ):
         return "manual"
     if canonical_id == "x":
-        return "api" if settings.x_bearer_token else "embed_only"
+        return "api" if credential("x_bearer_token") else "embed_only"
     if canonical_id == "youtube":
-        return "api" if settings.youtube_api_key else "setup_required"
+        return "api" if credential("youtube_api_key") else "setup_required"
     if canonical_id == "reddit":
         return (
             "api"
-            if settings.reddit_client_id and settings.reddit_client_secret
+            if credential("reddit_client_id") and credential("reddit_client_secret")
             else "setup_required"
         )
     if canonical_id in {"web", "steam", "bluesky", "mastodon"}:
@@ -337,7 +338,7 @@ async def _youtube_channel_id(client: httpx.AsyncClient, url: str) -> str:
     parts = [part for part in parsed.path.split("/") if part]
     params: dict[str, Any] = {
         "part": "snippet,contentDetails",
-        "key": settings.youtube_api_key,
+        "key": credential("youtube_api_key"),
     }
     if parts and parts[0] == "channel" and len(parts) > 1:
         params["id"] = parts[1]
@@ -359,7 +360,7 @@ async def _youtube_channel_id(client: httpx.AsyncClient, url: str) -> str:
 async def _scan_youtube(
     channel: dict[str, Any], query: SearchQuery
 ) -> AsyncIterator[RawContentItem]:
-    if not settings.youtube_api_key:
+    if not credential("youtube_api_key"):
         raise ChannelUnavailable("Thiếu YOUTUBE_API_KEY.")
     quota = YouTubeQuotaBudget(
         settings.youtube_search_request_budget,
@@ -386,7 +387,7 @@ async def _scan_youtube(
             params={
                 "part": "contentDetails",
                 "id": channel_id,
-                "key": settings.youtube_api_key,
+                "key": credential("youtube_api_key"),
             },
         )
         rows = channel_payload.get("items") or []
@@ -412,7 +413,7 @@ async def _scan_youtube(
                 "part": "snippet,contentDetails",
                 "playlistId": uploads,
                 "maxResults": min(50, query.max_items - yielded),
-                "key": settings.youtube_api_key,
+                "key": credential("youtube_api_key"),
             }
             if page_token:
                 params["pageToken"] = page_token
@@ -451,7 +452,7 @@ async def _scan_youtube(
                 params={
                     "part": "snippet,statistics",
                     "id": ",".join(video_ids),
-                    "key": settings.youtube_api_key,
+                    "key": credential("youtube_api_key"),
                 },
             )
             details = {
@@ -749,12 +750,12 @@ async def _scan_bluesky(
 
 
 async def _reddit_token(client: httpx.AsyncClient) -> str:
-    if not settings.reddit_client_id or not settings.reddit_client_secret:
+    if not credential("reddit_client_id") or not credential("reddit_client_secret"):
         raise ChannelUnavailable("Thiếu Reddit OAuth configuration.")
     return await reddit_token_cache.get(
         client,
-        client_id=settings.reddit_client_id,
-        client_secret=settings.reddit_client_secret,
+        client_id=credential("reddit_client_id"),
+        client_secret=credential("reddit_client_secret"),
     )
 
 
@@ -772,7 +773,7 @@ async def _scan_reddit(
     async with httpx.AsyncClient(
         timeout=30,
         follow_redirects=False,
-        headers={"User-Agent": settings.reddit_user_agent},
+        headers={"User-Agent": credential("reddit_user_agent", "ContentBot/0.1 (local research tool)")},
     ) as client:
         token = await _reddit_token(client)
         client.headers["Authorization"] = f"Bearer {token}"

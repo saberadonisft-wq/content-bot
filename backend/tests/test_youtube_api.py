@@ -112,7 +112,7 @@ def test_youtube_deep_health_uses_one_unit_probe(monkeypatch) -> None:
     assert status.state == "ready"
     assert status.probe == "remote"
     assert client.calls == [
-        ("/i18nLanguages", {"part": "snippet", "key": "test-key"})
+        ("/i18nLanguages", {"part": "snippet"})
     ]
     assert kwargs["follow_redirects"] is False
 

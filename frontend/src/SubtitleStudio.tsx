@@ -5,7 +5,6 @@ import {
   AudioLines,
   Check,
   Circle,
-  Cloud,
   Copy,
   Download,
   Film,
@@ -21,6 +20,7 @@ import {
   PanelLeft,
   Redo2,
   RectangleHorizontal,
+  RefreshCw,
   Sparkles,
   Square,
   Type,
@@ -34,9 +34,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE,
   api,
+  type GeminiModel,
   type MediaMetadata,
   type GeminiSubtitleJob,
-  type GeminiCliStatus,
+  type GeminiApiStatus,
   type SubtitleBurnOptions,
   type SubtitleCueV2,
   type SubtitleDocumentV2,
@@ -76,7 +77,13 @@ import {
   type SubtitleMaskEffect,
   type SubtitleMaskRegion,
   type SubtitleMaskShape,
+  type VideoClip,
 } from "./subtitles/types";
+import {
+  createInitialVideoClip,
+  findVideoClipAt,
+  splitVideoClip,
+} from "./subtitles/video-clips";
 import { useSubtitleHistory } from "./subtitles/useSubtitleHistory";
 import "./subtitle-studio.css";
 
@@ -199,8 +206,18 @@ const createSubtitleDocument = (
 
 const createRenderOptions = (
   options: SubtitleBurnOptions,
+  videoClips: readonly VideoClip[],
 ): SubtitleRenderOptionsV2 => {
   const animation = options.animation ?? "none";
+  const trimStartMs = Math.max(0, Math.round((options.trim_start ?? 0) * 1000));
+  const trimEndMs = options.trim_end == null ? null : Math.round(options.trim_end * 1000);
+  const renderClips = videoClips
+    .map((clip) => ({
+      ...clip,
+      start_ms: Math.max(clip.start_ms, trimStartMs),
+      end_ms: Math.min(clip.end_ms, trimEndMs ?? clip.end_ms),
+    }))
+    .filter((clip) => clip.end_ms > clip.start_ms);
   return {
     render_mode: animation === "none" ? "precision" : "effects",
     profile: "fast",
@@ -230,12 +247,12 @@ const createRenderOptions = (
     volume: options.volume ?? 1,
     aspect_ratio: options.aspect_ratio ?? "original",
     bg_fill_type: options.bg_fill_type ?? "blur",
-    trim_start_ms: Math.max(0, Math.round((options.trim_start ?? 0) * 1000)),
-    trim_end_ms:
-      options.trim_end == null ? null : Math.round(options.trim_end * 1000),
+    trim_start_ms: trimStartMs,
+    trim_end_ms: trimEndMs,
     fade_in_ms: Math.max(0, Math.round((options.fade_in ?? 0) * 1000)),
     fade_out_ms: Math.max(0, Math.round((options.fade_out ?? 0) * 1000)),
     animation,
+    video_segments: renderClips,
   };
 };
 
@@ -277,6 +294,7 @@ type StudioTab = "upload" | "transcript" | "style" | "mask" | "video" | "positio
 
 type SubtitleStudioProps = {
   onBack?: () => void;
+  onOpenSettings?: () => void;
 };
 
 const SUBTITLE_DRAFT_KEY = "content-bot:subtitle-studio:v2";
@@ -291,25 +309,37 @@ const formatGeminiError = (error: string | null | undefined) => {
   const raw = (error ?? "").trim();
   const lowered = raw.toLowerCase();
   if (
-    lowered.includes("ineligibletiererror") ||
-    lowered.includes("unsupported_client") ||
-    lowered.includes("no longer supported for gemini code assist for individuals")
+    lowered.includes("api_key_invalid") ||
+    lowered.includes("api key not valid") ||
+    lowered.includes("khong hop le") ||
+    lowered.includes("từ chối api key") ||
+    lowered.includes("http 401")
   ) {
-    return "Gemini CLI không còn hỗ trợ đăng nhập Google cá nhân (Free/AI Pro/Ultra). Hãy cấu hình GEMINI_API_KEY trong backend/.env hoặc Vertex AI; tài khoản Code Assist tổ chức vẫn có thể dùng OAuth.";
-  }
-  if (lowered.includes("api_key_invalid") || lowered.includes("api key not valid")) {
-    return "GEMINI_API_KEY không hợp lệ hoặc đã bị Google từ chối. Hãy kiểm tra lại key trong backend/.env.";
+    return lowered.includes("http 401")
+      ? raw
+      : `HTTP 401 — API key Gemini không hợp lệ hoặc đã bị thu hồi. Chi tiết: ${raw}`;
   }
   if (
-    lowered.includes("authentication") ||
-    lowered.includes("authenticate") ||
-    lowered.includes("authenticating")
+    lowered.includes("http 403") ||
+    lowered.includes("không có quyền") ||
+    lowered.includes("khong co quyen") ||
+    lowered.includes("permission_denied")
   ) {
-    return "Gemini CLI chưa có phương thức xác thực dùng được. Thêm GEMINI_API_KEY vào backend/.env hoặc cấu hình Vertex AI rồi khởi động lại ứng dụng.";
+    return lowered.includes("http 403")
+      ? raw
+      : `HTTP 403 — API key không có quyền truy cập project hoặc model đã chọn. Chi tiết: ${raw}`;
+  }
+  if (lowered.includes("rate limit") || lowered.includes("quota") || lowered.includes("resource_exhausted") || lowered.includes("429")) {
+    return lowered.includes("http 429")
+      ? raw
+      : `HTTP 429 — Gemini giới hạn tốc độ hoặc quota. Chi tiết: ${raw}`;
+  }
+  if (lowered.includes("chua cau hinh") || lowered.includes("chưa cấu hình") || lowered.includes("no_api_key")) {
+    return "Chưa cấu hình Gemini API key. Vào Settings → Gemini AI → nhập API key từ aistudio.google.com/apikey.";
   }
   return raw.length > 0
-    ? "Gemini CLI không thể xử lý yêu cầu. Kiểm tra cấu hình và thử lại."
-    : "Gemini CLI không tạo được phụ đề.";
+    ? raw
+    : "Gemini không tạo được phụ đề. Kiểm tra API key và thử lại.";
 };
 
 const absoluteApiUrl = (path: string) =>
@@ -317,7 +347,7 @@ const absoluteApiUrl = (path: string) =>
     ? `${API_BASE.replace(/\/api\/v1$/, "")}${path}`
     : `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 
-export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
+export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) {
   const [initialDraft] = useState(readLocalDraft);
   const workspaceRef = useRef<SubtitleWorkspaceHandle>(null);
   const uploadControllerRef = useRef<AbortController | null>(null);
@@ -341,6 +371,8 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
       : null,
   );
   const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
+  const [downloadingVideo, setDownloadingVideo] = useState(false);
+  const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
   const [mediaDurationMs, setMediaDurationMs] = useState(
     initialDraft?.mediaDurationMs ?? 0,
   );
@@ -363,7 +395,12 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     initialDraft?.activeGeminiJobId ?? null,
   );
   const [generationJob, setGenerationJob] = useState<GeminiSubtitleJob | null>(null);
-  const [geminiStatus, setGeminiStatus] = useState<GeminiCliStatus | null>(null);
+  const [geminiStatus, setGeminiStatus] = useState<GeminiApiStatus | null>(null);
+  const [geminiModels, setGeminiModels] = useState<GeminiModel[]>([]);
+  const [geminiModelsError, setGeminiModelsError] = useState<string | null>(null);
+  const [geminiModelsLoading, setGeminiModelsLoading] = useState(false);
+  const [geminiModelsReload, setGeminiModelsReload] = useState(0);
+  const [geminiModel, setGeminiModel] = useState("");
   const [geminiBilingual, setGeminiBilingual] = useState(true);
   const [activeAlignmentJobId, setActiveAlignmentJobId] = useState<string | null>(
     initialDraft?.activeAlignmentJobId ?? null,
@@ -397,6 +434,16 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
   const [subtitleMasks, setSubtitleMasks] = useState<SubtitleMaskRegion[]>(
     initialDraft?.subtitleMasks ?? [],
   );
+  const [videoClips, setVideoClips] = useState<VideoClip[]>(() =>
+    initialDraft?.videoClips.length
+      ? initialDraft.videoClips
+      : createInitialVideoClip(initialDraft?.mediaDurationMs ?? 0),
+  );
+  const [selectedVideoClipId, setSelectedVideoClipId] = useState<string | null>(
+    initialDraft?.videoClips[0]?.id ?? (initialDraft?.mediaDurationMs ? "video-1" : null),
+  );
+  const [lastDeletedVideoClip, setLastDeletedVideoClip] =
+    useState<VideoClip | null>(null);
   const [selectedMaskId, setSelectedMaskId] = useState<string | null>(
     initialDraft?.subtitleMasks[0]?.id ?? null,
   );
@@ -411,7 +458,10 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     () => createSubtitleDocument(sortedCues),
     [sortedCues],
   );
-  const renderOptions = useMemo(() => createRenderOptions(options), [options]);
+  const renderOptions = useMemo(
+    () => createRenderOptions(options, videoClips),
+    [options, videoClips],
+  );
   const frameTiming = mediaMetadata ?? DEFAULT_FRAME_TIMING;
   const thumbnailCacheKey = mediaMetadata?.fingerprint ?? (
     videoFile && videoId
@@ -420,16 +470,26 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
   );
   const overlayNeedsUpload = Boolean(overlayImage && !overlayId && !overlayUploading);
   const overlayReady = !overlayImage || Boolean(overlayId && !overlayUploading);
-  const hasRenderContent = sortedCues.length > 0 || Boolean(overlayId) || subtitleMasks.length > 0;
+  const hasVideoEdits = Boolean(
+    mediaDurationMs > 0 && (
+      videoClips.length !== 1 ||
+      videoClips[0]?.start_ms !== 0 ||
+      videoClips[0]?.end_ms !== mediaDurationMs
+    ),
+  );
+  const hasRenderContent =
+    sortedCues.length > 0 || Boolean(overlayId) || subtitleMasks.length > 0 || hasVideoEdits;
   const selectedMask = subtitleMasks.find((mask) => mask.id === selectedMaskId) ?? null;
   const canRender = Boolean(
     videoId &&
+      renderOptions.video_segments.length > 0 &&
       overlayReady &&
       hasRenderContent &&
       sortedCues.every(
         (cue) => cue.text.trim() && cue.start_ms >= 0 && cue.end_ms > cue.start_ms,
       ),
   );
+
 
   useEffect(() => {
     if (!videoId || subtitleDocument.segments.length === 0) {
@@ -477,6 +537,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     videoId &&
       mediaMetadata?.has_audio &&
       geminiStatus?.authenticated &&
+      (geminiModel || geminiStatus?.model) &&
       !generationRunning,
   );
   const rendering = Boolean(activeRenderJobId) ||
@@ -503,7 +564,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     const controller = new AbortController();
     const pollStatus = async () => {
       try {
-        const status = await api.geminiCliStatus(controller.signal);
+        const status = await api.geminiApiStatus(controller.signal);
         if (stopped) return;
         setGeminiStatus(status);
         if (!status.authenticated) {
@@ -525,6 +586,43 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
   }, []);
 
   useEffect(() => {
+    if (!geminiStatus?.authenticated) return undefined;
+    let stopped = false;
+    const controller = new AbortController();
+    const loadModels = async () => {
+      setGeminiModelsLoading(true);
+      try {
+        const response = await api.geminiModels(controller.signal);
+        if (stopped) return;
+        setGeminiModels(response.models);
+        setGeminiModelsError(null);
+        setGeminiModel((current) => {
+          if (current && response.models.some((model) => model.id === current)) {
+            return current;
+          }
+          return response.models.find((model) => model.id === response.selected_model)?.id
+            ?? response.models[0]?.id
+            ?? response.selected_model;
+        });
+      } catch (modelsError: unknown) {
+        if (!stopped && !controller.signal.aborted) {
+          setGeminiModelsError(
+            getErrorMessage(modelsError, "Không tải được danh sách model Gemini."),
+          );
+          setGeminiModel((current) => current || geminiStatus.model || "");
+        }
+      } finally {
+        if (!stopped) setGeminiModelsLoading(false);
+      }
+    };
+    void loadModels();
+    return () => {
+      stopped = true;
+      controller.abort();
+    };
+  }, [geminiModelsReload, geminiStatus?.authenticated, geminiStatus?.model]);
+
+  useEffect(() => {
     if (!videoId || mediaMetadata) return undefined;
     metadataControllerRef.current?.abort();
     const controller = new AbortController();
@@ -535,6 +633,11 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
         if (controller.signal.aborted) return;
         setMediaMetadata(media);
         setMediaDurationMs(media.duration_ms);
+        setVideoClips((current) => {
+          if (current.length) return current;
+          return createInitialVideoClip(media.duration_ms);
+        });
+        setSelectedVideoClipId((current) => current ?? "video-1");
       })
       .catch((metadataError: unknown) => {
         if (!controller.signal.aborted) {
@@ -631,7 +734,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
         if (job.state === "failed" || job.state === "canceled") {
           if (job.state === "failed") {
             setError(formatGeminiError(job.error));
-            void api.geminiCliStatus().then(setGeminiStatus).catch(() => undefined);
+            void api.geminiApiStatus().then(setGeminiStatus).catch(() => undefined);
           }
           setActiveGeminiJobId(null);
           return;
@@ -642,7 +745,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
         setError(
           getErrorMessage(
             pollError,
-            "Mất kết nối khi đọc tiến độ Gemini CLI; đang thử lại.",
+            "Mất kết nối khi đọc tiến độ Gemini API; đang thử lại.",
           ),
         );
         timer = window.setTimeout(() => void poll(), 2000);
@@ -723,6 +826,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
         overlayName,
         overlayLayout,
         subtitleMasks,
+        videoClips,
       };
       try {
         window.localStorage.setItem(SUBTITLE_DRAFT_KEY, JSON.stringify(draft));
@@ -745,6 +849,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     rawText,
     selectedCueId,
     subtitleMasks,
+    videoClips,
     videoId,
   ]);
 
@@ -795,6 +900,9 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     setActiveRenderJobId(null);
     setRenderJob(null);
     resetCues([]);
+    setVideoClips([]);
+    setSelectedVideoClipId(null);
+    setLastDeletedVideoClip(null);
     setSelectedCueId(null);
     setSubtitleMasks([]);
     setSelectedMaskId(null);
@@ -805,6 +913,9 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
       setVideoId(result.video_id);
       setMediaMetadata(result.media);
       setMediaDurationMs(result.media.duration_ms);
+      const initialClips = createInitialVideoClip(result.media.duration_ms);
+      setVideoClips(initialClips);
+      setSelectedVideoClipId(initialClips[0]?.id ?? null);
       setOriginalVideoUrl(`${API_BASE}/subtitles/video/${result.video_id}`);
       setActiveTab("transcript");
     } catch (uploadError: unknown) {
@@ -919,7 +1030,10 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     try {
       const job = await api.generateSubtitlesWithGemini(
         videoId,
-        { bilingual: geminiBilingual },
+        {
+          bilingual: geminiBilingual,
+          model: geminiModel || geminiStatus?.model || undefined,
+        },
         controller.signal,
       );
       if (controller.signal.aborted) return;
@@ -927,8 +1041,8 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
       setActiveGeminiJobId(job.id);
     } catch (generationError: unknown) {
       if (!controller.signal.aborted) {
-        setError(formatGeminiError(getErrorMessage(generationError, "Không khởi chạy được Gemini CLI.")));
-        void api.geminiCliStatus().then(setGeminiStatus).catch(() => undefined);
+        setError(formatGeminiError(getErrorMessage(generationError, "Không khởi chạy được Gemini API.")));
+        void api.geminiApiStatus().then(setGeminiStatus).catch(() => undefined);
       }
     }
   };
@@ -1064,7 +1178,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
       setError(
         overlayNeedsUpload
           ? "Hãy chờ ảnh phủ tải xong hoặc chọn lại ảnh phủ trước khi xuất."
-          : "Cần ít nhất một cue phụ đề hoặc ảnh phủ hợp lệ để xuất video.",
+          : "Cần ít nhất một cue phụ đề, ảnh phủ hoặc thay đổi cắt video để xuất.",
       );
       return;
     }
@@ -1108,6 +1222,37 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     }
   };
 
+  const handleDownloadVideo = async () => {
+    if (!renderedVideoUrl || !renderJob?.result?.output_filename) return;
+    const bridge = window.contentBotDesktop;
+    if (!bridge) return;
+    setDownloadingVideo(true);
+    setDownloadMessage("Đang chờ chọn nơi lưu…");
+    setError(null);
+    try {
+      const result = await bridge.downloadFile({
+        url: renderedVideoUrl,
+        filename: renderJob.result.output_filename,
+        accessToken: localStorage.getItem("content_bot_access_token") ?? undefined,
+      });
+      setDownloadMessage(
+        result.state === "completed"
+          ? "Đã tải video"
+          : result.state === "cancelled"
+            ? null
+            : "Tải video bị gián đoạn",
+      );
+      if (result.state === "interrupted") {
+        setError("Tải video bị gián đoạn. Kiểm tra backend và thử lại.");
+      }
+    } catch (downloadError: unknown) {
+      setDownloadMessage(null);
+      setError(getErrorMessage(downloadError, "Không tải được video đã xuất."));
+    } finally {
+      setDownloadingVideo(false);
+    }
+  };
+
   const clearOverlay = () => {
     overlayUploadControllerRef.current?.abort();
     overlayUploadControllerRef.current = null;
@@ -1146,6 +1291,57 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
     setSubtitleMasks(next);
     if (selectedMaskId === maskId) setSelectedMaskId(next[0]?.id ?? null);
   };
+
+  const splitVideoAtPlayhead = useCallback(() => {
+    const playheadMs = workspaceRef.current?.getCurrentMs() ?? 0;
+    const clip = findVideoClipAt(videoClips, playheadMs);
+    if (!clip) {
+      setError("Đặt con trỏ bên trong một đoạn video đang giữ rồi thử tách lại.");
+      return;
+    }
+    const next = splitVideoClip(videoClips, clip.id, playheadMs);
+    if (next.length === videoClips.length) {
+      setError("Con trỏ đang quá sát mép clip; hãy di chuyển vào bên trong đoạn rồi tách.");
+      return;
+    }
+    setVideoClips(next);
+    const rightClip = next.find((item) => item.start_ms === Math.round(playheadMs));
+    setSelectedVideoClipId(rightClip?.id ?? clip.id);
+    setLastDeletedVideoClip(null);
+    setRenderedVideoUrl(null);
+    setError(null);
+  }, [videoClips]);
+
+  const deleteSelectedVideoClip = useCallback(() => {
+    const selectedIndex = videoClips.findIndex((clip) => clip.id === selectedVideoClipId);
+    if (selectedIndex < 0) {
+      setError("Chọn một đoạn video trên timeline trước khi xóa.");
+      return;
+    }
+    if (videoClips.length === 1) {
+      setError("Không thể xóa đoạn video cuối cùng của dự án.");
+      return;
+    }
+    const deleted = videoClips[selectedIndex];
+    const next = videoClips.filter((clip) => clip.id !== deleted.id);
+    const nextSelection = next[Math.min(selectedIndex, next.length - 1)] ?? null;
+    setVideoClips(next);
+    setSelectedVideoClipId(nextSelection?.id ?? null);
+    setLastDeletedVideoClip(deleted);
+    setRenderedVideoUrl(null);
+    workspaceRef.current?.seekTo(nextSelection?.start_ms ?? 0);
+    setError(null);
+  }, [selectedVideoClipId, videoClips]);
+
+  const restoreDeletedVideoClip = useCallback(() => {
+    if (!lastDeletedVideoClip) return;
+    setVideoClips((current) => [...current, lastDeletedVideoClip].sort(
+      (left, right) => left.start_ms - right.start_ms,
+    ));
+    setSelectedVideoClipId(lastDeletedVideoClip.id);
+    setLastDeletedVideoClip(null);
+    setRenderedVideoUrl(null);
+  }, [lastDeletedVideoClip]);
 
   const tabs: { id: StudioTab; label: string; icon: typeof Upload }[] = [
     { id: "upload", label: "Tải lên", icon: Upload },
@@ -1188,16 +1384,29 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
               {renderJob.progress}%
             </span>
           )}
+          {!rendering && downloadMessage && <span>{downloadMessage}</span>}
         </div>
         <div className="subtitle-studio-header-actions">
           {renderedVideoUrl && (
-            <a
-              className="studio-header-action is-secondary"
-              href={renderedVideoUrl}
-              download={renderJob?.result?.output_filename ?? `subtitled_${videoId}.mp4`}
-            >
-              <Download size={17} /> <span>Tải video</span>
-            </a>
+            window.contentBotDesktop ? (
+              <button
+                type="button"
+                className="studio-header-action is-secondary"
+                disabled={downloadingVideo}
+                onClick={() => void handleDownloadVideo()}
+              >
+                {downloadingVideo ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+                <span>{downloadingVideo ? "Đang tải…" : "Tải video"}</span>
+              </button>
+            ) : (
+              <a
+                className="studio-header-action is-secondary"
+                href={renderedVideoUrl}
+                download={renderJob?.result?.output_filename ?? `subtitled_${videoId}.mp4`}
+              >
+                <Download size={17} /> <span>Tải video</span>
+              </a>
+            )
           )}
           <button
             type="button"
@@ -1212,7 +1421,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
                 : overlayNeedsUpload
                   ? "Hãy chọn lại ảnh phủ để đồng bộ với file xuất"
                   : !canRender
-                    ? "Cần video và ít nhất một cue hoặc ảnh phủ hợp lệ trước khi xuất"
+                    ? "Cần video và ít nhất một cue, ảnh phủ hoặc thay đổi cắt video trước khi xuất"
                     : "Xuất video có phụ đề và ảnh phủ"
             }
           >
@@ -1333,8 +1542,8 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
               <section className="subtitle-generation-panel" aria-labelledby="gemini-generation-title">
                 <div className="subtitle-generation-heading">
                   <div>
-                    <strong id="gemini-generation-title"><Cloud size={17} /> Gemini</strong>
-                    <span>App tự nén và gửi video bằng Gemini CLI qua API key hoặc Vertex AI đã cấu hình.</span>
+                    <strong id="gemini-generation-title"><Sparkles size={17} /> Gemini AI</strong>
+                    <span>Gửi video lên Gemini qua REST API, không cần cài thêm phần mềm.</span>
                   </div>
                   {generationRunning ? (
                     <button
@@ -1368,29 +1577,72 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
                     />
                     <span>Giữ câu gốc làm dòng phụ</span>
                   </label>
+                  <div className="subtitle-generation-model">
+                    <label htmlFor="gemini-model-select">Model Gemini</label>
+                    <div className="subtitle-generation-model-controls">
+                      <select
+                        id="gemini-model-select"
+                        value={geminiModel || geminiStatus?.model || ""}
+                        disabled={generationRunning || geminiModelsLoading || !geminiModels.length}
+                        onChange={(event) => setGeminiModel(event.target.value)}
+                      >
+                        {!geminiModels.length && (
+                          <option value={geminiModel || geminiStatus?.model || ""}>
+                            {geminiModelsLoading ? "Đang tải model…" : "Chưa có model khả dụng"}
+                          </option>
+                        )}
+                        {geminiModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.display_name || model.id}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="subtitle-generation-model-reload"
+                        disabled={geminiModelsLoading || generationRunning}
+                        onClick={() => setGeminiModelsReload((value) => value + 1)}
+                        aria-label="Làm mới danh sách model Gemini"
+                        title="Làm mới danh sách model Gemini"
+                      >
+                        <RefreshCw className={geminiModelsLoading ? "spin" : undefined} size={16} />
+                      </button>
+                    </div>
+                    {geminiModelsError ? (
+                      <small role="alert" className="subtitle-generation-warn">
+                        {geminiModelsError} Hãy thử “Làm mới” hoặc kiểm tra API key.
+                      </small>
+                    ) : (
+                      <small className="subtitle-generation-model-help">
+                        Model dùng cho lần tạo này: <code>{geminiModel || geminiStatus?.model}</code>.
+                        Có thể đổi trước mỗi lần chạy.
+                      </small>
+                    )}
+                  </div>
                 </div>
                 {!videoId && <small>Hãy tải video trước để bật Gemini.</small>}
-                {geminiStatus && !geminiStatus.installed && (
-                  <small role="alert">Chưa cài Gemini CLI. Chạy: npm install -g @google/gemini-cli@latest</small>
-                )}
-                {geminiStatus?.issue === "unsupported_consumer_oauth" && (
-                  <small role="alert">
-                    Đăng nhập Google cá nhân không còn dùng được cho Gemini CLI. Thêm <code>GEMINI_API_KEY</code> vào <code>backend/.env</code> rồi khởi động lại; xem thêm <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>.
+                {geminiStatus && !geminiStatus.authenticated && (
+                  <small role="alert" className="subtitle-generation-warn">
+                    Chưa có Gemini API key.{" "}
+                    <button
+                      type="button"
+                      className="studio-inline-link"
+                      onClick={onOpenSettings}
+                    >
+                      Vào Settings → Gemini AI
+                    </button>{" "}
+                    để nhập key từ{" "}
+                    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">
+                      aistudio.google.com/apikey
+                    </a>.
                   </small>
-                )}
-                {geminiStatus?.issue === "invalid_api_key" && (
-                  <small role="alert">GEMINI_API_KEY không hợp lệ. Kiểm tra key trong backend/.env rồi khởi động lại ứng dụng.</small>
-                )}
-                {geminiStatus?.installed && !geminiStatus.authenticated && !geminiStatus.issue && (
-                  <small role="alert">Chưa có xác thực dùng được. Thêm GEMINI_API_KEY vào backend/.env hoặc cấu hình Vertex AI.</small>
                 )}
                 {geminiStatus?.authenticated && (
                   <small className="subtitle-generation-ready">
-                    {geminiStatus.auth_method === "gemini_api_key"
-                      ? "Đã cấu hình Gemini API key cho CLI."
-                      : geminiStatus.auth_method === "vertex_ai"
-                        ? "Đã cấu hình Vertex AI cho CLI."
-                        : "Đã tìm thấy phiên Gemini CLI; quyền truy cập sẽ được kiểm tra khi chạy."}
+                    Đã cấu hình Gemini API key
+                    {geminiModel || geminiStatus.model
+                      ? ` · ${geminiModel || geminiStatus.model}`
+                      : ""}
                   </small>
                 )}
                 {videoId && mediaMetadata && !mediaMetadata.has_audio && (
@@ -1407,7 +1659,7 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
                     </div>
                     <progress max={100} value={generationJob.progress} />
                     {generationJob.cancel_requested && generationRunning && (
-                      <small>Đang dừng tiến trình Gemini CLI an toàn.</small>
+                      <small>Đang dừng tiến trình Gemini an toàn.</small>
                     )}
                     {generationJob.state === "succeeded" && generationJob.result && (
                       <small>
@@ -1737,6 +1989,9 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
             overlayLayout={overlayLayout}
             subtitleMasks={subtitleMasks}
             selectedMaskId={selectedMaskId}
+            videoClips={videoClips}
+            selectedVideoClipId={selectedVideoClipId}
+            canRestoreVideoClip={Boolean(lastDeletedVideoClip)}
             onDurationChange={handleDurationChange}
             onSelectCue={setSelectedCueId}
             onUpdateCueText={(cueId, text) => handleCueChange(cueId, { text })}
@@ -1753,6 +2008,10 @@ export function SubtitleStudio({ onBack }: SubtitleStudioProps) {
             }}
             onMaskChange={updateSubtitleMask}
             onMaskDelete={deleteSubtitleMask}
+            onSelectVideoClip={setSelectedVideoClipId}
+            onSplitVideo={splitVideoAtPlayhead}
+            onDeleteVideoClip={deleteSelectedVideoClip}
+            onRestoreVideoClip={restoreDeletedVideoClip}
           />
         </main>
       </div>

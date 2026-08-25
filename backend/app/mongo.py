@@ -17,7 +17,9 @@ INDEX_VERSION = 3
 
 def configure_mongodb_dns() -> None:
     """Use explicitly configured resolvers for MongoDB SRV discovery when requested."""
-    servers = [item.strip() for item in settings.mongodb_dns_servers.split(",") if item.strip()]
+    servers = [
+        item.strip() for item in settings.mongodb_dns_servers.split(",") if item.strip()
+    ]
     if not servers:
         return
     try:
@@ -28,34 +30,48 @@ def configure_mongodb_dns() -> None:
         resolver.timeout = 1.0
         resolver.lifetime = 3.0
     except Exception as err:
-        print(f"[MongoStore] Warning: MongoDB DNS override could not be applied ({err}).")
+        print(
+            f"[MongoStore] Warning: MongoDB DNS override could not be applied ({err})."
+        )
 
 
 class DummyCollection:
     def find(self, *args: Any, **kwargs: Any) -> DummyCollection:
         return self
+
     def find_one(self, *args: Any, **kwargs: Any) -> dict | None:
         return None
+
     def find_one_and_update(self, *args: Any, **kwargs: Any) -> dict | None:
         return None
+
     def insert_one(self, *args: Any, **kwargs: Any) -> Any:
         return None
+
     def update_one(self, *args: Any, **kwargs: Any) -> Any:
         return None
+
     def update_many(self, *args: Any, **kwargs: Any) -> Any:
         return None
+
     def delete_one(self, *args: Any, **kwargs: Any) -> Any:
         class Result:
             deleted_count = 0
+
         return Result()
+
     def delete_many(self, *args: Any, **kwargs: Any) -> Any:
         return None
+
     def create_index(self, *args: Any, **kwargs: Any) -> Any:
         return None
+
     def sort(self, *args: Any, **kwargs: Any) -> DummyCollection:
         return self
+
     def limit(self, *args: Any, **kwargs: Any) -> DummyCollection:
         return self
+
     def __iter__(self) -> Any:
         return iter([])
 
@@ -63,12 +79,15 @@ class DummyCollection:
 class DummyDatabase:
     def __getattr__(self, name: str) -> DummyCollection:
         return DummyCollection()
+
     def __getitem__(self, name: str) -> DummyCollection:
         return DummyCollection()
 
 
 class MongoStore:
     """MongoDB persistence for the API, scheduler, and ingestion pipeline."""
+
+    storage_name = "mongodb"
 
     def __init__(self, database: Database | None = None) -> None:
         self._ping_lock = Lock()
@@ -95,7 +114,11 @@ class MongoStore:
             "serverSelectionTimeoutMS": 2000,
             "connectTimeoutMS": 2000,
         }
-        if uri.startswith("mongodb+srv://") or "tls=true" in uri.lower() or "ssl=true" in uri.lower():
+        if (
+            uri.startswith("mongodb+srv://")
+            or "tls=true" in uri.lower()
+            or "ssl=true" in uri.lower()
+        ):
             configure_mongodb_dns()
             kwargs["tlsCAFile"] = certifi.where()
 
@@ -104,10 +127,16 @@ class MongoStore:
             client.admin.command("ping")
             self.client = client
             self.db = self.client[settings.mongodb_database]
-            target_name = "Local MongoDB" if "localhost" in uri or "127.0.0.1" in uri else "MongoDB Atlas"
+            target_name = (
+                "Local MongoDB"
+                if "localhost" in uri or "127.0.0.1" in uri
+                else "MongoDB Atlas"
+            )
             print(f"[MongoStore] Connected to {target_name} successfully.")
         except Exception as err:
-            print(f"[MongoStore] Warning: MongoDB connection failed ({err}). Persistence is unavailable.")
+            print(
+                f"[MongoStore] Warning: MongoDB connection failed ({err}). Persistence is unavailable."
+            )
             self.client = None
             self.db = DummyDatabase()
             self._available = False
@@ -156,9 +185,15 @@ class MongoStore:
                 return
             self.db.keywords.create_index("normalized_name", unique=True)
             self.db.keywords.create_index([("updated_at", DESCENDING)])
-            self.db.keywords.create_index([("enabled", ASCENDING), ("next_run_at", ASCENDING)])
-            self.db.content_items.create_index([("source_id", ASCENDING), ("external_id", ASCENDING)], unique=True)
-            self.db.content_items.create_index([("source_id", ASCENDING), ("published_at", DESCENDING)])
+            self.db.keywords.create_index(
+                [("enabled", ASCENDING), ("next_run_at", ASCENDING)]
+            )
+            self.db.content_items.create_index(
+                [("source_id", ASCENDING), ("external_id", ASCENDING)], unique=True
+            )
+            self.db.content_items.create_index(
+                [("source_id", ASCENDING), ("published_at", DESCENDING)]
+            )
             self.db.content_items.create_index("last_seen_at")
             self.db.comments.create_index(
                 [("source_id", ASCENDING), ("external_id", ASCENDING)],
@@ -184,17 +219,24 @@ class MongoStore:
             self.db.item_keyword_matches.create_index(
                 [("content_item_id", ASCENDING), ("keyword_id", ASCENDING)], unique=True
             )
-            self.db.item_keyword_matches.create_index([("keyword_id", ASCENDING), ("trend_score", DESCENDING)])
+            self.db.item_keyword_matches.create_index(
+                [("keyword_id", ASCENDING), ("trend_score", DESCENDING)]
+            )
             self.db.item_keyword_matches.create_index(
                 [("keyword_id", ASCENDING), ("session_id", ASCENDING)]
             )
             self.db.metric_snapshots.create_index(
-                [("content_item_id", ASCENDING), ("captured_at", ASCENDING)], unique=True
+                [("content_item_id", ASCENDING), ("captured_at", ASCENDING)],
+                unique=True,
             )
-            self.db.crawl_batches.create_index([("keyword_id", ASCENDING), ("started_at", DESCENDING)])
+            self.db.crawl_batches.create_index(
+                [("keyword_id", ASCENDING), ("started_at", DESCENDING)]
+            )
             self.db.crawl_batches.create_index("state")
             self.db.source_runs.create_index("batch_id")
-            self.db.source_runs.create_index([("batch_id", ASCENDING), ("channel_id", ASCENDING)])
+            self.db.source_runs.create_index(
+                [("batch_id", ASCENDING), ("channel_id", ASCENDING)]
+            )
             self.db.app_metadata.update_one(
                 {"_id": "mongo-index-version"},
                 {"$set": {"version": INDEX_VERSION}},
@@ -226,9 +268,14 @@ class MongoStore:
         return self.public(self.db.keywords.find_one({"_id": keyword_id}))
 
     def keywords(self) -> list[dict[str, Any]]:
-        return [self.public(row) for row in self.db.keywords.find().sort("updated_at", DESCENDING)]
+        return [
+            self.public(row)
+            for row in self.db.keywords.find().sort("updated_at", DESCENDING)
+        ]
 
-    def keyword_name_exists(self, normalized_name: str, exclude_id: int | None = None) -> bool:
+    def keyword_name_exists(
+        self, normalized_name: str, exclude_id: int | None = None
+    ) -> bool:
         query: dict[str, Any] = {"normalized_name": normalized_name}
         if exclude_id is not None:
             query["_id"] = {"$ne": exclude_id}
@@ -239,7 +286,9 @@ class MongoStore:
         self.db.keywords.insert_one(row)
         return self.public(row)
 
-    def update_keyword(self, keyword_id: int, values: dict[str, Any]) -> dict[str, Any] | None:
+    def update_keyword(
+        self, keyword_id: int, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
         row = self.db.keywords.find_one_and_update(
             {"_id": keyword_id}, {"$set": values}, return_document=ReturnDocument.AFTER
         )
@@ -305,14 +354,21 @@ class MongoStore:
     def delete_keyword(self, keyword_id: int) -> bool:
         if self.db.keywords.delete_one({"_id": keyword_id}).deleted_count == 0:
             return False
-        batch_ids = [row["_id"] for row in self.db.crawl_batches.find({"keyword_id": keyword_id}, {"_id": 1})]
+        batch_ids = [
+            row["_id"]
+            for row in self.db.crawl_batches.find(
+                {"keyword_id": keyword_id}, {"_id": 1}
+            )
+        ]
         if batch_ids:
             self.db.source_runs.delete_many({"batch_id": {"$in": batch_ids}})
             self.db.crawl_batches.delete_many({"_id": {"$in": batch_ids}})
         content_ids = list(
             {
                 row["content_item_id"]
-                for row in self.db.item_keyword_matches.find({"keyword_id": keyword_id}, {"content_item_id": 1})
+                for row in self.db.item_keyword_matches.find(
+                    {"keyword_id": keyword_id}, {"content_item_id": 1}
+                )
             }
         )
         self.db.item_keyword_matches.delete_many({"keyword_id": keyword_id})
@@ -340,9 +396,7 @@ class MongoStore:
             raise ValueError("Unsafe source ID")
         content_ids = [
             row["_id"]
-            for row in self.db.content_items.find(
-                {"source_id": source_id}, {"_id": 1}
-            )
+            for row in self.db.content_items.find({"source_id": source_id}, {"_id": 1})
         ]
         matches = snapshots = items = comments = 0
         if content_ids:
@@ -355,9 +409,7 @@ class MongoStore:
             items = self.db.content_items.delete_many(
                 {"_id": {"$in": content_ids}}
             ).deleted_count
-        comments = self.db.comments.delete_many(
-            {"source_id": source_id}
-        ).deleted_count
+        comments = self.db.comments.delete_many({"source_id": source_id}).deleted_count
         source_runs = self.db.source_runs.delete_many(
             {"source_id": source_id}
         ).deleted_count
@@ -403,10 +455,14 @@ class MongoStore:
             "keywords_reset": keywords_reset,
         }
 
-    def create_batch(self, batch: dict[str, Any], source_runs: list[dict[str, Any]]) -> None:
+    def create_batch(
+        self, batch: dict[str, Any], source_runs: list[dict[str, Any]]
+    ) -> None:
         self.db.crawl_batches.insert_one({"_id": batch.pop("id"), **batch})
         if source_runs:
-            self.db.source_runs.insert_many([{"_id": row.pop("id"), **row} for row in source_runs])
+            self.db.source_runs.insert_many(
+                [{"_id": row.pop("id"), **row} for row in source_runs]
+            )
 
     def active_batch(self, keyword_id: int) -> dict[str, Any] | None:
         row = self.db.crawl_batches.find_one(
@@ -421,9 +477,15 @@ class MongoStore:
             row["source_runs"] = self.source_runs(batch_id)
         return row
 
-    def batches(self, keyword_id: int | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    def batches(
+        self, keyword_id: int | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
         query = {} if keyword_id is None else {"keyword_id": keyword_id}
-        rows = self.db.crawl_batches.find(query).sort("started_at", DESCENDING).limit(limit)
+        rows = (
+            self.db.crawl_batches.find(query)
+            .sort("started_at", DESCENDING)
+            .limit(limit)
+        )
         result = []
         for raw in rows:
             row = self.public(raw)
@@ -458,9 +520,12 @@ class MongoStore:
         self.db.source_runs.delete_many({"batch_id": {"$in": expired_ids}})
         self.db.crawl_batches.delete_many({"_id": {"$in": expired_ids}})
         for content_item_id in content_ids:
-            if self.db.item_keyword_matches.find_one(
-                {"content_item_id": content_item_id}, {"_id": 1}
-            ) is None:
+            if (
+                self.db.item_keyword_matches.find_one(
+                    {"content_item_id": content_item_id}, {"_id": 1}
+                )
+                is None
+            ):
                 self.delete_item(content_item_id)
         return expired_ids
 
@@ -468,9 +533,16 @@ class MongoStore:
         return self.public(self.db.source_runs.find_one({"_id": source_run_id}))
 
     def source_runs(self, batch_id: str) -> list[dict[str, Any]]:
-        return [self.public(row) for row in self.db.source_runs.find({"batch_id": batch_id})]
+        return [
+            self.public(row) for row in self.db.source_runs.find({"batch_id": batch_id})
+        ]
 
-    def update_source_run(self, source_run_id: str, values: dict[str, Any], increments: dict[str, int] | None = None) -> None:
+    def update_source_run(
+        self,
+        source_run_id: str,
+        values: dict[str, Any],
+        increments: dict[str, int] | None = None,
+    ) -> None:
         update: dict[str, Any] = {}
         if values:
             update["$set"] = values
@@ -481,7 +553,11 @@ class MongoStore:
         self.db.source_runs.update_one({"_id": source_run_id}, update)
 
     def item_by_source(self, source_id: str, external_id: str) -> dict[str, Any] | None:
-        return self.public(self.db.content_items.find_one({"source_id": source_id, "external_id": external_id}))
+        return self.public(
+            self.db.content_items.find_one(
+                {"source_id": source_id, "external_id": external_id}
+            )
+        )
 
     def item(self, content_item_id: int) -> dict[str, Any] | None:
         return self.public(self.db.content_items.find_one({"_id": content_item_id}))
@@ -491,7 +567,9 @@ class MongoStore:
         content_item_id = values.pop("id", None)
         if content_item_id is None:
             content_item_id = self.next_id("content_items")
-        self.db.content_items.update_one({"_id": content_item_id}, {"$set": values}, upsert=True)
+        self.db.content_items.update_one(
+            {"_id": content_item_id}, {"$set": values}, upsert=True
+        )
         return {"id": content_item_id, **values}
 
     def comment_by_source(
@@ -513,9 +591,7 @@ class MongoStore:
         values = deepcopy(values)
         source_id = str(values.get("source_id") or "").strip()
         external_id = str(values.get("external_id") or "").strip()
-        content_external_id = str(
-            values.get("content_external_id") or ""
-        ).strip()
+        content_external_id = str(values.get("content_external_id") or "").strip()
         if not source_id or not external_id or not content_external_id:
             raise ValueError("Comment identity fields cannot be empty")
         if any(character in source_id for character in (".", "$")):
@@ -585,9 +661,11 @@ class MongoStore:
         }
         if root_external_id is not None:
             query["root_external_id"] = root_external_id
-        rows = self.db.comments.find(query).sort(
-            [("published_at", ASCENDING), ("_id", ASCENDING)]
-        ).limit(limit)
+        rows = (
+            self.db.comments.find(query)
+            .sort([("published_at", ASCENDING), ("_id", ASCENDING)])
+            .limit(limit)
+        )
         return [self.public(row) for row in rows]
 
     def delete_comments_for_content(
@@ -622,7 +700,9 @@ class MongoStore:
             )
         )
 
-    def has_external_match(self, source_id: str, external_id: str, keyword_id: int) -> bool:
+    def has_external_match(
+        self, source_id: str, external_id: str, keyword_id: int
+    ) -> bool:
         item = self.db.content_items.find_one(
             {"source_id": source_id, "external_id": external_id}, {"_id": 1}
         )
@@ -633,10 +713,15 @@ class MongoStore:
             )
         )
 
-    def save_match(self, content_item_id: int, keyword_id: int, values: dict[str, Any]) -> dict[str, Any]:
+    def save_match(
+        self, content_item_id: int, keyword_id: int, values: dict[str, Any]
+    ) -> dict[str, Any]:
         row = self.db.item_keyword_matches.find_one_and_update(
             {"content_item_id": content_item_id, "keyword_id": keyword_id},
-            {"$set": values, "$setOnInsert": {"_id": self.next_id("item_keyword_matches")}},
+            {
+                "$set": values,
+                "$setOnInsert": {"_id": self.next_id("item_keyword_matches")},
+            },
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
@@ -646,19 +731,31 @@ class MongoStore:
         self.db.item_keyword_matches.delete_one(
             {"content_item_id": content_item_id, "keyword_id": keyword_id}
         )
-        if self.db.item_keyword_matches.find_one({"content_item_id": content_item_id}, {"_id": 1}) is None:
+        if (
+            self.db.item_keyword_matches.find_one(
+                {"content_item_id": content_item_id}, {"_id": 1}
+            )
+            is None
+        ):
             self.delete_item(content_item_id)
 
     def add_snapshot(self, values: dict[str, Any]) -> None:
         self.db.metric_snapshots.update_one(
-            {"content_item_id": values["content_item_id"], "captured_at": values["captured_at"]},
+            {
+                "content_item_id": values["content_item_id"],
+                "captured_at": values["captured_at"],
+            },
             {"$set": values},
             upsert=True,
         )
 
-    def snapshots(self, content_item_id: int, descending: bool = False, limit: int = 0) -> list[dict[str, Any]]:
+    def snapshots(
+        self, content_item_id: int, descending: bool = False, limit: int = 0
+    ) -> list[dict[str, Any]]:
         direction = DESCENDING if descending else ASCENDING
-        cursor = self.db.metric_snapshots.find({"content_item_id": content_item_id}).sort("captured_at", direction)
+        cursor = self.db.metric_snapshots.find(
+            {"content_item_id": content_item_id}
+        ).sort("captured_at", direction)
         if limit:
             cursor = cursor.limit(limit)
         return [self.public(row) for row in cursor]
@@ -695,10 +792,87 @@ class MongoStore:
         return rows
 
     def source_metric_values(self, source_id: str) -> list[dict[str, int]]:
-        return [row.get("metrics", {}) for row in self.db.content_items.find({"source_id": source_id}, {"metrics": 1})]
+        return [
+            row.get("metrics", {})
+            for row in self.db.content_items.find(
+                {"source_id": source_id}, {"metrics": 1}
+            )
+        ]
 
     def source_item_ids(self, source_id: str) -> list[int]:
-        return [row["_id"] for row in self.db.content_items.find({"source_id": source_id}, {"_id": 1})]
+        return [
+            row["_id"]
+            for row in self.db.content_items.find({"source_id": source_id}, {"_id": 1})
+        ]
+
+    def metadata(self, key: str) -> dict[str, Any] | None:
+        return self.public(self.db.app_metadata.find_one({"_id": key}))
+
+    def set_metadata(self, key: str, values: dict[str, Any]) -> None:
+        self.db.app_metadata.update_one({"_id": key}, {"$set": values}, upsert=True)
+
+    def due_keywords(self, now: datetime) -> list[dict[str, Any]]:
+        return [
+            self.public(row)
+            for row in self.db.keywords.find(
+                {"enabled": True, "next_run_at": {"$ne": None, "$lte": now}}
+            )
+        ]
+
+    def content_item_ids_before(self, cutoff: datetime) -> list[int]:
+        return [
+            row["_id"]
+            for row in self.db.content_items.find(
+                {"last_seen_at": {"$lt": cutoff}}, {"_id": 1}
+            )
+        ]
+
+    def batches_by_states(self, states: set[str]) -> list[dict[str, Any]]:
+        return [
+            self.public(row)
+            for row in self.db.crawl_batches.find({"state": {"$in": list(states)}})
+        ]
+
+    def delete_irrelevant_matches(self) -> tuple[int, set[int]]:
+        matches = list(
+            self.db.item_keyword_matches.find({"relevance_score": {"$lte": 0}})
+        )
+        candidates = {row["content_item_id"] for row in matches}
+        if matches:
+            self.db.item_keyword_matches.delete_many(
+                {"_id": {"$in": [row["_id"] for row in matches]}}
+            )
+        return len(matches), candidates
+
+    def has_matches_for_item(self, content_item_id: int) -> bool:
+        return (
+            self.db.item_keyword_matches.find_one(
+                {"content_item_id": content_item_id}, {"_id": 1}
+            )
+            is not None
+        )
+
+    def recent_items(
+        self, source_ids: set[str], limit: int = 50
+    ) -> list[dict[str, Any]]:
+        rows = (
+            self.db.content_items.find({"source_id": {"$in": list(source_ids)}})
+            .sort("published_at", DESCENDING)
+            .limit(limit)
+        )
+        return [self.public(row) for row in rows]
 
 
-store = MongoStore()
+from .sqlite_store import SQLiteStore
+
+PersistenceStore = MongoStore | SQLiteStore
+
+storage_backend = settings.content_bot_storage_backend.strip().lower()
+if storage_backend == "mongodb":
+    store: PersistenceStore = MongoStore()
+elif storage_backend == "sqlite":
+    store = SQLiteStore(settings.sqlite_path)
+else:
+    raise RuntimeError(
+        "CONTENT_BOT_STORAGE_BACKEND must be either 'sqlite' or 'mongodb'"
+    )

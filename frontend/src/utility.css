@@ -1,0 +1,10 @@
+/*
+ * The settings and update dialogs use Tailwind utility classes. Keep the
+ * utility layer isolated from the app's existing design-system CSS so adding
+ * it does not introduce Tailwind's global preflight reset.
+ */
+@import "tailwindcss/theme.css";
+@import "tailwindcss/utilities.css";
+
+@source "./SettingsModal.tsx";
+@source "./UpdateModal.tsx";

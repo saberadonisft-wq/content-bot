@@ -4,7 +4,7 @@ Local-first game social-listening workbench. It discovers public game content by
 
 ## Current capabilities
 
-- FastAPI API with MongoDB Atlas storage, keyword schedules, run tracking, relevance and trend scoring.
+- FastAPI API with local SQLite storage, keyword schedules, run tracking, relevance and trend scoring.
 - YouTube connector through the official Data API when `YOUTUBE_API_KEY` is configured.
 - Source registry for web, Steam, Bluesky, Reddit, X, MediaCrawler platforms, TikTok, Facebook, and Instagram; connectors that need credentials or additional setup report their state instead of failing a run.
 - React workbench dashboard with keyword management, source health, live run status, filtering, and CSV/JSON export.
@@ -18,37 +18,53 @@ On Windows with Python 3.11+ and Node.js 20+, open the repository in VS Code, ru
 
 Both processes remain attached to their VS Code terminals, so logs and startup failures are visible immediately. Terminate the compound task, or press `Ctrl+C` in each terminal, to stop them. No API process is launched in the background. To run only one service outside VS Code, use `./scripts/launcher.ps1 -Action backend` or `./scripts/launcher.ps1 -Action frontend`; missing local dependencies are installed on first use. Game news and Steam reviews work without a key. Copy `backend/.env.example` to `backend/.env` only when you want to add options such as `YOUTUBE_API_KEY`.
 
+### Desktop development mode
+
+To display signed-in social pages directly inside Live Wall cards, run **Tasks: Run Task → Content Bot: Desktop Dev**, or:
+
+```powershell
+.\scripts\launcher.ps1 -Action desktop
+```
+
+This is a development shell, not a packaged installer. It reuses Auth Server, backend, and Vite when they are already running; otherwise it starts them. React/CSS changes update through Vite immediately, Python application changes restart the owned service, and changes below `desktop/` restart only Electron. You do not need to package the app between tests. Stop it with `Ctrl+C` in its terminal.
+
+Open **Nguồn & Video → Trực tiếp** in the desktop window. Supported saved channel pages are placed directly in their cards using an isolated per-user browser session. The normal browser version continues to use official embeds and the explicit Cốc Cốc fallback.
+
 ## V1 test configuration
 
 Your local configuration file is [`backend/.env`](backend/.env). It is ignored by Git and is read explicitly by the API, so it works whether you start from the repository root or from `backend/`. Do not paste its values into chat. Game News, Steam reviews and Bluesky need no key. Reddit uses `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`; X channel pages always retain the public view-only embed, while `X_BEARER_TOKEN` additionally enables manual official-API ingestion for saved creator timelines and recent search. `WEB_FEED_URLS` is an optional public RSS override. MediaCrawler sources use a visible QR/phone login and a local browser profile—do not add social passwords or cookies to `.env`.
 
 ## Gemini subtitle generation
 
-Subtitle Studio can send a video through the official Gemini CLI, ask Gemini to use audio, visible captions and scene context, then import the returned Vietnamese cues directly into the timeline. The automated worker uses a Gemini API key or Vertex AI credentials; consumer Google-account OAuth for Gemini CLI is no longer supported.
+Subtitle Studio sends a video through the official Gemini REST API, asks Gemini to use audio, visible captions and scene context, then imports the returned Vietnamese cues directly into the timeline. The worker uses a Gemini API key and never requires a globally installed CLI.
 
-Install the CLI and configure a key from Google AI Studio in `backend/.env`:
+Configure a key from Google AI Studio in `backend/.env`:
 
 ```powershell
-npm install -g @google/gemini-cli@latest
 # backend/.env
 GEMINI_API_KEY=your-google-ai-studio-key
+CONTENT_BOT_GEMINI_MODEL=gemini-3.6-flash
 ```
 
-Restart Content Bot after editing `.env`. The app creates a temporary workspace auth setting for the child process, so it does not change your global Gemini CLI profile. Vertex AI can be used instead by configuring the CLI's Vertex AI auth and project. Because Gemini CLI accepts at most 20 MB per attached local file, Content Bot automatically creates a temporary MP4 proxy below 19 MB. Videos longer than three minutes are processed in sequential chunks and their timestamps are joined automatically. Temporary proxy files are removed after success, failure or cancellation.
+Restart Content Bot after editing `.env`. Because Gemini accepts at most 20 MB per attached local file, Content Bot automatically creates a temporary MP4 proxy below 19 MB. Videos longer than three minutes are processed in sequential chunks and their timestamps are joined automatically. Temporary proxy files are removed after success, failure or cancellation.
 
-Set `CONTENT_BOT_GEMINI_CLI_MODEL` in `backend/.env` only when a specific CLI model is required; `auto` lets Gemini CLI choose its current route. Quota, service availability and data handling follow the configured Google project/key.
+Set `CONTENT_BOT_GEMINI_MODEL` and the timeout/retry fields in `backend/.env` when needed. The old `CONTENT_BOT_GEMINI_CLI_*` names are accepted for one release with a deprecation warning; `CONTENT_BOT_GEMINI_CLI_PATH` has no effect. Quota, service availability and data handling follow the configured Google project/key.
 
 If a scan or setup step is unclear, inspect the **Content Bot: Backend** terminal. The API also exposes `/api/v1/health` and `/api/v1/ready`; credential values are never written to terminal output.
 
-When the dashboard is no longer needed, terminate both VS Code tasks. Stopping either process does not modify MongoDB data.
+When the dashboard is no longer needed, terminate both VS Code tasks. Stopping either process does not modify local application data.
 
-MongoDB Atlas is the active application database. Set `MONGODB_URI` and optionally `MONGODB_DATABASE` (default `content_bot`) in `backend/.env`. The API verifies the connection and creates its required indexes during startup.
+SQLite is the default application database. Topics, crawler runs, collected content, metrics and comments are stored in `data/content-bot.db`; SQLite WAL mode allows safe local reads and writes without installing or starting MongoDB. The API imports the repository's legacy SQLite tables into the current document schema automatically and idempotently.
 
-To import a legacy SQLite database into MongoDB during the migration support window, stop the API and run `backend/.venv/Scripts/python.exe backend/scripts/migrate_sqlite_to_mongodb.py --source data/content-bot.db`. The migration preserves existing IDs, creates indexes, and is idempotent; add `--replace` only when MongoDB documents with matching IDs should be overwritten from SQLite.
+The auth-server remains independent and is responsible for users, login and authorization. Its own database or fallback configuration does not gate creation of topics in the main Content Bot API.
+
+API credentials entered in Settings are encrypted in the local Credential Vault. When the Vault is locked, new operations fall back to matching `.env` values. Database paths and connection strings are startup configuration, not Vault credentials.
+
+For a legacy deployment that deliberately keeps application data in MongoDB, set `CONTENT_BOT_STORAGE_BACKEND=mongodb`, `MONGODB_URI`, and optionally `MONGODB_DATABASE` in `backend/.env`, then restart the backend. SQLite remains the recommended desktop/local mode.
 
 To scan one connector, select a tracked game in the dashboard, open **Sources**, and use **Scan source** or **Login & scan**. Login-gated sources open a visible Cốc Cốc window; the dashboard reports phase, progress, fetched/stored counts and cancellation state.
 
-For maintenance, stop the API before restore or apply-prune operations:
+For a local backup, stop the backend and copy `data/content-bot.db` together with any adjacent `content-bot.db-wal` and `content-bot.db-shm` files. MongoDB maintenance scripts below apply only when `CONTENT_BOT_STORAGE_BACKEND=mongodb`:
 
 ```powershell
 .\scripts\launcher.ps1 -Action setup-mediacrawler
@@ -64,7 +80,7 @@ The dashboard exposes the same supervised flow. Select a tracked game in **Workb
 
 Scheduled runs are unattended and therefore only execute sources that do not require login. A selected login-gated source is recorded as `skipped` with an explanation; it never opens a browser or QR prompt in the background. Use **Run now** when you are present to complete login. Schedule times stay anchored to the configured cadence after an API restart or downtime instead of drifting from the restart time.
 
-The API binds to `127.0.0.1` by default. Browser profiles and raw crawl data remain under `data/` and are intentionally ignored by Git. Keep the Atlas connection string only in the ignored `backend/.env` file.
+The API binds to `127.0.0.1` by default. The SQLite database, browser profiles and raw crawl data remain under `data/` and are intentionally ignored by Git. Keep any optional remote database connection string only in the ignored `backend/.env` file.
 
 ## Source setup
 

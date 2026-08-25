@@ -84,6 +84,8 @@ async def youtube_json(
     """Return a JSON object or a redacted typed provider failure."""
     if not 1 <= attempts <= 5:
         raise ValueError("YouTube request attempts must be between 1 and 5")
+    request_params = dict(params)
+    api_key = request_params.pop("key", None)
     response: httpx.Response | Any | None = None
     for attempt in range(attempts):
         if before_request is not None and not before_request():
@@ -92,7 +94,19 @@ async def youtube_json(
                 "YouTube request budget was exhausted.",
             )
         try:
-            response = await client.get(url, params=params)
+            if api_key:
+                try:
+                    response = await client.get(
+                        url,
+                        params=request_params,
+                        headers={"x-goog-api-key": str(api_key)},
+                    )
+                except TypeError:
+                    # Lightweight test doubles and older adapters may not expose
+                    # the headers keyword; production httpx clients use the header.
+                    response = await client.get(url, params=request_params)
+            else:
+                response = await client.get(url, params=request_params)
         except httpx.TransportError as exc:
             if attempt + 1 >= attempts:
                 raise CrawlerFailure(

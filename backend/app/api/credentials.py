@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
+
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
-from ..services.credential_vault import get_vault, SUPPORTED_KEYS
+from ..services.credential_vault import get_vault
 
 router = APIRouter(prefix="/api/v1/credentials", tags=["Credentials"])
 

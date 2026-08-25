@@ -91,7 +91,7 @@ def migrate(
         local_col.bulk_write(operations, ordered=False)
         print(f"   - {col_name:30}: {count:5} documents -> [COPIED]")
 
-    print(f"\n4. Khoi tao indexes tren Local MongoDB...")
+    print("\n4. Khoi tao indexes tren Local MongoDB...")
     from app.config import settings
     from app.mongo import MongoStore
 

@@ -4,9 +4,8 @@ import {
   LogOut,
   RefreshCw,
   ShieldAlert,
-  UserCheck,
 } from "lucide-react";
-import { useAuth } from "./AuthContext";
+import { useAuth } from "./useAuth";
 
 export const PendingApprovalPage: React.FC = () => {
   const { user, checkStatus, logout, isBanned } = useAuth();

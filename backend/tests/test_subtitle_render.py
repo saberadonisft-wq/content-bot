@@ -15,9 +15,11 @@ from app.services.media_probe import probe_media
 from app.services.subtitle_render import (
     SubtitleRenderCanceled,
     _audio_arguments,
+    _effective_video_segments,
     _force_style,
     _output_duration_ms,
     _target_dimensions,
+    _transform_cues_for_video_segments,
     _video_filter_graph,
     encoder_candidates,
     precision_render_cache_key,
@@ -131,6 +133,63 @@ def test_output_duration_uses_single_decimal_time_map_rounding() -> None:
         video_speed=str(Decimal("1.25")),
     )
     assert _output_duration_ms(media, options) == 6400
+
+
+def test_video_segments_remove_middle_range_and_build_concat_graph() -> None:
+    media = {
+        "duration_ms": 10_000,
+        "width": 320,
+        "height": 180,
+        "has_audio": True,
+    }
+    options = _options(
+        video_segments=[
+            {"id": "left", "start_ms": 0, "end_ms": 3_000},
+            {"id": "right", "start_ms": 6_000, "end_ms": 10_000},
+        ]
+    )
+    segments, cuts_active = _effective_video_segments(media, options)
+    graph, _ = _video_filter_graph(
+        None,
+        Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo",
+        media,
+        options,
+    )
+
+    assert segments == [(0, 3_000), (6_000, 10_000)]
+    assert cuts_active is True
+    assert _output_duration_ms(media, options) == 7_000
+    assert "concat=n=2:v=1:a=0[cut_video]" in graph
+    assert "concat=n=2:v=0:a=1[acut]" in graph
+
+
+def test_video_segments_remap_and_clip_subtitles_after_deleted_range() -> None:
+    cues = [
+        _document(2_000, 7_000)["segments"][0],
+        {**_document(8_000, 9_000)["segments"][0], "id": "s2"},
+    ]
+    transformed = _transform_cues_for_video_segments(
+        cues,
+        [(0, 3_000), (6_000, 10_000)],
+        Decimal(1),
+    )
+
+    assert [(cue["start_ms"], cue["end_ms"]) for cue in transformed] == [
+        (2_000, 3_000),
+        (3_000, 4_000),
+        (5_000, 6_000),
+    ]
+    assert transformed[1]["id"].endswith("-part-2")
+
+
+def test_video_segments_schema_rejects_overlap() -> None:
+    with pytest.raises(ValidationError):
+        SubtitleRenderOptionsV2(
+            video_segments=[
+                {"id": "a", "start_ms": 0, "end_ms": 2_000},
+                {"id": "b", "start_ms": 1_000, "end_ms": 3_000},
+            ]
+        )
 
 
 def test_precision_style_matches_browser_font_metrics_and_custom_anchor() -> None:

@@ -1,9 +1,7 @@
 import { useState } from "react";
 import {
   Download,
-  ExternalLink,
   Info,
-  RefreshCw,
   Sparkles,
   Terminal,
   X,

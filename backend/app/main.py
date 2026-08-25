@@ -26,6 +26,7 @@ from .api.crawler_data import build_crawler_data_router
 from .api.crawler_profiles import build_crawler_profiles_router
 from .api.credentials import router as credentials_router
 from .api.health import build_health_router
+from .api.live_wall import build_live_wall_router
 from .api.tiktok_auth import build_tiktok_auth_router
 from .config import settings
 from .crawlers.adapters.tiktok import TikTokOAuthConfig, TikTokTokenVault
@@ -64,13 +65,17 @@ from .schemas import (
 from .services.clusters import cluster_items
 from .services.connectors import default_connectors
 from .services.crawler_login import CrawlerLoginManager
+from .services.credential_resolver import credential
 from .services.gemini_subtitles import (
+    DEFAULT_GEMINI_MODEL,
     GeminiSubtitleCanceled,
+    GeminiSubtitleError,
     GeminiSubtitleService,
     GeminiSubtitleSettings,
     gemini_generation_cache_key,
 )
 from .services.insights import summarize_items
+from .services.live_wall import LiveWallManager
 from .services.media_probe import MediaProbeError, probe_media_cached
 from .services.runs import EventBus, RunManager, utcnow
 from .services.subtitle_alignment import (
@@ -118,24 +123,20 @@ SUPPORTED_OVERLAY_CONTENT_TYPES = {
     "image/webp",
 }
 VIDEO_ID_PATTERN = re.compile(r"^[a-f0-9]{12,32}$")
-MONGO_REQUIRED_PREFIXES = (
-    "/api/v1/keywords",
-    "/api/v1/items",
-    "/api/v1/insights",
-    "/api/v1/runs",
-    "/api/v1/export",
-)
-
 connectors = default_connectors()
 events = EventBus()
 run_manager = RunManager(connectors, events)
 crawler_login_manager = CrawlerLoginManager()
+live_wall_manager = LiveWallManager(
+    profile_root=settings.data_dir / "live-wall-profiles",
+    browser_executable=settings.content_bot_coccoc_executable_path,
+)
 tiktok_oauth_service = TikTokOAuthService(
     TikTokTokenVault(settings.data_dir / "crawler-secrets" / "tiktok"),
     lambda: TikTokOAuthConfig(
-        settings.tiktok_client_key,
-        settings.tiktok_client_secret or "",
-        settings.tiktok_redirect_uri,
+        credential("tiktok_client_key", ""),
+        credential("tiktok_client_secret", "") or "",
+        credential("tiktok_redirect_uri", ""),
     ),
     settings.content_bot_frontend_url,
 )
@@ -150,13 +151,14 @@ gemini_subtitle_jobs = SubtitleJobManager(
 gemini_subtitle_service = GeminiSubtitleService(
     GeminiSubtitleSettings(
         job_root=Path(tempfile.gettempdir()) / "content-bot-gemini-jobs",
-        cli_path=settings.content_bot_gemini_cli_path,
-        model=settings.content_bot_gemini_cli_model,
-        api_key=settings.gemini_api_key,
-        timeout_seconds=settings.content_bot_gemini_cli_timeout_seconds,
-        chunk_seconds=settings.content_bot_gemini_cli_chunk_seconds,
-        max_input_mb=settings.content_bot_gemini_cli_max_input_mb,
-    )
+        model=settings.content_bot_gemini_model,
+        timeout_seconds=settings.content_bot_gemini_timeout_seconds,
+        chunk_seconds=settings.content_bot_gemini_chunk_seconds,
+        max_input_mb=settings.content_bot_gemini_max_input_mb,
+        max_retries=settings.content_bot_gemini_max_retries,
+        retry_base_seconds=settings.content_bot_gemini_retry_base_seconds,
+    ),
+    api_key_provider=lambda: credential("gemini_api_key"),
 )
 
 
@@ -186,22 +188,23 @@ async def lifespan(app: FastAPI):
     task = None
     if store.is_available:
         await asyncio.to_thread(run_manager.cleanup_interrupted)
-        cleanup_migration = store.db.app_metadata.find_one({"_id": "cleanup-irrelevant-v1"})
+        cleanup_migration = store.metadata("cleanup-irrelevant-v1")
         if cleanup_migration is None:
             await asyncio.to_thread(run_manager.cleanup_irrelevant)
-            store.db.app_metadata.update_one(
-                {"_id": "cleanup-irrelevant-v1"},
-                {"$set": {"completed": True, "completed_at": utcnow()}},
-                upsert=True,
+            store.set_metadata(
+                "cleanup-irrelevant-v1",
+                {"completed": True, "completed_at": utcnow()},
             )
         task = asyncio.create_task(scheduler_loop(), name="content-bot-scheduler")
     else:
         logger.warning(
-            "MongoDB is unavailable; scheduler and persistence endpoints are disabled"
+            "%s storage is unavailable; scheduler is disabled",
+            store.storage_name,
         )
     try:
         yield
     finally:
+        await live_wall_manager.shutdown()
         await crawler_login_manager.shutdown()
         if task is not None:
             task.cancel()
@@ -216,6 +219,7 @@ app.include_router(build_crawler_data_router(lambda: store))
 app.include_router(build_comments_router(lambda: store, lambda: connectors))
 app.include_router(build_crawler_profiles_router(crawler_login_manager))
 app.include_router(build_tiktok_auth_router(tiktok_oauth_service))
+app.include_router(build_live_wall_router(live_wall_manager, lambda: store))
 app.include_router(credentials_router)
 
 
@@ -248,11 +252,14 @@ async def verify_auth_token_middleware(request, call_next):
         token = auth_header.split(" ", 1)[1].strip()
         try:
             from .middleware.auth import verify_token
+
             payload = verify_token(token)
             if payload.get("status") != "approved":
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": "Tài khoản của bạn đang chờ phê duyệt từ quản trị viên."},
+                    content={
+                        "detail": "Tài khoản của bạn đang chờ phê duyệt từ quản trị viên."
+                    },
                 )
             request.state.user = payload
         except HTTPException as he:
@@ -263,30 +270,12 @@ async def verify_auth_token_middleware(request, call_next):
         except Exception as e:
             return JSONResponse(
                 status_code=401,
-                content={"detail": f"Xác thực thất bại: {str(e)}"},
+                content={"detail": f"Xác thực thất bại: {e!s}"},
             )
 
     return await call_next(request)
 
 
-@app.middleware("http")
-async def require_mongo_for_persistence(request, call_next):
-    if (
-        request.method != "OPTIONS"
-        and
-        any(
-            request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
-            for prefix in MONGO_REQUIRED_PREFIXES
-        )
-        and not store.is_available
-    ):
-        return JSONResponse(status_code=503, content={"detail": "MongoDB is not ready"})
-    return await call_next(request)
-
-
-# Register CORS after the persistence guard so it also decorates locally
-# generated 503 responses. Otherwise browsers hide the JSON detail behind a
-# generic "Failed to fetch" network error.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -299,7 +288,7 @@ app.add_middleware(
     # browser origins.
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
     expose_headers=[
         "X-Sprite-Frames",
@@ -927,7 +916,9 @@ async def upload_subtitle_overlay(file: UploadFile = File(...)):
             while chunk := await file.read(256 * 1024):
                 total_bytes += len(chunk)
                 if total_bytes > settings.content_bot_max_overlay_size_bytes:
-                    raise HTTPException(status_code=413, detail="Overlay image is too large")
+                    raise HTTPException(
+                        status_code=413, detail="Overlay image is too large"
+                    )
                 digest.update(chunk)
                 destination.write(chunk)
         if total_bytes == 0:
@@ -949,7 +940,9 @@ async def upload_subtitle_overlay(file: UploadFile = File(...)):
     except Exception as exc:
         temporary_path.unlink(missing_ok=True)
         logger.exception("Failed to store subtitle overlay")
-        raise HTTPException(status_code=500, detail="Could not store overlay image") from exc
+        raise HTTPException(
+            status_code=500, detail="Could not store overlay image"
+        ) from exc
     finally:
         await file.close()
 
@@ -989,7 +982,9 @@ async def get_subtitle_video_metadata(video_id: str):
             timeout_seconds=settings.content_bot_media_probe_timeout_seconds,
         )
     except MediaProbeError as exc:
-        raise HTTPException(status_code=422, detail="Could not probe video metadata") from exc
+        raise HTTPException(
+            status_code=422, detail="Could not probe video metadata"
+        ) from exc
 
 
 @app.get("/api/v1/subtitles/video/{video_id}/thumbnail-sprite")
@@ -1008,9 +1003,13 @@ def get_subtitle_thumbnail_sprite(video_id: str):
             timeout_seconds=settings.content_bot_thumbnail_timeout_seconds,
         )
     except MediaProbeError as exc:
-        raise HTTPException(status_code=422, detail="Could not probe video metadata") from exc
+        raise HTTPException(
+            status_code=422, detail="Could not probe video metadata"
+        ) from exc
     except ThumbnailSpriteError as exc:
-        raise HTTPException(status_code=500, detail="Could not create thumbnail sprite") from exc
+        raise HTTPException(
+            status_code=500, detail="Could not create thumbnail sprite"
+        ) from exc
     return FileResponse(
         sprite["path"],
         media_type="image/jpeg",
@@ -1070,8 +1069,10 @@ def transform_subtitle_timeline_v2_endpoint(req: SubtitleTransformRequestV2):
     response_model=SubtitleJobResponse,
 )
 def generate_subtitles_with_gemini_endpoint(req: GeminiSubtitleRequest):
-    if not settings.content_bot_gemini_cli_enabled:
-        raise HTTPException(status_code=503, detail="Gemini CLI subtitle worker is disabled")
+    if not settings.content_bot_gemini_enabled:
+        raise HTTPException(
+            status_code=503, detail="Gemini subtitle generation is disabled"
+        )
     input_path = _uploaded_video_path(req.video_id)
     try:
         media = probe_media_cached(
@@ -1080,15 +1081,21 @@ def generate_subtitles_with_gemini_endpoint(req: GeminiSubtitleRequest):
             timeout_seconds=settings.content_bot_media_probe_timeout_seconds,
         )
     except MediaProbeError as exc:
-        raise HTTPException(status_code=422, detail="Could not probe video metadata") from exc
+        raise HTTPException(
+            status_code=422, detail="Could not probe video metadata"
+        ) from exc
     if not media.get("has_audio"):
         raise HTTPException(status_code=422, detail="Video has no audio track")
 
     options = req.options.model_dump(mode="json")
+    selected_model = GeminiSubtitleService.normalize_model(
+        req.options.model or settings.content_bot_gemini_model or DEFAULT_GEMINI_MODEL
+    )
+    options["model"] = selected_model
     dedupe_key = gemini_generation_cache_key(
         media,
         options,
-        model=settings.content_bot_gemini_cli_model,
+        model=selected_model,
     )
 
     def run_generation_job(context):
@@ -1101,10 +1108,25 @@ def generate_subtitles_with_gemini_endpoint(req: GeminiSubtitleRequest):
 
 
 @app.get("/api/v1/subtitles/gemini/status")
-def get_gemini_cli_status():
-    if not settings.content_bot_gemini_cli_enabled:
+def get_gemini_api_status():
+    if not settings.content_bot_gemini_enabled:
         return {"installed": False, "authenticated": False}
     return gemini_subtitle_service.status()
+
+
+@app.get("/api/v1/subtitles/gemini/models")
+def get_gemini_models():
+    if not settings.content_bot_gemini_enabled:
+        return {"models": [], "selected_model": DEFAULT_GEMINI_MODEL}
+    try:
+        return {
+            "models": gemini_subtitle_service.list_models(),
+            "selected_model": GeminiSubtitleService.normalize_model(
+                settings.content_bot_gemini_model or DEFAULT_GEMINI_MODEL
+            ),
+        }
+    except GeminiSubtitleError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get(
@@ -1143,7 +1165,9 @@ def align_subtitle_timeline_v2_endpoint(req: SubtitleAlignmentRequest):
             timeout_seconds=settings.content_bot_media_probe_timeout_seconds,
         )
     except MediaProbeError as exc:
-        raise HTTPException(status_code=422, detail="Could not probe video metadata") from exc
+        raise HTTPException(
+            status_code=422, detail="Could not probe video metadata"
+        ) from exc
     if not media.get("has_audio"):
         raise HTTPException(
             status_code=422,
@@ -1218,7 +1242,9 @@ def preview_subtitle_timeline_v2_endpoint(req: SubtitleAssPreviewRequestV2):
             timeout_seconds=settings.content_bot_media_probe_timeout_seconds,
         )
     except MediaProbeError as exc:
-        raise HTTPException(status_code=422, detail="Could not probe video metadata") from exc
+        raise HTTPException(
+            status_code=422, detail="Could not probe video metadata"
+        ) from exc
 
     options = req.options.model_dump(mode="json")
     cues = [segment.model_dump(mode="json") for segment in req.document.segments]
@@ -1250,7 +1276,9 @@ def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
             timeout_seconds=settings.content_bot_media_probe_timeout_seconds,
         )
     except MediaProbeError as exc:
-        raise HTTPException(status_code=422, detail="Could not probe video metadata") from exc
+        raise HTTPException(
+            status_code=422, detail="Could not probe video metadata"
+        ) from exc
 
     document_data = req.document.model_dump(mode="json")
     options_data = req.options.model_dump(mode="json")
@@ -1437,25 +1465,18 @@ def list_videos():
 
     try:
         # We only look for known video sources
-        scraped = (
-            store.db.content_items.find(
-                {
-                    "source_id": {
-                        "$in": [
-                            "youtube",
-                            "douyin",
-                            "dy",
-                            "xhs",
-                            "kuaishou",
-                            "ks",
-                            "bilibili",
-                            "bili",
-                        ]
-                    }
-                }
-            )
-            .sort("published_at", -1)
-            .limit(50)
+        scraped = store.recent_items(
+            {
+                "youtube",
+                "douyin",
+                "dy",
+                "xhs",
+                "kuaishou",
+                "ks",
+                "bilibili",
+                "bili",
+            },
+            limit=50,
         )
 
         for item in scraped:
@@ -1500,7 +1521,7 @@ def list_videos():
 
             videos.append(
                 VideoLibraryItem(
-                    id=str(item.get("_id")),
+                    id=str(item.get("id")),
                     filename=item.get("title", f"Scraped from {source}")[:50],
                     type="scraped",
                     size_bytes=0,

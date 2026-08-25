@@ -22,7 +22,7 @@ from ..crawlers.runtime import (
     CrawlerFailure,
     RunBudgets,
 )
-from ..mongo import MongoStore
+from ..mongo import PersistenceStore
 from ..services.cbce_runtime import cbce_provider_rollout_status
 from ..services.connectors import SourceConnector
 
@@ -41,7 +41,7 @@ class CommentScanRequest(BaseModel):
 
 
 def build_comments_router(
-    get_store: Callable[[], MongoStore],
+    get_store: Callable[[], PersistenceStore],
     get_connectors: Callable[[], Mapping[str, SourceConnector]],
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/items")

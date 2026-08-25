@@ -38,7 +38,7 @@ def test_readiness_ping_is_cached() -> None:
     assert calls == 1
 
 
-def test_unavailable_mongo_does_not_block_cors_preflight(mongo_store: MongoStore) -> None:
+def test_persistence_routes_do_not_have_a_mongodb_guard(mongo_store: MongoStore) -> None:
     with TestClient(main.app) as client:
         mongo_store._available = False
         mongo_store.client = None
@@ -55,6 +55,21 @@ def test_unavailable_mongo_does_not_block_cors_preflight(mongo_store: MongoStore
 
     assert preflight.status_code == 200
     assert preflight.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
-    assert response.status_code == 503
-    assert response.json() == {"detail": "MongoDB is not ready"}
+    assert response.status_code == 200
+    assert response.json() == []
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
+def test_credential_update_cors_preflight_allows_put() -> None:
+    with TestClient(main.app) as client:
+        preflight = client.options(
+            "/api/v1/credentials",
+            headers={
+                "Origin": "http://127.0.0.1:5173",
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+
+    assert preflight.status_code == 200
+    assert "PUT" in preflight.headers["access-control-allow-methods"]

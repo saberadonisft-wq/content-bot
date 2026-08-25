@@ -1,66 +1,55 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-import json
-import sys
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
+
+import httpx
+import pytest
 
 from app import main
 from app.schemas import GeminiSubtitleRequest, SubtitleJobResponse
 from app.services.gemini_subtitles import (
-    CommandResult,
+    GeminiSubtitleError,
     GeminiSubtitleService,
     GeminiSubtitleSettings,
 )
 from app.services.subtitle_jobs import SubtitleJobManager
 
 
-def _service(tmp_path: Path) -> GeminiSubtitleService:
+def _service(tmp_path: Path, api_key: str = "test-key") -> GeminiSubtitleService:
     return GeminiSubtitleService(
-        GeminiSubtitleSettings(job_root=tmp_path, model="auto")
+        GeminiSubtitleSettings(job_root=tmp_path, api_key=api_key)
     )
 
 
-def test_subprocess_forces_utf8_for_vietnamese_output(tmp_path: Path) -> None:
-    result = _service(tmp_path)._run_command(
-        [
-            sys.executable,
-            "-c",
-            "import sys; print(sys.stdout.encoding); print('Đang tạo phụ đề tiếng Việt')",
-        ],
-        cwd=tmp_path,
-        cancel_event=threading.Event(),
-    )
-
-    assert result.stdout.splitlines() == ["utf-8", "Đang tạo phụ đề tiếng Việt"]
+def test_status_no_api_key(tmp_path: Path) -> None:
+    svc = GeminiSubtitleService(GeminiSubtitleSettings(job_root=tmp_path, api_key=None))
+    st = svc.status()
+    assert st["authenticated"] is False
+    assert st["issue"] == "no_api_key"
+    assert st["provider"] == "api_direct"
 
 
-def test_extract_and_offset_gemini_response(tmp_path: Path) -> None:
-    response = json.dumps(
-        {
-            "response": json.dumps(
-                {
-                    "schema_version": 2,
-                    "language": "vi",
-                    "timebase": "milliseconds",
-                    "timing_source": "gemini_estimate",
-                    "timing_precision_ms": 100,
-                    "segments": [],
-                }
-            ),
-            "stats": {"models": {"auto": {"requests": 1}}},
-        }
-    )
-    content, envelope = _service(tmp_path)._extract_response(response)
+def test_status_with_api_key(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    st = svc.status()
+    assert st["authenticated"] is True
+    assert st["auth_method"] == "gemini_api_key"
+    assert st["provider"] == "api_direct"
+    assert st["model"] == "gemini-3.6-flash"
+
+
+def test_offset_cues(tmp_path: Path) -> None:
     shifted = _service(tmp_path)._offset_cues(
         [
             {
                 "id": "g1",
                 "start_ms": 200,
                 "end_ms": 1200,
-                "text": "Xin chào",
+                "text": "Xin chao",
                 "timing_source": "gemini_estimate",
                 "timing_precision_ms": 100,
             }
@@ -69,108 +58,382 @@ def test_extract_and_offset_gemini_response(tmp_path: Path) -> None:
         duration_ms=5000,
         existing_count=2,
     )
-
-    assert json.loads(content)["schema_version"] == 2
-    assert envelope["stats"]["models"]
     assert shifted[0]["id"] == "gm-0003-3200"
     assert shifted[0]["start_ms"] == 3200
     assert shifted[0]["end_ms"] == 4200
 
 
-def test_unsupported_consumer_oauth_error_is_safe_and_actionable(tmp_path: Path) -> None:
-    service = _service(tmp_path)
-    raw_error = """
-Error authenticating: IneligibleTierError: This client is no longer supported for Gemini Code Assist for individuals.
-reasonCode: UNSUPPORTED_CLIENT
-    at throwIneligibleOrProjectIdError (file:///C:/Users/vhc/AppData/Roaming/npm/node_modules/gemini.js:309966:11)
-Ripgrep is not available. Falling back to GrepTool.
-An unexpected critical error occurred: IneligibleTierError
-"""
-
-    message = service._friendly_cli_error("", raw_error)
-
-    assert "không còn hỗ trợ" in message
-    assert "GEMINI_API_KEY" in message
-    assert "file:///" not in message
-    assert "Ripgrep" not in message
-    assert "node_modules" not in message
+def test_prompt_bilingual_has_secondary_text(tmp_path: Path) -> None:
+    svc = _service(tmp_path)
+    prompt_bi = svc._build_prompt(bilingual=True, chunk_index=1, chunk_count=1, chunk_duration_ms=60000)
+    prompt_vi = svc._build_prompt(bilingual=False, chunk_index=1, chunk_count=1, chunk_duration_ms=60000)
+    assert "secondary_text" in prompt_bi
+    assert "secondary_text" not in prompt_vi
 
 
-def test_extract_response_sanitizes_zero_exit_error_envelope(tmp_path: Path) -> None:
-    service = _service(tmp_path)
-    output = json.dumps(
-        {
-            "error": {
-                "name": "IneligibleTierError",
-                "reasonCode": "UNSUPPORTED_CLIENT",
-                "message": "This client is no longer supported for Gemini Code Assist for individuals",
-            }
-        }
-    )
+def test_generate_content_retries_on_429(tmp_path: Path) -> None:
+    svc = _service(tmp_path, api_key="fake-key")
+    attempts = []
+    status_messages: list[str] = []
 
-    try:
-        service._extract_response(output)
-    except Exception as exc:
-        message = str(exc)
-    else:
-        raise AssertionError("Expected the error envelope to fail")
-
-    assert "GEMINI_API_KEY" in message
-    assert "reasonCode" not in message
-
-
-def test_api_key_uses_workspace_auth_override_without_mutating_global_profile(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    service = GeminiSubtitleService(
-        GeminiSubtitleSettings(job_root=tmp_path, api_key="test-api-key")
-    )
-    captured: dict[str, object] = {}
-
-    def fake_run_command(command, *, cwd, cancel_event, env_overrides=None, **_kwargs):
-        captured["command"] = command
-        captured["cwd"] = cwd
-        captured["env_overrides"] = env_overrides
-        return CommandResult(
-            0,
-            json.dumps({"response": "{}"}),
-            "",
+    def mock_send(request, **kwargs):
+        attempts.append(request)
+        if len(attempts) < 3:
+            return httpx.Response(429, json={"error": {"message": "Rate limit"}})
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": '{"schema_version": 2, "language": "vi", "timebase": "milliseconds", "timing_source": "gemini_estimate", "timing_precision_ms": 100, "segments": []}'}]
+                        },
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
         )
 
-    monkeypatch.setattr(service, "_run_command", fake_run_command)
-    service._run_gemini(
-        tmp_path,
-        prompt="prompt",
-        cancel_event=threading.Event(),
-    )
+    transport = httpx.MockTransport(mock_send)
+    with (
+        mock.patch.object(svc, "_client", lambda: httpx.Client(transport=transport, base_url="https://generativelanguage.googleapis.com")),
+        mock.patch("app.services.gemini_subtitles._interruptible_sleep", return_value=None),
+    ):
+        result = svc._generate_content(
+            "files/test123",
+            "test prompt",
+            cancel_event=threading.Event(),
+            status_callback=status_messages.append,
+        )
+    assert len(attempts) == 3
+    assert "schema_version" in result
+    assert len(status_messages) == 2
+    assert "HTTP 429" in status_messages[0]
+    assert "Rate limit" in status_messages[0]
+    assert "thử lại sau 30s (1/5)" in status_messages[0]
+    assert "thử lại sau 60s (2/5)" in status_messages[1]
 
-    auth_settings = json.loads(
-        (tmp_path / ".gemini" / "settings.json").read_text(encoding="utf-8")
-    )
-    assert auth_settings["security"]["auth"]["selectedType"] == "gemini-api-key"
-    assert captured["env_overrides"] == {"GEMINI_API_KEY": "test-api-key"}
+
+def test_generate_retry_status_distinguishes_5xx_from_rate_limit(tmp_path: Path) -> None:
+    svc = _service(tmp_path, api_key="fake-key")
+    attempts = 0
+    status_messages: list[str] = []
+
+    def mock_send(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                503,
+                json={"error": {"message": "Model is overloaded"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"parts": [{"text": "{}"}]}, "finishReason": "STOP"}
+                ]
+            },
+        )
+
+    with (
+        mock.patch.object(
+            svc,
+            "_client",
+            lambda: httpx.Client(
+                transport=httpx.MockTransport(mock_send),
+                base_url="https://generativelanguage.googleapis.com",
+            ),
+        ),
+        mock.patch("app.services.gemini_subtitles._interruptible_sleep", return_value=None),
+    ):
+        svc._generate_content(
+            "files/test123",
+            "test prompt",
+            cancel_event=threading.Event(),
+            status_callback=status_messages.append,
+        )
+
+    assert len(status_messages) == 1
+    assert "HTTP 503" in status_messages[0]
+    assert "Model is overloaded" in status_messages[0]
+    assert "HTTP 429" not in status_messages[0]
 
 
-def test_prompt_only_requests_secondary_text_for_bilingual_mode(
+@pytest.mark.parametrize(
+    ("error_type", "expected_message"),
+    [
+        (httpx.ReadTimeout, "Hết thời gian chờ Gemini khi phân tích video"),
+        (httpx.ConnectError, "Mất kết nối tới Gemini khi phân tích video"),
+    ],
+)
+def test_generate_retry_status_distinguishes_timeout_and_connection_error(
     tmp_path: Path,
+    error_type: type[httpx.TransportError],
+    expected_message: str,
 ) -> None:
-    service = _service(tmp_path)
+    svc = _service(tmp_path, api_key="fake-key")
+    attempts = 0
+    status_messages: list[str] = []
 
-    bilingual_prompt = service._prompt(
-        bilingual=True,
-        chunk_index=1,
-        chunk_count=1,
-    )
-    vietnamese_only_prompt = service._prompt(
-        bilingual=False,
-        chunk_index=1,
-        chunk_count=1,
-    )
+    def mock_send(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise error_type("temporary failure", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"parts": [{"text": "{}"}]}, "finishReason": "STOP"}
+                ]
+            },
+        )
 
-    assert '"secondary_text"' in bilingual_prompt
-    assert '"secondary_text"' not in vietnamese_only_prompt
-    assert "Không thêm secondary_text." in vietnamese_only_prompt
+    with (
+        mock.patch.object(
+            svc,
+            "_client",
+            lambda: httpx.Client(
+                transport=httpx.MockTransport(mock_send),
+                base_url="https://generativelanguage.googleapis.com",
+            ),
+        ),
+        mock.patch("app.services.gemini_subtitles._interruptible_sleep", return_value=None),
+    ):
+        svc._generate_content(
+            "files/test123",
+            "test prompt",
+            cancel_event=threading.Event(),
+            status_callback=status_messages.append,
+        )
+
+    assert status_messages == [f"{expected_message}; thử lại sau 30s (1/5)"]
+
+
+def test_gemini_uses_api_key_header_and_not_query_parameter(tmp_path: Path) -> None:
+    svc = _service(tmp_path, api_key="header-key")
+    requests: list[httpx.Request] = []
+
+    def mock_send(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"parts": [{"text": "{}"}]}, "finishReason": "STOP"}
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(mock_send)
+    with mock.patch.object(
+        svc,
+        "_client",
+        lambda: httpx.Client(
+            transport=transport,
+            base_url="https://generativelanguage.googleapis.com",
+        ),
+    ):
+        svc._generate_content(
+            "files/test123",
+            "test prompt",
+            cancel_event=threading.Event(),
+            model="gemini-3.6-flash",
+        )
+
+    assert requests[0].headers["x-goog-api-key"] == "header-key"
+    assert "key" not in requests[0].url.query.decode()
+    assert requests[0].url.path.endswith("/models/gemini-3.6-flash:generateContent")
+
+
+def test_list_models_uses_header_and_filters_generation_models(tmp_path: Path) -> None:
+    svc = _service(tmp_path, api_key="list-key")
+    requests: list[httpx.Request] = []
+
+    def mock_send(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "name": "models/gemini-3.6-flash",
+                        "baseModelId": "gemini-3.6-flash",
+                        "displayName": "Gemini 3.6 Flash",
+                        "description": "Fast multimodal model",
+                        "supportedGenerationMethods": ["generateContent"],
+                        "inputTokenLimit": 1_000_000,
+                        "outputTokenLimit": 65_536,
+                    },
+                    {
+                        "name": "models/text-embedding-005",
+                        "baseModelId": "text-embedding-005",
+                        "supportedGenerationMethods": ["embedContent"],
+                    },
+                ]
+            },
+        )
+
+    with mock.patch.object(
+        svc,
+        "_client",
+        lambda: httpx.Client(
+            transport=httpx.MockTransport(mock_send),
+            base_url="https://generativelanguage.googleapis.com",
+        ),
+    ):
+        models = svc.list_models()
+
+    assert len(requests) == 1
+    assert requests[0].headers["x-goog-api-key"] == "list-key"
+    assert "key" not in requests[0].url.query.decode()
+    assert [model["id"] for model in models] == ["gemini-3.6-flash"]
+    assert models[0]["display_name"] == "Gemini 3.6 Flash"
+
+
+def test_upload_streams_proxy_file_and_reuses_api_key_header(tmp_path: Path) -> None:
+    svc = _service(tmp_path, api_key="upload-key")
+    proxy = tmp_path / "proxy.mp4"
+    proxy.write_bytes(b"proxy-bytes")
+    uploads: list[bytes] = []
+
+    def mock_send(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/upload/v1beta/files":
+            return httpx.Response(
+                200,
+                headers={"X-Goog-Upload-URL": "https://upload.test/finalize"},
+            )
+        if request.url.host == "upload.test":
+            uploads.append(request.read())
+            return httpx.Response(200, json={"file": {"name": "files/test123"}})
+        return httpx.Response(200, json={"state": "ACTIVE"})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(mock_send),
+        base_url="https://generativelanguage.googleapis.com",
+    )
+    try:
+        file_name = svc._upload_file(
+            proxy,
+            cancel_event=threading.Event(),
+            client=client,
+            api_key="upload-key",
+        )
+    finally:
+        client.close()
+
+    assert file_name == "files/test123"
+    assert uploads == [b"proxy-bytes"]
+
+
+def test_upload_retry_status_reports_operation_and_http_code(tmp_path: Path) -> None:
+    svc = _service(tmp_path, api_key="upload-key")
+    proxy = tmp_path / "proxy.mp4"
+    proxy.write_bytes(b"proxy-bytes")
+    init_attempts = 0
+    status_messages: list[str] = []
+
+    def mock_send(request: httpx.Request) -> httpx.Response:
+        nonlocal init_attempts
+        if request.url.path == "/upload/v1beta/files":
+            init_attempts += 1
+            if init_attempts == 1:
+                return httpx.Response(
+                    429,
+                    json={"error": {"message": "Upload quota exceeded"}},
+                )
+            return httpx.Response(
+                200,
+                headers={"X-Goog-Upload-URL": "https://upload.test/finalize"},
+            )
+        if request.url.host == "upload.test":
+            return httpx.Response(200, json={"file": {"name": "files/test123"}})
+        return httpx.Response(200, json={"state": "ACTIVE"})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(mock_send),
+        base_url="https://generativelanguage.googleapis.com",
+    )
+    try:
+        with mock.patch(
+            "app.services.gemini_subtitles._interruptible_sleep",
+            return_value=None,
+        ):
+            svc._upload_file(
+                proxy,
+                cancel_event=threading.Event(),
+                status_callback=status_messages.append,
+                client=client,
+                api_key="upload-key",
+            )
+    finally:
+        client.close()
+
+    assert status_messages == [
+        (
+            "Gemini giới hạn tốc độ/quota (HTTP 429) khi khởi tạo upload: "
+            "Upload quota exceeded; thử lại sau 30s (1/5)"
+        )
+    ]
+
+
+def test_remote_cleanup_failure_is_reported_as_warning(tmp_path: Path, monkeypatch) -> None:
+    svc = _service(tmp_path, api_key="header-key")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fixture")
+    media = {"duration_ms": 5000, "audio_hash": "a" * 64, "fingerprint": "b" * 64}
+    context = SimpleNamespace(
+        job_id="job001",
+        cancel_event=threading.Event(),
+        raise_if_canceled=lambda: None,
+        update=lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(svc, "_upload_file", lambda *args, **kwargs: "files/test123")
+    monkeypatch.setattr(
+        svc,
+        "_generate_content",
+        lambda *args, **kwargs: '{"schema_version":2,"language":"vi","timebase":"milliseconds","timing_source":"gemini_estimate","timing_precision_ms":100,"segments":[{"id":"g1","start_ms":0,"end_ms":1000,"text":"Xin chao"}]}',
+    )
+    monkeypatch.setattr(svc, "_delete_file", lambda *args, **kwargs: False)
+
+    result = svc.generate(video, media, {}, context)
+
+    assert any(warning["code"] == "gemini_remote_cleanup_failed" for warning in result["warnings"])
+
+
+def test_generate_raises_after_max_retries(tmp_path: Path) -> None:
+    svc = _service(tmp_path, api_key="fake-key")
+
+    def always_429(request, **kwargs):
+        return httpx.Response(429, json={"error": {"message": "Rate limit"}})
+
+    transport = httpx.MockTransport(always_429)
+    with (
+        mock.patch.object(svc, "_client", lambda: httpx.Client(transport=transport, base_url="https://generativelanguage.googleapis.com")),
+        mock.patch("app.services.gemini_subtitles._interruptible_sleep", return_value=None),
+        pytest.raises(GeminiSubtitleError, match="HTTP 429"),
+    ):
+        svc._generate_content(
+            "files/test123",
+            "test prompt",
+            cancel_event=threading.Event(),
+        )
+
+
+def test_generate_raises_on_missing_api_key(tmp_path: Path) -> None:
+    svc = GeminiSubtitleService(GeminiSubtitleSettings(job_root=tmp_path, api_key=None))
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fixture")
+    media = {"duration_ms": 5000, "audio_hash": "a" * 64, "fingerprint": "b" * 64}
+    ctx = SimpleNamespace(
+        job_id="job001",
+        cancel_event=threading.Event(),
+        raise_if_canceled=lambda: None,
+        update=lambda *a, **kw: None,
+    )
+    with pytest.raises(GeminiSubtitleError, match="API key"):
+        svc.generate(video, media, {}, ctx)
 
 
 def test_gemini_endpoint_runs_as_separate_attachable_job(
@@ -191,7 +454,7 @@ def test_gemini_endpoint_runs_as_separate_attachable_job(
     monkeypatch.setattr(main, "probe_media_cached", lambda *_args, **_kwargs: media)
 
     def fake_generate(_path, _media, _options, context):
-        context.update(70, "gemini_analyzing", "Gemini Pro đang xem video")
+        context.update(70, "gemini_analyzing", "Gemini dang xem video")
         return {
             "document": {
                 "schema_version": 2,
@@ -204,8 +467,8 @@ def test_gemini_endpoint_runs_as_separate_attachable_job(
             "warnings": [],
             "srt": "",
             "segment_count": 0,
-            "provider": "gemini_cli",
-            "model": "auto",
+            "provider": "gemini_api",
+            "model": "gemini-3.6-flash",
             "chunk_count": 1,
         }
 
@@ -232,5 +495,5 @@ def test_gemini_endpoint_runs_as_separate_attachable_job(
     validated = SubtitleJobResponse(**completed)
     assert validated.state == "succeeded"
     assert validated.result is not None
-    assert validated.result["provider"] == "gemini_cli"
+    assert validated.result["provider"] == "gemini_api"
     manager.shutdown()

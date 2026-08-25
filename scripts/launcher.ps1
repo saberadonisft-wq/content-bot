@@ -2,11 +2,11 @@
 
 <##
     Foreground Content Bot process launcher.
-    Use the "Content Bot: Start" VS Code task to run backend and frontend together.
+    Use the "Content Bot: Start" VS Code task to run Auth Server, backend and frontend together.
 ##>
 
 param(
-    [ValidateSet("backend", "frontend", "doctor", "setup-mediacrawler", "setup-subtitles", "update", "rollback")]
+    [ValidateSet("auth", "backend", "frontend", "desktop", "doctor", "setup-mediacrawler", "setup-subtitles", "update", "rollback")]
     [string]$Action = "backend",
     [ValidateSet("tiny", "base", "small", "medium", "large-v3")]
     [string]$SubtitleModel = "small",
@@ -15,6 +15,8 @@ param(
     [int]$BackendPort = 8000,
     [ValidateRange(1024, 65535)]
     [int]$FrontendPort = 5173,
+    [ValidateRange(1024, 65535)]
+    [int]$AuthPort = 8080,
     [string]$AuthServerUrl = "",
     [switch]$SkipUpdateCheck,
     [switch]$ForceUpdate
@@ -218,6 +220,29 @@ function Initialize-BackendEnvironment {
     }
 }
 
+function Initialize-AuthServerEnvironment {
+    $python = "auth-server\.venv\Scripts\python.exe"
+    $dependencyFile = "auth-server\requirements.txt"
+    $stampFile = "auth-server\.venv\.content-bot-dependencies"
+    $dependencyHash = (Get-FileHash -LiteralPath $dependencyFile -Algorithm SHA256).Hash
+    $installedHash = if (Test-Path -LiteralPath $stampFile) {
+        (Get-Content -LiteralPath $stampFile -Raw).Trim()
+    } else {
+        ""
+    }
+    if (-not (Test-Path -LiteralPath $python)) {
+        Write-Host "Creating the Auth Server virtual environment..."
+        python -m venv auth-server\.venv
+        if ($LASTEXITCODE -ne 0) { throw "Unable to create the Auth Server environment." }
+    }
+    if ($installedHash -ne $dependencyHash) {
+        Write-Host "Installing changed Auth Server dependencies..."
+        & $python -m pip install -r $dependencyFile
+        if ($LASTEXITCODE -ne 0) { throw "Unable to install Auth Server dependencies." }
+        Set-Content -LiteralPath $stampFile -Value $dependencyHash -Encoding ascii
+    }
+}
+
 function Initialize-FrontendEnvironment {
     $dependencyFile = "frontend\package-lock.json"
     $stampFile = "frontend\node_modules\.content-bot-dependencies"
@@ -230,10 +255,25 @@ function Initialize-FrontendEnvironment {
     if (-not (Test-Path "frontend\node_modules") -or $installedHash -ne $dependencyHash) {
         Write-Host "Installing changed frontend dependencies..."
         Push-Location frontend
-        npm ci
-        $installExitCode = $LASTEXITCODE
-        Pop-Location
+        try {
+            # Keep the existing development tree and install only lockfile changes.
+            # `npm ci` removes every package first, which is unnecessarily slow here
+            # and can fail while the Electron development process is still closing.
+            npm install --prefer-offline --no-audit --no-fund
+            $installExitCode = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
         if ($installExitCode -ne 0) { throw "Unable to install frontend dependencies." }
+        $electronExecutable = "frontend\node_modules\electron\dist\electron.exe"
+        $electronInstaller = "frontend\node_modules\electron\install.js"
+        if (-not (Test-Path -LiteralPath $electronExecutable) -and (Test-Path -LiteralPath $electronInstaller)) {
+            Write-Host "Completing the Electron runtime download..."
+            & node $electronInstaller
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $electronExecutable)) {
+                throw "Unable to install the Electron desktop runtime."
+            }
+        }
         Set-Content -LiteralPath $stampFile -Value $dependencyHash -Encoding ascii
     }
 }
@@ -244,13 +284,36 @@ function Invoke-Backend {
     }
     Initialize-BackendEnvironment
     Write-Host "Starting Content Bot backend in the foreground at http://127.0.0.1:$BackendPort"
-    & backend\.venv\Scripts\python.exe -u -m uvicorn app.main:app `
-        --app-dir backend `
-        --host 127.0.0.1 `
-        --port $BackendPort `
-        --reload `
-        --reload-dir backend\app
+    $backendArguments = @(
+        "-u", "-m", "uvicorn", "app.main:app",
+        "--app-dir", "backend",
+        "--host", "127.0.0.1",
+        "--port", "$BackendPort"
+    )
+    if ($env:OS -eq "Windows_NT") {
+        # Uvicorn's reload supervisor forces SelectorEventLoop on Windows.
+        # Playwright needs ProactorEventLoop to launch the owned Cốc Cốc process.
+        Write-Host "Windows Live Wall mode: backend auto-reload is disabled."
+    } else {
+        $backendArguments += @("--reload", "--reload-dir", "backend\app")
+    }
+    & backend\.venv\Scripts\python.exe @backendArguments
     if ($LASTEXITCODE -ne 0) { throw "Backend stopped with code $LASTEXITCODE." }
+}
+
+function Invoke-AuthServer {
+    if (Test-LocalListener $AuthPort) {
+        throw "Port $AuthPort is already in use. Stop the existing Auth Server before starting this VS Code task."
+    }
+    Initialize-AuthServerEnvironment
+    Write-Host "Starting Content Bot auth server in the foreground at http://127.0.0.1:$AuthPort"
+    & auth-server\.venv\Scripts\python.exe -u -m uvicorn app.main:app `
+        --app-dir auth-server `
+        --host 127.0.0.1 `
+        --port $AuthPort `
+        --reload `
+        --reload-dir auth-server\app
+    if ($LASTEXITCODE -ne 0) { throw "Auth Server stopped with code $LASTEXITCODE." }
 }
 
 function Invoke-Frontend {
@@ -260,10 +323,29 @@ function Invoke-Frontend {
     Initialize-FrontendEnvironment
     Write-Host "Starting Content Bot frontend in the foreground at http://127.0.0.1:$FrontendPort"
     Push-Location frontend
-    npm run dev -- --host 127.0.0.1 --port $FrontendPort --strictPort
-    $frontendExitCode = $LASTEXITCODE
-    Pop-Location
+    try {
+        npm run dev -- --host 127.0.0.1 --port $FrontendPort --strictPort
+        $frontendExitCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
     if ($frontendExitCode -ne 0) { throw "Frontend stopped with code $frontendExitCode." }
+}
+
+function Invoke-Desktop {
+    Initialize-AuthServerEnvironment
+    Initialize-BackendEnvironment
+    Initialize-FrontendEnvironment
+    Write-Host "Starting Content Bot Desktop development mode."
+    Write-Host "React updates reload immediately; desktop process files restart Electron automatically."
+    Push-Location frontend
+    try {
+        npm run desktop:dev
+        $desktopExitCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if ($desktopExitCode -ne 0) { throw "Desktop development mode stopped with code $desktopExitCode." }
 }
 
 function Invoke-Doctor([switch]$Json, [switch]$Deep, [switch]$Save) {
@@ -423,11 +505,13 @@ function Invoke-SetupSubtitles([string]$Model, [switch]$DownloadModel) {
 
 try {
     switch ($Action) {
+        "auth" { Invoke-AuthServer }
         "backend" {
             Invoke-SelfUpdate
             Invoke-Backend
         }
         "frontend" { Invoke-Frontend }
+        "desktop" { Invoke-Desktop }
         "doctor" { Invoke-Doctor -Json:$Json -Deep:$Deep -Save:$Save }
         "setup-mediacrawler" { Invoke-SetupMediaCrawler }
         "setup-subtitles" { Invoke-SetupSubtitles -Model $SubtitleModel -DownloadModel:$DownloadSubtitleModel }

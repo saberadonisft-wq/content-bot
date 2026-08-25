@@ -11,6 +11,7 @@ from ..crawlers import SOURCE_REGISTRY
 from ..crawlers.contracts import Operation, SchedulePolicy
 from ..crawlers.runtime import CrawlerErrorCode, CrawlerFailure
 from ..mongo import MongoStore, store
+from ..sqlite_store import SQLiteStore
 from .cbce_runtime import cbce_provider_rollout_status
 from .channel_scans import ChannelUnavailable, channel_mode, scan_channel
 from .checkpoints import (
@@ -29,7 +30,9 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def next_scheduled_time(previous: datetime, interval_minutes: int, now: datetime) -> datetime:
+def next_scheduled_time(
+    previous: datetime, interval_minutes: int, now: datetime
+) -> datetime:
     previous = previous if previous.tzinfo else previous.replace(tzinfo=UTC)
     now = now if now.tzinfo else now.replace(tzinfo=UTC)
     interval = timedelta(minutes=interval_minutes)
@@ -67,7 +70,7 @@ class RunManager:
         self,
         connectors: dict[str, SourceConnector],
         events: EventBus,
-        storage: MongoStore | None = None,
+        storage: MongoStore | SQLiteStore | None = None,
     ) -> None:
         self.connectors = connectors
         self.events = events
@@ -149,15 +152,18 @@ class RunManager:
         keyword = await self._store_call(self.store.keyword, keyword_id)
         if not keyword:
             raise ValueError("Keyword not found")
-        legacy_channel_only = bool(keyword.get("channels")) and keyword.get(
-            "source_selection_version", 1
-        ) < 2
+        legacy_channel_only = (
+            bool(keyword.get("channels"))
+            and keyword.get("source_selection_version", 1) < 2
+        )
 
         def capability(source_id: str, operation: str, channel: dict | None) -> bool:
             manifest = SOURCE_REGISTRY.get(source_id)
             if manifest is not None:
                 requested = (
-                    Operation.SEARCH if operation == "search" else Operation.SCAN_CHANNEL
+                    Operation.SEARCH
+                    if operation == "search"
+                    else Operation.SCAN_CHANNEL
                 )
                 if not SOURCE_REGISTRY.executable(source_id, requested):
                     return False
@@ -183,7 +189,9 @@ class RunManager:
             if operation == "search":
                 return connector.capabilities.global_search
             return (channel or {}).get("mode") not in {
-                "embed_only", "manual", "setup_required",
+                "embed_only",
+                "manual",
+                "setup_required",
             }
 
         normalized_channels = [
@@ -196,9 +204,7 @@ class RunManager:
         configured_sources = [
             SOURCE_REGISTRY.resolve_id(source_id)
             for source_id in keyword.get("source_ids", [])
-        ] or (
-            [] if keyword.get("channels") else list(self.connectors)
-        )
+        ] or ([] if keyword.get("channels") else list(self.connectors))
         selected_source_ids = (
             None
             if source_ids is None
@@ -252,8 +258,9 @@ class RunManager:
                     "state": "queued",
                     "checkpoint": dict(
                         (
-                            channels_by_id.get(str(target.get("channel_id")), {})
-                            .get("checkpoint", {})
+                            channels_by_id.get(str(target.get("channel_id")), {}).get(
+                                "checkpoint", {}
+                            )
                         )
                         if target.get("channel_id")
                         else source_checkpoints.get(target["source_id"], {}).get(
@@ -275,7 +282,9 @@ class RunManager:
                 for target in run_targets
             ],
         )
-        task = asyncio.create_task(self._execute_batch(batch_id), name=f"crawl-batch-{batch_id}")
+        task = asyncio.create_task(
+            self._execute_batch(batch_id), name=f"crawl-batch-{batch_id}"
+        )
         self._tasks[batch_id] = task
         task.add_done_callback(lambda completed: self._forget_task(batch_id, completed))
         return batch_id
@@ -291,14 +300,21 @@ class RunManager:
         if not batch:
             return
         await self._store_call(
-            self.store.update_batch, batch_id, {"state": "running", "started_at": utcnow()}
+            self.store.update_batch,
+            batch_id,
+            {"state": "running", "started_at": utcnow()},
         )
         source_run_ids = [row["id"] for row in batch["source_runs"]]
-        await self.events.publish({"type": "batch", "batch_id": batch_id, "state": "running"})
+        await self.events.publish(
+            {"type": "batch", "batch_id": batch_id, "state": "running"}
+        )
         cancel_requested = False
         try:
             await asyncio.gather(
-                *(self._execute_source_run(source_run_id) for source_run_id in source_run_ids),
+                *(
+                    self._execute_source_run(source_run_id)
+                    for source_run_id in source_run_ids
+                ),
                 return_exceptions=True,
             )
         except asyncio.CancelledError:
@@ -311,7 +327,12 @@ class RunManager:
                     await self._store_call(
                         self.store.update_source_run,
                         source_run["id"],
-                        {"state": "cancelled", "phase": "cancelled", "finished_at": now, "heartbeat_at": now},
+                        {
+                            "state": "cancelled",
+                            "phase": "cancelled",
+                            "finished_at": now,
+                            "heartbeat_at": now,
+                        },
                     )
                     source_run["state"] = "cancelled"
         states = [row["state"] for row in source_runs]
@@ -337,7 +358,9 @@ class RunManager:
             },
         )
         await self._store_call(self.store.prune_sessions, batch["keyword_id"], 5)
-        await self.events.publish({"type": "batch", "batch_id": batch_id, "state": final_state})
+        await self.events.publish(
+            {"type": "batch", "batch_id": batch_id, "state": final_state}
+        )
 
     async def _execute_source_run(self, source_run_id: str) -> None:
         source_run = await self._store_call(self.store.source_run, source_run_id)
@@ -345,7 +368,11 @@ class RunManager:
             return
         batch_id = source_run["batch_id"]
         batch = await self._store_call(self.store.batch, batch_id)
-        keyword = await self._store_call(self.store.keyword, batch["keyword_id"]) if batch else None
+        keyword = (
+            await self._store_call(self.store.keyword, batch["keyword_id"])
+            if batch
+            else None
+        )
         if not keyword:
             await self._set_source_progress(
                 source_run_id,
@@ -367,9 +394,7 @@ class RunManager:
         requested_max_items = keyword.get("max_items_per_source", 500)
         max_items = requested_max_items
         uses_browser = connector.capabilities.requires_login
-        requested_operation = (
-            Operation.SCAN_CHANNEL if channel else Operation.SEARCH
-        )
+        requested_operation = Operation.SCAN_CHANNEL if channel else Operation.SEARCH
         preferred_provider_id = getattr(
             getattr(connector, "spec", None), "provider_id", None
         )
@@ -429,20 +454,29 @@ class RunManager:
             if selected_provider
             else not connector.capabilities.requires_login
         )
-        if (
-            not channel
-            and batch["trigger"] == "schedule"
-            and not background_safe
-        ):
+        if not channel and batch["trigger"] == "schedule" and not background_safe:
             detail = "Scheduled runs never open login-gated sources. Run this source manually when you can complete login."
             now = utcnow()
             await self._store_call(
                 self.store.update_source_run,
                 source_run_id,
-                {"state": "skipped", "phase": "skipped", "message": detail, "error_message": detail, "finished_at": now, "heartbeat_at": now},
+                {
+                    "state": "skipped",
+                    "phase": "skipped",
+                    "message": detail,
+                    "error_message": detail,
+                    "finished_at": now,
+                    "heartbeat_at": now,
+                },
             )
             await self.events.publish(
-                {"type": "source-run", "batch_id": batch_id, "source_run_id": source_run_id, "state": "skipped", "detail": detail}
+                {
+                    "type": "source-run",
+                    "batch_id": batch_id,
+                    "source_run_id": source_run_id,
+                    "state": "skipped",
+                    "detail": detail,
+                }
             )
             return
         await self._set_source_progress(
@@ -459,19 +493,40 @@ class RunManager:
             await self._store_call(
                 self.store.update_source_run,
                 source_run_id,
-                {"state": "skipped", "phase": "skipped", "message": status.detail, "error_message": status.detail, "finished_at": now, "heartbeat_at": now},
+                {
+                    "state": "skipped",
+                    "phase": "skipped",
+                    "message": status.detail,
+                    "error_message": status.detail,
+                    "finished_at": now,
+                    "heartbeat_at": now,
+                },
             )
             await self.events.publish(
-                {"type": "source-run", "batch_id": batch_id, "source_run_id": source_run_id, "state": "skipped", "detail": status.detail}
+                {
+                    "type": "source-run",
+                    "batch_id": batch_id,
+                    "source_run_id": source_run_id,
+                    "state": "skipped",
+                    "detail": status.detail,
+                }
             )
             return
         started_at = utcnow()
         await self._store_call(
             self.store.update_source_run,
             source_run_id,
-            {"state": "running", "phase": "starting", "started_at": started_at, "message": "Starting scan", "heartbeat_at": started_at},
+            {
+                "state": "running",
+                "phase": "starting",
+                "started_at": started_at,
+                "message": "Starting scan",
+                "heartbeat_at": started_at,
+            },
         )
-        include_terms = clean_terms([keyword["name"], *keyword.get("include_terms", [])])
+        include_terms = clean_terms(
+            [keyword["name"], *keyword.get("include_terms", [])]
+        )
         exclude_terms = clean_terms(keyword.get("exclude_terms", []))
         semaphore = self._browser_semaphore if uses_browser else self._semaphore
         fetched_count = 0
@@ -488,7 +543,10 @@ class RunManager:
             operation=operation_name,
             terms=include_terms,
             target=(
-                {"kind": "channel", "url": channel.get("normalized_url") or channel.get("url")}
+                {
+                    "kind": "channel",
+                    "url": channel.get("normalized_url") or channel.get("url"),
+                }
                 if channel
                 else {"kind": "keyword"}
             ),
@@ -569,9 +627,7 @@ class RunManager:
                 browser_state="authenticated",
             )
 
-        query.progress_callback = (
-            on_connector_progress if uses_browser else None
-        )
+        query.progress_callback = on_connector_progress if uses_browser else None
 
         async def on_connector_warning(code: str, detail: str) -> None:
             message = f"{code}: {detail}"[:500]
@@ -637,10 +693,18 @@ class RunManager:
                             progress_mode="determinate",
                             progress_current=fetched_count,
                             progress_total=max_items,
-                            progress_percent=round(min(fetched_count / max_items * 100, 99), 1),
+                            progress_percent=round(
+                                min(fetched_count / max_items * 100, 99), 1
+                            ),
                             browser_state="authenticated",
                         )
-                    accepted = await self._ingest(source_run_id, keyword["id"], query.include_terms, exclude_terms, raw_item)
+                    accepted = await self._ingest(
+                        source_run_id,
+                        keyword["id"],
+                        query.include_terms,
+                        exclude_terms,
+                        raw_item,
+                    )
                     ingested_count += int(accepted)
                     tracker.observe(raw_item.external_id, raw_item.published_at)
                     recent_id_set.add(raw_item.external_id)
@@ -654,7 +718,9 @@ class RunManager:
                             "progress_mode": "determinate",
                             "progress_current": fetched_count,
                             "progress_total": max_items,
-                            "progress_percent": round(min(fetched_count / max_items * 100, 99), 1),
+                            "progress_percent": round(
+                                min(fetched_count / max_items * 100, 99), 1
+                            ),
                             "fetched_count": fetched_count,
                             "ingested_count": ingested_count,
                             "message": f"Fetched {fetched_count}; stored {ingested_count}",
@@ -710,13 +776,26 @@ class RunManager:
                         "checkpoint": next_checkpoint,
                     },
                 )
-            await self.events.publish({"type": "source-run", "batch_id": batch_id, "source_run_id": source_run_id, "state": "succeeded"})
+            await self.events.publish(
+                {
+                    "type": "source-run",
+                    "batch_id": batch_id,
+                    "source_run_id": source_run_id,
+                    "state": "succeeded",
+                }
+            )
         except asyncio.CancelledError:
             now = utcnow()
             await self._store_call(
                 self.store.update_source_run,
                 source_run_id,
-                {"state": "cancelled", "phase": "cancelled", "message": "Scan cancelled", "finished_at": now, "heartbeat_at": now},
+                {
+                    "state": "cancelled",
+                    "phase": "cancelled",
+                    "message": "Scan cancelled",
+                    "finished_at": now,
+                    "heartbeat_at": now,
+                },
             )
             raise
         except ChannelUnavailable as exc:
@@ -831,8 +910,13 @@ class RunManager:
         except Exception as exc:
             raw_detail = str(exc)
             detail = raw_detail[-2000:]
-            logger.exception("Source run failed: batch=%s source_run=%s", batch_id, source_run_id)
-            browser_closed = "TargetClosedError" in raw_detail or "browser has been closed" in raw_detail.lower()
+            logger.exception(
+                "Source run failed: batch=%s source_run=%s", batch_id, source_run_id
+            )
+            browser_closed = (
+                "TargetClosedError" in raw_detail
+                or "browser has been closed" in raw_detail.lower()
+            )
             now = utcnow()
             if channel:
                 await self._store_call(
@@ -847,10 +931,27 @@ class RunManager:
             await self._store_call(
                 self.store.update_source_run,
                 source_run_id,
-                {"state": "failed", "phase": "browser_closed" if browser_closed else "failed", "message": "Cốc Cốc was closed before the scan finished." if browser_closed else "Scan failed", "error_message": detail, "finished_at": now, "heartbeat_at": now, "browser_state": "closed" if browser_closed else None},
+                {
+                    "state": "failed",
+                    "phase": "browser_closed" if browser_closed else "failed",
+                    "message": "Cốc Cốc was closed before the scan finished."
+                    if browser_closed
+                    else "Scan failed",
+                    "error_message": detail,
+                    "finished_at": now,
+                    "heartbeat_at": now,
+                    "browser_state": "closed" if browser_closed else None,
+                },
             )
             await self.events.publish(
-                {"type": "source-run", "batch_id": batch_id, "source_run_id": source_run_id, "state": "failed", "phase": "browser_closed" if browser_closed else "failed", "detail": detail[-500:]}
+                {
+                    "type": "source-run",
+                    "batch_id": batch_id,
+                    "source_run_id": source_run_id,
+                    "state": "failed",
+                    "phase": "browser_closed" if browser_closed else "failed",
+                    "detail": detail[-500:],
+                }
             )
 
     @staticmethod
@@ -892,7 +993,11 @@ class RunManager:
         )
         if accepted:
             await self.events.publish(
-                {"type": "item", "source_run_id": source_run_id, "title": raw.title[:160]}
+                {
+                    "type": "item",
+                    "source_run_id": source_run_id,
+                    "title": raw.title[:160],
+                }
             )
         return accepted
 
@@ -919,14 +1024,15 @@ class RunManager:
         existing_match = bool(
             existing_item and self.store.match(existing_item["id"], keyword_id)
         )
-        if (
-            source_run.get("channel_id")
-            and existing_item
-            and existing_match
-        ):
+        if source_run.get("channel_id") and existing_item and existing_match:
             return False
         score, reasons = relevance(
-            raw.title, raw.body_snippet, raw.hashtags, raw.author, include_terms, exclude_terms
+            raw.title,
+            raw.body_snippet,
+            raw.hashtags,
+            raw.author,
+            include_terms,
+            exclude_terms,
         )
         item = existing_item
         if score <= 0:
@@ -944,7 +1050,9 @@ class RunManager:
             "locale": raw.locale,
             "published_at": raw.published_at,
             "metrics": raw.metrics,
-            "raw_payload": json.loads(json.dumps(raw.raw_payload, ensure_ascii=False, default=str)),
+            "raw_payload": json.loads(
+                json.dumps(raw.raw_payload, ensure_ascii=False, default=str)
+            ),
             "first_seen_at": item["first_seen_at"] if item else now,
             "last_seen_at": now,
         }
@@ -956,7 +1064,9 @@ class RunManager:
                 "content_item_id": item["id"],
                 "captured_at": now,
                 "view_count": int(raw.metrics.get("view_count", 0)),
-                "like_count": int(raw.metrics.get("like_count", raw.metrics.get("reaction_count", 0))),
+                "like_count": int(
+                    raw.metrics.get("like_count", raw.metrics.get("reaction_count", 0))
+                ),
                 "comment_count": int(raw.metrics.get("comment_count", 0)),
                 "share_count": int(raw.metrics.get("share_count", 0)),
                 "favorite_count": int(raw.metrics.get("favorite_count", 0)),
@@ -986,7 +1096,10 @@ class RunManager:
     def _trend_score(self, item: dict, relevance_score: float) -> float:
         snapshots = self.store.snapshots(item["id"], descending=True, limit=2)
         current_engagement = engagement(item.get("metrics", {}))
-        source_values = [engagement(value) for value in self.store.source_metric_values(item["source_id"])]
+        source_values = [
+            engagement(value)
+            for value in self.store.source_metric_values(item["source_id"])
+        ]
         engagement_rank = percentile(source_values, current_engagement)
         recency = recency_score(item.get("published_at"))
         relevance_part = relevance_score / 100
@@ -995,8 +1108,18 @@ class RunManager:
             latest_at = latest["captured_at"]
             previous_at = previous["captured_at"]
             elapsed = max((latest_at - previous_at).total_seconds() / 3600, 0.5)
-            latest_value = latest.get("like_count", 0) + 2 * latest.get("comment_count", 0) + 3 * latest.get("share_count", 0) + 2 * latest.get("favorite_count", 0)
-            previous_value = previous.get("like_count", 0) + 2 * previous.get("comment_count", 0) + 3 * previous.get("share_count", 0) + 2 * previous.get("favorite_count", 0)
+            latest_value = (
+                latest.get("like_count", 0)
+                + 2 * latest.get("comment_count", 0)
+                + 3 * latest.get("share_count", 0)
+                + 2 * latest.get("favorite_count", 0)
+            )
+            previous_value = (
+                previous.get("like_count", 0)
+                + 2 * previous.get("comment_count", 0)
+                + 3 * previous.get("share_count", 0)
+                + 2 * previous.get("favorite_count", 0)
+            )
             velocity = max((latest_value - previous_value) / elapsed, 0)
             velocities: list[float] = []
             for content_item_id in self.store.source_item_ids(item["source_id"]):
@@ -1004,27 +1127,46 @@ class RunManager:
                 if len(pair) != 2:
                     continue
                 current, older = pair
-                hours = max((current["captured_at"] - older["captured_at"]).total_seconds() / 3600, 0.5)
-                current_value = current.get("like_count", 0) + 2 * current.get("comment_count", 0) + 3 * current.get("share_count", 0) + 2 * current.get("favorite_count", 0)
-                older_value = older.get("like_count", 0) + 2 * older.get("comment_count", 0) + 3 * older.get("share_count", 0) + 2 * older.get("favorite_count", 0)
+                hours = max(
+                    (current["captured_at"] - older["captured_at"]).total_seconds()
+                    / 3600,
+                    0.5,
+                )
+                current_value = (
+                    current.get("like_count", 0)
+                    + 2 * current.get("comment_count", 0)
+                    + 3 * current.get("share_count", 0)
+                    + 2 * current.get("favorite_count", 0)
+                )
+                older_value = (
+                    older.get("like_count", 0)
+                    + 2 * older.get("comment_count", 0)
+                    + 3 * older.get("share_count", 0)
+                    + 2 * older.get("favorite_count", 0)
+                )
                 velocities.append(max((current_value - older_value) / hours, 0))
             velocity_rank = percentile(velocities or [velocity], velocity)
-            return round(100 * (0.45 * velocity_rank + 0.25 * engagement_rank + 0.20 * recency + 0.10 * relevance_part), 2)
-        return round(100 * (0.55 * engagement_rank + 0.35 * recency + 0.10 * relevance_part), 2)
+            return round(
+                100
+                * (
+                    0.45 * velocity_rank
+                    + 0.25 * engagement_rank
+                    + 0.20 * recency
+                    + 0.10 * relevance_part
+                ),
+                2,
+            )
+        return round(
+            100 * (0.55 * engagement_rank + 0.35 * recency + 0.10 * relevance_part), 2
+        )
 
     async def scheduler_tick(self) -> None:
         now = utcnow()
-        due = await self._store_call(
-            lambda: list(
-                self.store.db.keywords.find(
-                    {"enabled": True, "next_run_at": {"$ne": None, "$lte": now}}
-                )
-            )
-        )
+        due = await self._store_call(self.store.due_keywords, now)
         for keyword in due:
             await self._store_call(
                 self.store.update_keyword,
-                keyword["_id"],
+                keyword["id"],
                 {
                     "next_run_at": next_scheduled_time(
                         keyword["next_run_at"], keyword["interval_minutes"], now
@@ -1032,7 +1174,7 @@ class RunManager:
                 },
             )
         for keyword in due:
-            await self.start_batch(keyword["_id"], trigger="schedule")
+            await self.start_batch(keyword["id"], trigger="schedule")
 
     async def cancel_batch(self, batch_id: str) -> bool:
         task = self._tasks.get(batch_id)
@@ -1071,7 +1213,12 @@ class RunManager:
             },
         )
         await self.events.publish(
-            {"type": "batch", "batch_id": batch_id, "state": "cancelled", "recovered": True}
+            {
+                "type": "batch",
+                "batch_id": batch_id,
+                "state": "cancelled",
+                "recovered": True,
+            }
         )
         return True
 
@@ -1079,17 +1226,17 @@ class RunManager:
         if days < 1:
             raise ValueError("Crawler retention days must be positive")
         cutoff = utcnow() - timedelta(days=days)
-        ids = [row["_id"] for row in self.store.db.content_items.find({"last_seen_at": {"$lt": cutoff}}, {"_id": 1})]
+        ids = self.store.content_item_ids_before(cutoff)
         for content_item_id in ids:
             self.store.delete_item(content_item_id)
         return len(ids)
 
     def cleanup_interrupted(self) -> int:
         detail = "API restarted before this run completed. Start a new manual run when ready."
-        batches = list(self.store.db.crawl_batches.find({"state": {"$in": ["queued", "running"]}}))
+        batches = self.store.batches_by_states({"queued", "running"})
         now = utcnow()
         for batch in batches:
-            runs = self.store.source_runs(batch["_id"])
+            runs = self.store.source_runs(batch["id"])
             for source_run in runs:
                 if source_run["state"] in {"queued", "running"}:
                     self.store.update_source_run(
@@ -1104,30 +1251,33 @@ class RunManager:
                         },
                     )
                     source_run["state"] = "failed"
-            state = "partial" if any(row["state"] in {"succeeded", "skipped"} for row in runs) else "failed"
+            state = (
+                "partial"
+                if any(row["state"] in {"succeeded", "skipped"} for row in runs)
+                else "failed"
+            )
             self.store.update_batch(
-                batch["_id"],
+                batch["id"],
                 {"state": state, "error_message": detail, "finished_at": now},
             )
         return len(batches)
 
     def cleanup_irrelevant(self) -> tuple[int, int]:
-        matches = list(self.store.db.item_keyword_matches.find({"relevance_score": {"$lte": 0}}))
-        candidates = {row["content_item_id"] for row in matches}
-        if matches:
-            self.store.db.item_keyword_matches.delete_many({"_id": {"$in": [row["_id"] for row in matches]}})
+        removed_matches, candidates = self.store.delete_irrelevant_matches()
         removed_items = 0
         for content_item_id in candidates:
-            if self.store.db.item_keyword_matches.find_one({"content_item_id": content_item_id}) is None:
+            if not self.store.has_matches_for_item(content_item_id):
                 self.store.delete_item(content_item_id)
                 removed_items += 1
-        return len(matches), removed_items
+        return removed_matches, removed_items
 
     def rescore_keyword(self, keyword_id: int) -> tuple[int, int]:
         keyword = self.store.keyword(keyword_id)
         if not keyword:
             return 0, 0
-        include_terms = clean_terms([keyword["name"], *keyword.get("include_terms", [])])
+        include_terms = clean_terms(
+            [keyword["name"], *keyword.get("include_terms", [])]
+        )
         exclude_terms = clean_terms(keyword.get("exclude_terms", []))
         rows = self.store.item_matches(keyword_id)
         removed = 0

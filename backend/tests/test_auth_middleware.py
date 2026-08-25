@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -10,7 +11,6 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.middleware.auth import (
-    get_current_user,
     require_admin_user,
     require_approved_user,
 )

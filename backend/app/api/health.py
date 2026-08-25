@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 from ..config import settings
-from ..mongo import MongoStore
+from ..mongo import PersistenceStore
 from ..services.runs import utcnow
 from ..version import APP_VERSION
 
+logger = logging.getLogger("content_bot.health")
+
 
 def build_health_router(
-    get_store: Callable[[], MongoStore],
+    get_store: Callable[[], PersistenceStore],
     source_count: Callable[[], int],
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1")
@@ -43,8 +46,8 @@ def build_health_router(
                 )
                 if res.status_code == 200:
                     return res.json()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Update check unavailable: %s", type(exc).__name__)
 
         return {
             "update_available": False,
@@ -55,8 +58,14 @@ def build_health_router(
 
     @router.get("/ready")
     async def ready():
-        if not await asyncio.to_thread(get_store().ping_cached):
-            raise HTTPException(status_code=503, detail="MongoDB is not ready")
-        return {"status": "ready", "time": utcnow().isoformat(), "mongo_ready": True}
+        storage = get_store()
+        if not await asyncio.to_thread(storage.ping_cached):
+            raise HTTPException(status_code=503, detail="Local database is not ready")
+        return {
+            "status": "ready",
+            "time": utcnow().isoformat(),
+            "database_ready": True,
+            "storage": storage.storage_name,
+        }
 
     return router

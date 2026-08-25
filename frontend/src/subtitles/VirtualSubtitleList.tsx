@@ -5,7 +5,8 @@ import { formatCompactTimecode, formatTimecode, snapMsToFrame } from "./time";
 import { TimecodeInput } from "./TimecodeInput";
 import type { FrameTiming, SubtitleCueV2 } from "./types";
 
-const ROW_HEIGHT = 236;
+const ROW_HEIGHT = 300;
+const ROW_GAP = 8;
 const OVERSCAN_ROWS = 2;
 
 type VirtualSubtitleListProps = {
@@ -91,7 +92,10 @@ export function VirtualSubtitleList({
               <article
                 key={cue.id}
                 className={`subtitle-cue-editor ${selected ? "is-selected" : ""}`}
-                style={{ transform: `translateY(${index * ROW_HEIGHT}px)` }}
+                style={{
+                  height: ROW_HEIGHT - ROW_GAP,
+                  transform: `translateY(${index * ROW_HEIGHT}px)`,
+                }}
                 onClick={() => onSelect(cue.id)}
               >
                 <div className="subtitle-cue-editor-head">

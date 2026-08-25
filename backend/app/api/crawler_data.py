@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from ..config import settings
 from ..crawlers import SOURCE_REGISTRY
 from ..crawlers.runtime import ProfileInUse, ProfileNamespace
-from ..mongo import MongoStore
+from ..mongo import PersistenceStore
 
 
 class CrawlerDataDeleteRequest(BaseModel):
@@ -22,7 +22,7 @@ class CrawlerDataDeleteRequest(BaseModel):
 
 
 def build_crawler_data_router(
-    get_store: Callable[[], MongoStore],
+    get_store: Callable[[], PersistenceStore],
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/crawler-data")
 

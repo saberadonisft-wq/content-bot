@@ -6,6 +6,7 @@ import type {
   SubtitleCueV2,
   SubtitleParseResultV2,
   SubtitleWarning,
+  VideoClip,
 } from "./subtitles/types";
 
 export type {
@@ -17,6 +18,7 @@ export type {
   SubtitleMaskRegion,
   SubtitleWarning,
   SubtitleWordV2,
+  VideoClip,
 } from "./subtitles/types";
 
 export const API_BASE =
@@ -124,6 +126,11 @@ export type ChannelSubscription = {
   last_status: string | null;
   last_error: string | null;
 };
+export type LiveWallSlots = 1 | 2 | 4 | 6;
+export type LiveWallConfig = {
+  channel_ids: string[];
+  slots: LiveWallSlots;
+};
 export type Keyword = {
   id: number;
   name: string;
@@ -131,12 +138,35 @@ export type Keyword = {
   exclude_terms: string[];
   source_ids: string[];
   channels: ChannelSubscription[];
+  live_wall: LiveWallConfig;
   enabled: boolean;
   interval_minutes: number;
   max_items_per_source: number;
   next_run_at: string | null;
   created_at: string;
   updated_at: string;
+};
+export type LiveWallWindowStatus = {
+  channel_id: string;
+  source_id: string;
+  label: string;
+  state: "opening" | "open" | "closed" | "failed";
+  reason_code: string | null;
+};
+export type LiveWallSessionStatus = {
+  session_id: string | null;
+  keyword_id: number | null;
+  state: "idle" | "opening" | "ready" | "partial" | "failed" | "closing";
+  owned_by_current_user: boolean;
+  reason_code: string | null;
+  detail: string;
+  windows: LiveWallWindowStatus[];
+};
+export type LiveWallDisplayBounds = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 };
 export type Item = {
   id: number;
@@ -319,17 +349,35 @@ function getAuthHeader(): Record<string, string> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...getAuthHeader(),
-      ...init?.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...getAuthHeader(),
+        ...init?.headers,
+      },
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+    throw new Error(
+      `Không thể kết nối backend tại ${API_BASE}. Hãy khởi động backend rồi thử lại.`,
+      { cause: error },
+    );
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail || `Request failed (${response.status})`);
+    const detail = body.detail;
+    throw new Error(
+      typeof detail === "string"
+        ? detail
+        : typeof detail?.message === "string"
+          ? detail.message
+          : `Request failed (${response.status})`,
+    );
   }
   return response.status === 204 ? (undefined as T) : response.json();
 }
@@ -426,13 +474,29 @@ export type SubtitleAlignmentResult = {
 
 export type GeminiSubtitleOptions = {
   bilingual?: boolean;
+  model?: string;
 };
 
-export type GeminiCliStatus = {
+export type GeminiModel = {
+  id: string;
+  display_name: string;
+  description: string;
+  input_token_limit: number | null;
+  output_token_limit: number | null;
+};
+
+export type GeminiModelsResponse = {
+  models: GeminiModel[];
+  selected_model: string;
+};
+
+export type GeminiApiStatus = {
   installed: boolean;
   authenticated: boolean;
   auth_method?: string | null;
   issue?: string | null;
+  provider?: "api_direct" | null;
+  model?: string | null;
 };
 
 export type GeminiSubtitleResult = {
@@ -441,7 +505,7 @@ export type GeminiSubtitleResult = {
   srt: string;
   segment_count: number;
   processing_seconds?: number | null;
-  provider: "gemini_cli";
+  provider: "gemini_api";
   model: string;
   chunk_count: number;
 };
@@ -478,6 +542,7 @@ export type SubtitleRenderOptionsV2 = Omit<
   trim_end_ms?: number | null;
   fade_in_ms: number;
   fade_out_ms: number;
+  video_segments: VideoClip[];
 };
 
 export type SubtitleRenderResult = {
@@ -548,7 +613,7 @@ export const api = {
     ),
   keywords: () => request<Keyword[]>("/keywords"),
   createKeyword: (
-    payload: Omit<Keyword, "id" | "created_at" | "updated_at" | "next_run_at">,
+    payload: Omit<Keyword, "id" | "created_at" | "updated_at" | "next_run_at" | "live_wall">,
   ) =>
     request<Keyword>("/keywords", {
       method: "POST",
@@ -556,7 +621,7 @@ export const api = {
     }),
   updateKeyword: (
     id: number,
-    payload: Omit<Keyword, "id" | "created_at" | "updated_at" | "next_run_at">,
+    payload: Omit<Keyword, "id" | "created_at" | "updated_at" | "next_run_at" | "live_wall">,
   ) =>
     request<Keyword>(`/keywords/${id}`, {
       method: "PATCH",
@@ -564,6 +629,29 @@ export const api = {
     }),
   deleteKeyword: (id: number) =>
     request<void>(`/keywords/${id}`, { method: "DELETE" }),
+  updateLiveWall: (keywordId: number, config: LiveWallConfig) =>
+    request<Keyword>(`/keywords/${keywordId}/live-wall`, {
+      method: "PUT",
+      body: JSON.stringify(config),
+    }),
+  liveWallStatus: (signal?: AbortSignal) =>
+    request<LiveWallSessionStatus>("/live-wall/session", { signal }),
+  openLiveWall: (
+    keywordId: number,
+    channelIds: string[],
+    display: LiveWallDisplayBounds,
+  ) =>
+    request<LiveWallSessionStatus>("/live-wall/session", {
+      method: "PUT",
+      body: JSON.stringify({ keyword_id: keywordId, channel_ids: channelIds, display }),
+    }),
+  closeLiveWall: () =>
+    request<LiveWallSessionStatus>("/live-wall/session", { method: "DELETE" }),
+  deleteLiveWallProfile: () =>
+    request<{ deleted: boolean }>("/live-wall/profile", {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation: "DELETE LIVE WALL PROFILE" }),
+    }),
   items: (keywordId: number, filters: ItemFilters = {}, signal?: AbortSignal) => {
     const params = new URLSearchParams({
       keyword_id: String(keywordId),
@@ -695,8 +783,10 @@ export const api = {
       body: JSON.stringify({ video_id: videoId, options }),
       signal,
     }),
-  geminiCliStatus: (signal?: AbortSignal) =>
-    request<GeminiCliStatus>("/subtitles/gemini/status", { signal }),
+  geminiApiStatus: (signal?: AbortSignal) =>
+    request<GeminiApiStatus>("/subtitles/gemini/status", { signal }),
+  geminiModels: (signal?: AbortSignal) =>
+    request<GeminiModelsResponse>("/subtitles/gemini/models", { signal }),
   geminiSubtitleJob: (jobId: string, signal?: AbortSignal) =>
     request<GeminiSubtitleJob>(`/subtitles/gemini/jobs/${jobId}`, { signal }),
   cancelGeminiSubtitleJob: (jobId: string, signal?: AbortSignal) =>
@@ -833,6 +923,9 @@ export type CredentialStatus = {
   is_master_password_set: boolean;
   is_unlocked: boolean;
   configured_keys: Record<string, boolean>;
+  vault_configured_keys: Record<string, boolean>;
+  env_configured_keys: Record<string, boolean>;
+  credential_sources: Record<string, "vault" | "environment" | "none">;
   masked_keys: Record<string, string>;
   platforms: {
     youtube: boolean;
@@ -842,7 +935,6 @@ export type CredentialStatus = {
     facebook_page: boolean;
     tiktok: boolean;
     gemini: boolean;
-    mongodb: boolean;
   };
 };
 
@@ -858,4 +950,3 @@ export type UpdateCheckResponse = {
   mandatory?: boolean;
   published_at?: string;
 };
-

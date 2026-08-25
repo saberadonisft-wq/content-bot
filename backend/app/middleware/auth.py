@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+
 import httpx
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -75,7 +76,7 @@ def verify_token(token: str) -> dict[str, Any]:
     except jwt.InvalidTokenError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token không hợp lệ: {str(e)}",
+            detail=f"Token không hợp lệ: {e!s}",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

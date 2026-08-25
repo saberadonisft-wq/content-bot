@@ -62,6 +62,12 @@ export type SubtitleTimeMap = {
 
 export type PreviewMode = "live" | "rendered";
 
+export type VideoClip = {
+  id: string;
+  start_ms: number;
+  end_ms: number;
+};
+
 export type VideoDimensions = {
   width: number;
   height: number;

@@ -5,6 +5,11 @@ import {
   Maximize2,
   Pause,
   Play,
+  Scissors,
+  Trash2,
+  Undo2,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import {
   forwardRef,
@@ -29,7 +34,13 @@ import {
   type PreviewMode,
   type SubtitleCueV2,
   type SubtitleMaskRegion,
+  type VideoClip,
 } from "./types";
+import {
+  findVideoClipAt,
+  keptVideoDurationMs,
+  nearestKeptVideoTimeMs,
+} from "./video-clips";
 
 type SubtitleTransportProps = {
   clock: PlaybackClockStore;
@@ -38,6 +49,9 @@ type SubtitleTransportProps = {
   hasRenderedVideo: boolean;
   onSeek: (milliseconds: number) => void;
   onTogglePlay: () => void;
+  isMuted: boolean;
+  volume: number;
+  onToggleMute: () => void;
   onPreviewModeChange: (mode: PreviewMode) => void;
 };
 
@@ -48,6 +62,9 @@ function SubtitleTransport({
   hasRenderedVideo,
   onSeek,
   onTogglePlay,
+  isMuted,
+  volume,
+  onToggleMute,
   onPreviewModeChange,
 }: SubtitleTransportProps) {
   const snapshot = usePlaybackSnapshot(clock);
@@ -109,6 +126,21 @@ function SubtitleTransport({
           onClick={() => onSeek(snapshot.currentMs + 1000)}
         >
           <ChevronRight size={19} />
+        </button>
+        <button
+          type="button"
+          className={`transport-icon-button ${isMuted || volume === 0 ? "is-muted" : ""}`}
+          disabled={!hasVideo}
+          aria-label={isMuted || volume === 0 ? "Bật tiếng preview" : "Tắt tiếng preview"}
+          aria-pressed={isMuted || volume === 0}
+          title={
+            isMuted || volume === 0
+              ? "Bật tiếng preview"
+              : `Tắt tiếng preview · âm lượng ${Math.round(volume * 100)}%`
+          }
+          onClick={onToggleMute}
+        >
+          {isMuted || volume === 0 ? <VolumeX size={19} /> : <Volume2 size={19} />}
         </button>
         <span className="transport-timecode is-duration">
           {formatTimecode(snapshot.durationMs)}
@@ -218,6 +250,9 @@ type SubtitleWorkspaceProps = {
   overlayLayout: OverlayLayout;
   subtitleMasks: readonly SubtitleMaskRegion[];
   selectedMaskId: string | null;
+  videoClips: readonly VideoClip[];
+  selectedVideoClipId: string | null;
+  canRestoreVideoClip: boolean;
   onDurationChange: (durationMs: number) => void;
   onSelectCue: (cueId: string | null) => void;
   onUpdateCueText: (cueId: string, text: string) => void;
@@ -227,6 +262,10 @@ type SubtitleWorkspaceProps = {
   onSelectMask: (maskId: string | null) => void;
   onMaskChange: (maskId: string, patch: Partial<SubtitleMaskRegion>) => void;
   onMaskDelete: (maskId: string) => void;
+  onSelectVideoClip: (clipId: string) => void;
+  onSplitVideo: () => void;
+  onDeleteVideoClip: () => void;
+  onRestoreVideoClip: () => void;
 };
 
 const seekVideo = (video: HTMLVideoElement, seconds: number) => {
@@ -256,6 +295,9 @@ export const SubtitleWorkspace = forwardRef<
   overlayLayout,
   subtitleMasks,
   selectedMaskId,
+  videoClips,
+  selectedVideoClipId,
+  canRestoreVideoClip,
   onDurationChange,
   onSelectCue,
   onUpdateCueText,
@@ -265,12 +307,18 @@ export const SubtitleWorkspace = forwardRef<
   onSelectMask,
   onMaskChange,
   onMaskDelete,
+  onSelectVideoClip,
+  onSplitVideo,
+  onDeleteVideoClip,
+  onRestoreVideoClip,
 }: SubtitleWorkspaceProps, ref) {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [clock] = useState(() => new PlaybackClockStore());
+  const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
   const [libassHost, setLibassHost] = useState<HTMLDivElement | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("live");
+  const [isMuted, setIsMuted] = useState(false);
   const [libassReady, setLibassReady] = useState(false);
   const [pixelsPerSecond, setPixelsPerSecond] = useState(42);
   const [snapEnabled, setSnapEnabled] = useState(true);
@@ -282,6 +330,8 @@ export const SubtitleWorkspace = forwardRef<
     effectivePreviewMode === "rendered" && renderedVideoUrl
       ? renderedVideoUrl
       : originalVideoUrl;
+  const previewVolume = Math.max(0, Math.min(1, options.volume ?? 1));
+  const selectedVideoClip = videoClips.find((clip) => clip.id === selectedVideoClipId) ?? null;
 
   useEffect(() => {
     if (!originalVideoUrl) {
@@ -290,19 +340,54 @@ export const SubtitleWorkspace = forwardRef<
     }
   }, [clock, onDurationChange, originalVideoUrl]);
 
+  useEffect(() => {
+    const video = videoElementRef.current;
+    if (!video) return;
+    video.volume = previewVolume;
+    video.muted = isMuted;
+  }, [isMuted, previewVolume, videoElement]);
+
+  useEffect(() => {
+    if (effectivePreviewMode !== "live" || !videoElement || videoClips.length === 0) {
+      return undefined;
+    }
+    return clock.subscribeFrame((currentMs) => {
+      if (!clock.getSnapshot().isPlaying || findVideoClipAt(videoClips, currentMs)) return;
+      const nextClip = videoClips.find((clip) => clip.start_ms > currentMs);
+      if (nextClip) {
+        seekVideo(videoElement, nextClip.start_ms / 1000);
+        clock.setCurrentMs(nextClip.start_ms);
+      } else {
+        videoElement.pause();
+        const lastClip = videoClips.at(-1);
+        if (lastClip) {
+          const lastKeptMs = Math.max(lastClip.start_ms, lastClip.end_ms - 1);
+          seekVideo(videoElement, lastKeptMs / 1000);
+          clock.setCurrentMs(lastKeptMs);
+        }
+      }
+    });
+  }, [clock, effectivePreviewMode, videoClips, videoElement]);
+
   const handleVideoElementChange = useCallback(
-    (element: HTMLVideoElement | null) => setVideoElement(element),
+    (element: HTMLVideoElement | null) => {
+      videoElementRef.current = element;
+      setVideoElement(element);
+    },
     [],
   );
 
   const handleSeek = useCallback(
     (milliseconds: number) => {
       const durationMs = clock.getSnapshot().durationMs;
-      const nextMs = Math.max(0, Math.min(durationMs || 0, Math.round(milliseconds)));
+      const boundedMs = Math.max(0, Math.min(durationMs || 0, Math.round(milliseconds)));
+      const nextMs = effectivePreviewMode === "live"
+        ? nearestKeptVideoTimeMs(videoClips, boundedMs)
+        : boundedMs;
       if (videoElement) seekVideo(videoElement, nextMs / 1000);
       clock.setCurrentMs(nextMs);
     },
-    [clock, videoElement],
+    [clock, effectivePreviewMode, videoClips, videoElement],
   );
 
   const handleTogglePlay = useCallback(() => {
@@ -310,6 +395,15 @@ export const SubtitleWorkspace = forwardRef<
     if (videoElement.paused) void videoElement.play();
     else videoElement.pause();
   }, [videoElement]);
+
+  const handleToggleMute = useCallback(() => {
+    if (previewVolume === 0) {
+      onOptionsChange({ ...options, volume: 1 });
+      setIsMuted(false);
+      return;
+    }
+    setIsMuted((current) => !current);
+  }, [onOptionsChange, options, previewVolume]);
 
   const handleDurationChange = useCallback(
     (durationMs: number) => onDurationChange(durationMs),
@@ -373,8 +467,43 @@ export const SubtitleWorkspace = forwardRef<
         hasRenderedVideo={Boolean(renderedVideoUrl)}
         onSeek={handleSeek}
         onTogglePlay={handleTogglePlay}
+        isMuted={isMuted}
+        volume={previewVolume}
+        onToggleMute={handleToggleMute}
         onPreviewModeChange={setPreviewMode}
       />
+      <div className="video-edit-toolbar" aria-label="Công cụ chỉnh sửa video">
+        <div className="video-edit-toolbar-actions">
+          <button
+            type="button"
+            onClick={onSplitVideo}
+            disabled={!originalVideoUrl}
+            title="Tách video tại con trỏ (S)"
+          >
+            <Scissors size={17} /> <span>Tách tại con trỏ</span>
+          </button>
+          <button
+            type="button"
+            className="is-destructive"
+            onClick={onDeleteVideoClip}
+            disabled={!selectedVideoClip || videoClips.length <= 1}
+            title="Xóa đoạn video đã chọn (Delete)"
+          >
+            <Trash2 size={17} /> <span>Xóa đoạn</span>
+          </button>
+          <button
+            type="button"
+            onClick={onRestoreVideoClip}
+            disabled={!canRestoreVideoClip}
+            title="Khôi phục đoạn vừa xóa"
+          >
+            <Undo2 size={17} /> <span>Khôi phục</span>
+          </button>
+        </div>
+        <span className="video-edit-summary" aria-live="polite">
+          {videoClips.length} đoạn · video xuất {formatCompactTimecode(keptVideoDurationMs(videoClips))}
+        </span>
+      </div>
       <SubtitleTimeline
         cues={cues}
         selectedCueId={selectedCueId}
@@ -386,6 +515,11 @@ export const SubtitleWorkspace = forwardRef<
         thumbnailCacheKey={thumbnailCacheKey}
         hasOverlayTrack={Boolean(overlayImage)}
         snapEnabled={snapEnabled}
+        videoClips={videoClips}
+        selectedVideoClipId={selectedVideoClipId}
+        onSelectVideoClip={onSelectVideoClip}
+        onSplitVideo={onSplitVideo}
+        onDeleteVideoClip={onDeleteVideoClip}
         onSelectCue={(cueId) => onSelectCue(cueId)}
         onSeek={handleSeek}
         onTogglePlay={handleTogglePlay}

@@ -1,52 +1,17 @@
 import React, {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
 } from "react";
-
-export interface AuthUser {
-  id: string;
-  email: string;
-  display_name: string;
-  role: "admin" | "user";
-  status: "pending" | "approved" | "rejected" | "banned";
-  auth_provider: "email" | "google";
-  avatar_url?: string | null;
-  created_at: string;
-  approved_at?: string | null;
-  approved_by?: string | null;
-  last_login_at?: string | null;
-}
-
-export interface AuthContextType {
-  user: AuthUser | null;
-  accessToken: string | null;
-  isLoading: boolean;
-  error: string | null;
-  isAuthenticated: boolean;
-  isApproved: boolean;
-  isPending: boolean;
-  isBanned: boolean;
-  isAdmin: boolean;
-  login: (email: string, pass: string) => Promise<void>;
-  register: (email: string, pass: string, name: string) => Promise<string>;
-  logout: () => Promise<void>;
-  checkStatus: () => Promise<AuthUser | null>;
-  startGoogleLogin: () => void;
-  authServerUrl: string;
-}
-
-export const AUTH_SERVER_URL =
-  import.meta.env.VITE_AUTH_SERVER_URL ?? "http://127.0.0.1:8080";
-
-const STORAGE_ACCESS_KEY = "content_bot_access_token";
-const STORAGE_REFRESH_KEY = "content_bot_refresh_token";
-const STORAGE_USER_KEY = "content_bot_user";
-
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+import {
+  AUTH_SERVER_URL,
+  AuthContext,
+  STORAGE_ACCESS_KEY,
+  STORAGE_REFRESH_KEY,
+  STORAGE_USER_KEY,
+  type AuthUser,
+} from "./auth-context";
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
@@ -68,7 +33,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  const persistAuth = (
+  const persistAuth = useCallback((
     token: string | null,
     refresh: string | null,
     u: AuthUser | null,
@@ -91,7 +56,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     } else {
       localStorage.removeItem(STORAGE_USER_KEY);
     }
-  };
+  }, []);
 
   const logout = useCallback(async () => {
     if (refreshToken && accessToken) {
@@ -110,7 +75,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     }
     persistAuth(null, null, null);
     setError(null);
-  }, [accessToken, refreshToken]);
+  }, [accessToken, refreshToken, persistAuth]);
 
   const checkStatus = useCallback(async (): Promise<AuthUser | null> => {
     if (!accessToken) return null;
@@ -144,8 +109,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     } catch {
       // offline or server down
     }
-    return user;
-  }, [accessToken, refreshToken, user, logout]);
+    return null;
+  }, [accessToken, refreshToken, logout, persistAuth]);
 
   // Initial URL Google OAuth parse & token verification
   useEffect(() => {
@@ -197,9 +162,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     };
 
     initAuth();
-  }, []);
+  }, [accessToken, checkStatus, persistAuth]);
 
-  const login = async (email: string, pass: string) => {
+  useEffect(() => {
+    const desktop = window.contentBotDesktop;
+    if (!desktop) return undefined;
+    return desktop.onGoogleAuthResult((result) => {
+      if (result.error) {
+        setError(result.error);
+        setIsLoading(false);
+        return;
+      }
+      if (!result.accessToken || !result.refreshToken) {
+        setError("Desktop không nhận được phiên đăng nhập Google hợp lệ.");
+        setIsLoading(false);
+        return;
+      }
+      setIsLoading(true);
+      void fetch(`${AUTH_SERVER_URL}/auth/me`, {
+        headers: { Authorization: `Bearer ${result.accessToken}` },
+      })
+        .then(async (response) => {
+          if (!response.ok) throw new Error("Không xác minh được tài khoản Google.");
+          const profile: AuthUser = await response.json();
+          persistAuth(result.accessToken as string, result.refreshToken as string, profile);
+          setError(null);
+        })
+        .catch((reason: unknown) => {
+          setError(reason instanceof Error ? reason.message : "Đăng nhập Google thất bại.");
+        })
+        .finally(() => setIsLoading(false));
+    });
+  }, [persistAuth]);
+
+  const login = useCallback(async (email: string, pass: string) => {
     setError(null);
     setIsLoading(true);
     try {
@@ -220,9 +216,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [persistAuth]);
 
-  const register = async (
+  const register = useCallback(async (
     email: string,
     pass: string,
     name: string,
@@ -251,11 +247,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
 
-  const startGoogleLogin = () => {
+  const startGoogleLogin = useCallback(() => {
+    if (window.contentBotDesktop) {
+      setError(null);
+      void window.contentBotDesktop.startGoogleLogin().catch((reason: unknown) => {
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : "Không mở được đăng nhập Google trên trình duyệt.",
+        );
+      });
+      return;
+    }
     window.location.href = `${AUTH_SERVER_URL}/auth/google`;
-  };
+  }, []);
 
   const isAuthenticated = Boolean(accessToken && user);
   const isApproved = user?.status === "approved";
@@ -291,18 +298,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       isPending,
       isBanned,
       isAdmin,
+      login,
+      register,
       logout,
       checkStatus,
+      startGoogleLogin,
     ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-};
-
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
-  return context;
 };

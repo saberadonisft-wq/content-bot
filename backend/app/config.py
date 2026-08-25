@@ -1,14 +1,38 @@
+import logging
 from pathlib import Path
 
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+logger = logging.getLogger("content_bot.config")
+
+_LEGACY_GEMINI_ENV = {
+    "CONTENT_BOT_GEMINI_CLI_ENABLED": "CONTENT_BOT_GEMINI_ENABLED",
+    "CONTENT_BOT_GEMINI_CLI_MODEL": "CONTENT_BOT_GEMINI_MODEL",
+    "CONTENT_BOT_GEMINI_CLI_TIMEOUT_SECONDS": "CONTENT_BOT_GEMINI_TIMEOUT_SECONDS",
+    "CONTENT_BOT_GEMINI_CLI_CHUNK_SECONDS": "CONTENT_BOT_GEMINI_CHUNK_SECONDS",
+    "CONTENT_BOT_GEMINI_CLI_MAX_INPUT_MB": "CONTENT_BOT_GEMINI_MAX_INPUT_MB",
+    "CONTENT_BOT_GEMINI_CLI_MAX_RETRIES": "CONTENT_BOT_GEMINI_MAX_RETRIES",
+    "CONTENT_BOT_GEMINI_CLI_RETRY_BASE_SECONDS": "CONTENT_BOT_GEMINI_RETRY_BASE_SECONDS",
+    "CONTENT_BOT_GEMINI_CLI_API_KEY": "GEMINI_API_KEY",
+    "CONTENT_BOT_GEMINI_CLI_PATH": "ignored",
+}
+_legacy_gemini_warning_emitted = False
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=ENV_FILE,
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     content_bot_data_dir: Path = Path("data")
+    content_bot_storage_backend: str = "sqlite"
+    content_bot_sqlite_path: Path | None = None
     mongodb_uri: str | None = None
     mongodb_database: str = "content_bot"
     # Optional comma-separated DNS servers used only for mongodb+srv lookups.
@@ -27,13 +51,56 @@ class Settings(BaseSettings):
     content_bot_alignment_cpu_threads: int = 4
     content_bot_alignment_extract_timeout_seconds: int = 90
     content_bot_subtitle_render_timeout_seconds: int = 7200
-    content_bot_gemini_cli_enabled: bool = True
-    content_bot_gemini_cli_path: Path | None = None
-    content_bot_gemini_cli_model: str = "auto"
-    gemini_api_key: str | None = None
-    content_bot_gemini_cli_timeout_seconds: int = 1800
-    content_bot_gemini_cli_chunk_seconds: int = 180
-    content_bot_gemini_cli_max_input_mb: int = 19
+    content_bot_gemini_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices(
+            "CONTENT_BOT_GEMINI_ENABLED", "CONTENT_BOT_GEMINI_CLI_ENABLED"
+        ),
+    )
+    content_bot_gemini_model: str = Field(
+        "gemini-3.6-flash",
+        validation_alias=AliasChoices(
+            "CONTENT_BOT_GEMINI_MODEL", "CONTENT_BOT_GEMINI_CLI_MODEL"
+        ),
+    )
+    gemini_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GEMINI_API_KEY", "CONTENT_BOT_GEMINI_CLI_API_KEY"
+        ),
+    )
+    content_bot_gemini_timeout_seconds: int = Field(
+        1800,
+        validation_alias=AliasChoices(
+            "CONTENT_BOT_GEMINI_TIMEOUT_SECONDS",
+            "CONTENT_BOT_GEMINI_CLI_TIMEOUT_SECONDS",
+        ),
+    )
+    content_bot_gemini_chunk_seconds: int = Field(
+        180,
+        validation_alias=AliasChoices(
+            "CONTENT_BOT_GEMINI_CHUNK_SECONDS", "CONTENT_BOT_GEMINI_CLI_CHUNK_SECONDS"
+        ),
+    )
+    content_bot_gemini_max_input_mb: int = Field(
+        19,
+        validation_alias=AliasChoices(
+            "CONTENT_BOT_GEMINI_MAX_INPUT_MB", "CONTENT_BOT_GEMINI_CLI_MAX_INPUT_MB"
+        ),
+    )
+    content_bot_gemini_max_retries: int = Field(
+        5,
+        validation_alias=AliasChoices(
+            "CONTENT_BOT_GEMINI_MAX_RETRIES", "CONTENT_BOT_GEMINI_CLI_MAX_RETRIES"
+        ),
+    )
+    content_bot_gemini_retry_base_seconds: float = Field(
+        30.0,
+        validation_alias=AliasChoices(
+            "CONTENT_BOT_GEMINI_RETRY_BASE_SECONDS",
+            "CONTENT_BOT_GEMINI_CLI_RETRY_BASE_SECONDS",
+        ),
+    )
     content_bot_host: str = "127.0.0.1"
     content_bot_port: int = 8000
     content_bot_cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
@@ -97,9 +164,33 @@ class Settings(BaseSettings):
     )
     web_feed_urls: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def warn_for_legacy_gemini_environment(cls, values: object) -> object:
+        global _legacy_gemini_warning_emitted
+        if not _legacy_gemini_warning_emitted and isinstance(values, dict):
+            legacy_names = {name.lower() for name in _LEGACY_GEMINI_ENV}
+            if any(str(key).lower() in legacy_names for key in values):
+                logger.warning(
+                    "Legacy CONTENT_BOT_GEMINI_CLI_* environment names are deprecated; "
+                    "use the REST Gemini configuration names instead."
+                )
+                _legacy_gemini_warning_emitted = True
+        return values
+
     @property
     def data_dir(self) -> Path:
-        return self.content_bot_data_dir.resolve()
+        if self.content_bot_data_dir.is_absolute():
+            return self.content_bot_data_dir.resolve()
+        return (PROJECT_ROOT / self.content_bot_data_dir).resolve()
+
+    @property
+    def sqlite_path(self) -> Path:
+        if self.content_bot_sqlite_path is not None:
+            if self.content_bot_sqlite_path.is_absolute():
+                return self.content_bot_sqlite_path.resolve()
+            return (PROJECT_ROOT / self.content_bot_sqlite_path).resolve()
+        return self.data_dir / "content-bot.db"
 
 
 settings = Settings()

@@ -21,9 +21,10 @@ import {
   snapMsToFrame,
   sortCues,
 } from "./time";
-import type { FrameTiming, SubtitleCueV2 } from "./types";
+import type { FrameTiming, SubtitleCueV2, VideoClip } from "./types";
 import { useVideoThumbnailSprite } from "./useVideoThumbnailSprite";
 import { useActiveCueId } from "./useActiveCue";
+import { deletedVideoRanges } from "./video-clips";
 
 const MIN_CUE_VISUAL_WIDTH = 14;
 const TIMELINE_OVERSCAN_FACTOR = 0.1;
@@ -396,10 +397,15 @@ export type SubtitleTimelineProps = {
   thumbnailCacheKey: string | null;
   hasOverlayTrack: boolean;
   snapEnabled: boolean;
+  videoClips: readonly VideoClip[];
+  selectedVideoClipId: string | null;
   onSelectCue: (cueId: string) => void;
   onSeek: (milliseconds: number) => void;
   onTogglePlay: () => void;
   onCueTimingCommit: (cueId: string, startMs: number, endMs: number) => void;
+  onSelectVideoClip: (clipId: string) => void;
+  onSplitVideo: () => void;
+  onDeleteVideoClip: () => void;
 };
 
 export function SubtitleTimeline({
@@ -413,10 +419,15 @@ export function SubtitleTimeline({
   thumbnailCacheKey,
   hasOverlayTrack,
   snapEnabled,
+  videoClips,
+  selectedVideoClipId,
   onSelectCue,
   onSeek,
   onTogglePlay,
   onCueTimingCommit,
+  onSelectVideoClip,
+  onSplitVideo,
+  onDeleteVideoClip,
 }: SubtitleTimelineProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const snapGuideRef = useRef<HTMLDivElement>(null);
@@ -439,6 +450,10 @@ export function SubtitleTimeline({
     [sortedCues],
   );
   const timelineDurationMs = Math.max(durationMs, cueTimelineEndMs, 1);
+  const deletedRanges = useMemo(
+    () => deletedVideoRanges(videoClips, durationMs),
+    [durationMs, videoClips],
+  );
   const snapPoints = useMemo<TimelineSnapPoint[]>(
     () => [
       { milliseconds: 0, label: "Project" },
@@ -545,6 +560,16 @@ export function SubtitleTimeline({
     if (event.code === "Space") {
       event.preventDefault();
       onTogglePlay();
+      return;
+    }
+    if (event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      onSplitVideo();
+      return;
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      onDeleteVideoClip();
       return;
     }
     if (event.key === "Home" || event.key === "End") {
@@ -705,6 +730,51 @@ export function SubtitleTimeline({
                 {videoUrl ? "Đang tạo sprite thumbnail…" : "Kéo video vào để bắt đầu"}
               </span>
             )}
+            {deletedRanges.map((range) => (
+              <span
+                key={`${range.start_ms}-${range.end_ms}`}
+                className="video-deleted-range"
+                style={{
+                  width: ((range.end_ms - range.start_ms) / 1000) * pixelsPerSecond,
+                  transform: `translateX(${(range.start_ms / 1000) * pixelsPerSecond}px)`,
+                }}
+                aria-label={`${formatTimecode(range.start_ms)} đến ${formatTimecode(range.end_ms)} đã xóa`}
+              >
+                <span>Đã xóa</span>
+              </span>
+            ))}
+            {videoClips.map((clip, index) => (
+              <button
+                key={clip.id}
+                type="button"
+                className={`video-timeline-clip ${clip.id === selectedVideoClipId ? "is-selected" : ""}`}
+                style={{
+                  width: Math.max(2, ((clip.end_ms - clip.start_ms) / 1000) * pixelsPerSecond),
+                  transform: `translateX(${(clip.start_ms / 1000) * pixelsPerSecond}px)`,
+                }}
+                aria-pressed={clip.id === selectedVideoClipId}
+                aria-label={`Đoạn video ${index + 1}, ${formatTimecode(clip.start_ms)} đến ${formatTimecode(clip.end_ms)}`}
+                title={`Đoạn ${index + 1}\n${formatTimecode(clip.start_ms)} → ${formatTimecode(clip.end_ms)}`}
+                onFocus={() => onSelectVideoClip(clip.id)}
+                onClick={(event) => {
+                  onSelectVideoClip(clip.id);
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+                  onSeek(clip.start_ms + ratio * (clip.end_ms - clip.start_ms));
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Delete" || event.key === "Backspace") {
+                    event.preventDefault();
+                    onDeleteVideoClip();
+                  } else if (event.key.toLowerCase() === "s") {
+                    event.preventDefault();
+                    onSplitVideo();
+                  }
+                }}
+              >
+                <span>Đoạn {index + 1}</span>
+              </button>
+            ))}
           </div>
         </div>
       </div>

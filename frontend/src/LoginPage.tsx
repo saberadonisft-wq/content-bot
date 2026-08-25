@@ -8,7 +8,7 @@ import {
   User,
   Loader2,
 } from "lucide-react";
-import { useAuth } from "./AuthContext";
+import { useAuth } from "./useAuth";
 
 export const LoginPage: React.FC = () => {
   const { login, register, startGoogleLogin, error: contextError } = useAuth();

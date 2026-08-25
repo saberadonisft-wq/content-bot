@@ -22,6 +22,19 @@ class ChannelSubscription(BaseModel):
     last_error: str | None = None
 
 
+class LiveWallConfig(BaseModel):
+    channel_ids: list[str] = Field(default_factory=list, max_length=100)
+    slots: Literal[1, 2, 4, 6] = 4
+
+    @model_validator(mode="after")
+    def validate_channel_ids(self) -> LiveWallConfig:
+        if len(set(self.channel_ids)) != len(self.channel_ids):
+            raise ValueError("live_wall channel_ids must be unique")
+        if any(not value.strip() or len(value) > 128 for value in self.channel_ids):
+            raise ValueError("live_wall channel_ids contain an invalid identifier")
+        return self
+
+
 class KeywordInput(BaseModel):
     name: str = Field(min_length=2, max_length=180)
     include_terms: list[str] = Field(default_factory=list, max_length=50)
@@ -35,6 +48,7 @@ class KeywordInput(BaseModel):
 
 class KeywordOutput(KeywordInput):
     id: int
+    live_wall: LiveWallConfig = Field(default_factory=LiveWallConfig)
     next_run_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -503,6 +517,12 @@ class SubtitleAlignmentRequest(BaseModel):
 
 class GeminiSubtitleOptions(BaseModel):
     bilingual: bool = True
+    model: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        description="Gemini base model id without the models/ prefix",
+    )
 
 
 class GeminiSubtitleRequest(BaseModel):
@@ -525,6 +545,18 @@ class SubtitleJobResponse(BaseModel):
     finished_at: str | None = None
     error: str | None = Field(default=None, max_length=2000)
     result: dict[str, Any] | None = None
+
+
+class SubtitleVideoSegment(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    start_ms: StrictInt = Field(ge=0)
+    end_ms: StrictInt = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_segment_range(self) -> SubtitleVideoSegment:
+        if self.end_ms <= self.start_ms:
+            raise ValueError("end_ms must be after start_ms")
+        return self
 
 
 class SubtitleRenderOptionsV2(BaseModel):
@@ -566,6 +598,10 @@ class SubtitleRenderOptionsV2(BaseModel):
     fade_in_ms: StrictInt = Field(default=0, ge=0, le=5000)
     fade_out_ms: StrictInt = Field(default=0, ge=0, le=5000)
     animation: Literal["none", "fade", "rise", "pan", "typewriter"] = "none"
+    video_segments: list[SubtitleVideoSegment] = Field(
+        default_factory=list,
+        max_length=100,
+    )
 
     @model_validator(mode="after")
     def validate_render_timeline(self) -> SubtitleRenderOptionsV2:
@@ -573,6 +609,9 @@ class SubtitleRenderOptionsV2(BaseModel):
             raise ValueError("trim_end_ms must be after trim_start_ms")
         if self.render_mode == "precision" and self.animation != "none":
             raise ValueError("Precision mode does not quantize ASS animation timing")
+        for previous, current in zip(self.video_segments, self.video_segments[1:]):
+            if current.start_ms < previous.end_ms:
+                raise ValueError("video_segments must be ordered and non-overlapping")
         return self
 
 
@@ -585,8 +624,15 @@ class SubtitleRenderRequestV2(BaseModel):
 
     @model_validator(mode="after")
     def require_subtitles(self) -> SubtitleRenderRequestV2:
-        if not self.document.segments and self.overlay is None and not self.masks:
-            raise ValueError("At least one subtitle cue, overlay, or mask is required")
+        if (
+            not self.document.segments
+            and self.overlay is None
+            and not self.masks
+            and not self.options.video_segments
+        ):
+            raise ValueError(
+                "At least one subtitle cue, overlay, mask, or video segment is required"
+            )
         return self
 
 

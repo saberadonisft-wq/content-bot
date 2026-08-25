@@ -105,6 +105,7 @@ from .bluesky_api import (
 from .bluesky_api import (
     post_identity as bluesky_post_identity,
 )
+from .credential_resolver import credential
 from .feed_ingestion import (
     fetch_feed_document,
     parse_feed_templates,
@@ -412,10 +413,10 @@ class XConnector(SourceConnector):
 
     @property
     def configured(self) -> bool:
-        return bool(settings.x_bearer_token)
+        return bool(credential("x_bearer_token"))
 
     async def healthcheck(self) -> ConnectorStatus:
-        if not settings.x_bearer_token:
+        if not credential("x_bearer_token"):
             return ConnectorStatus(
                 "not_configured",
                 "Add X_BEARER_TOKEN and API credits/access in backend/.env to enable official read-only search.",
@@ -430,7 +431,7 @@ class XConnector(SourceConnector):
         query: SearchQuery,
         checkpoint: dict[str, Any] | None = None,
     ) -> AsyncIterator[RawContentItem]:
-        token = settings.x_bearer_token
+        token = credential("x_bearer_token")
         if not token:
             return
         if checkpoint and not query.legacy_checkpoint:
@@ -481,7 +482,7 @@ class XConnector(SourceConnector):
         channel: dict[str, Any],
         query: SearchQuery,
     ) -> AsyncIterator[RawContentItem]:
-        token = settings.x_bearer_token
+        token = credential("x_bearer_token")
         if not token:
             raise RuntimeError(
                 "X API credentials and credits are required to scan a saved account"
@@ -543,7 +544,7 @@ class XConnector(SourceConnector):
             await adapter.close()
 
     async def fetch_detail(self, target_url: str) -> RawContentItem:
-        token = settings.x_bearer_token
+        token = credential("x_bearer_token")
         if not token:
             raise CrawlerFailure(
                 CrawlerErrorCode.AUTH_REQUIRED,
@@ -574,7 +575,7 @@ class XConnector(SourceConnector):
         max_items: int = 100,
         initial_cursor: str | None = None,
     ) -> AsyncIterator[RawContentItem]:
-        token = settings.x_bearer_token
+        token = credential("x_bearer_token")
         if not token:
             raise CrawlerFailure(
                 CrawlerErrorCode.AUTH_REQUIRED,
@@ -628,7 +629,7 @@ class XConnector(SourceConnector):
                 CrawlerErrorCode.UNSUPPORTED,
                 "X conversation replies support provider/new ordering only.",
             )
-        token = settings.x_bearer_token
+        token = credential("x_bearer_token")
         if not token:
             raise CrawlerFailure(
                 CrawlerErrorCode.AUTH_REQUIRED,
@@ -1001,9 +1002,9 @@ class TikTokDisplayConnector(SourceConnector):
                             )
                         oauth = TikTokOAuthClient(
                             TikTokOAuthConfig(
-                                settings.tiktok_client_key,
-                                settings.tiktok_client_secret or "",
-                                settings.tiktok_redirect_uri,
+                                credential("tiktok_client_key", ""),
+                                credential("tiktok_client_secret", "") or "",
+                                credential("tiktok_redirect_uri", ""),
                             )
                         )
                         try:
@@ -1047,9 +1048,9 @@ class TikTokDisplayConnector(SourceConnector):
     @staticmethod
     def _oauth_configured() -> bool:
         return bool(
-            settings.tiktok_client_key
-            and settings.tiktok_client_secret
-            and settings.tiktok_redirect_uri
+            credential("tiktok_client_key")
+            and credential("tiktok_client_secret")
+            and credential("tiktok_redirect_uri")
         )
 
     @staticmethod
@@ -1193,9 +1194,9 @@ class FacebookPageConnector(SourceConnector):
     def _config() -> MetaPageGraphConfig:
         return MetaPageGraphConfig(
             settings.meta_graph_api_version,
-            settings.facebook_page_access_token or "",
-            settings.facebook_page_id,
-            settings.facebook_page_username,
+            credential("facebook_page_access_token", "") or "",
+            credential("facebook_page_id", ""),
+            credential("facebook_page_username", ""),
         )
 
     @staticmethod
@@ -1324,8 +1325,8 @@ class InstagramHashtagConnector(SourceConnector):
     def _config() -> MetaGraphConfig:
         return MetaGraphConfig(
             settings.meta_graph_api_version,
-            settings.meta_access_token or "",
-            settings.instagram_professional_user_id,
+            credential("meta_access_token", "") or "",
+            credential("instagram_professional_user_id", ""),
         )
 
     @staticmethod
@@ -1382,10 +1383,10 @@ class YouTubeConnector(SourceConnector):
 
     @property
     def configured(self) -> bool:
-        return bool(settings.youtube_api_key)
+        return bool(credential("youtube_api_key"))
 
     async def healthcheck(self) -> ConnectorStatus:
-        if not settings.youtube_api_key:
+        if not credential("youtube_api_key"):
             return ConnectorStatus(
                 "not_configured",
                 "Add YOUTUBE_API_KEY in backend/.env to enable official search.",
@@ -1398,7 +1399,7 @@ class YouTubeConnector(SourceConnector):
         )
 
     async def deep_healthcheck(self) -> ConnectorStatus:
-        if not settings.youtube_api_key:
+        if not credential("youtube_api_key"):
             return await self.healthcheck()
         try:
             async with httpx.AsyncClient(
@@ -1409,7 +1410,7 @@ class YouTubeConnector(SourceConnector):
                 await youtube_json(
                     client,
                     "/i18nLanguages",
-                    params={"part": "snippet", "key": settings.youtube_api_key},
+                    params={"part": "snippet", "key": credential("youtube_api_key")},
                 )
         except CrawlerFailure as exc:
             state = {
@@ -1437,7 +1438,7 @@ class YouTubeConnector(SourceConnector):
         sort: str = "new",
         cancellation: CancellationToken | None = None,
     ) -> YouTubeCommentScan:
-        if not settings.youtube_api_key:
+        if not credential("youtube_api_key"):
             raise CrawlerFailure(
                 CrawlerErrorCode.AUTH_REQUIRED,
                 "YouTube Data API key is not configured.",
@@ -1449,7 +1450,7 @@ class YouTubeConnector(SourceConnector):
         ) as client:
             provider = YouTubeApiCommentProvider(
                 client,
-                api_key=settings.youtube_api_key,
+                api_key=credential("youtube_api_key"),
                 max_requests=budgets.max_requests,
             )
             adapter = YouTubeCommentsAdapter(provider, self._pseudonymizer())
@@ -1510,7 +1511,7 @@ class YouTubeConnector(SourceConnector):
         }
 
     async def search(self, query: SearchQuery, checkpoint: dict[str, Any] | None = None) -> AsyncIterator[RawContentItem]:
-        if not settings.youtube_api_key:
+        if not credential("youtube_api_key"):
             return
         if checkpoint and not query.legacy_checkpoint:
             query.legacy_checkpoint = dict(checkpoint)
@@ -1549,7 +1550,7 @@ class YouTubeConnector(SourceConnector):
                     "regionCode": settings.youtube_region_code,
                     "relevanceLanguage": settings.youtube_relevance_language,
                     "publishedAfter": published_after,
-                    "key": settings.youtube_api_key,
+                    "key": credential("youtube_api_key"),
                 }
                 if page_token:
                     params["pageToken"] = page_token
@@ -1579,7 +1580,7 @@ class YouTubeConnector(SourceConnector):
                 details_payload = await youtube_json(
                     client,
                     "/videos",
-                    params={"part": "snippet,statistics", "id": ",".join(video_ids), "key": settings.youtube_api_key},
+                    params={"part": "snippet,statistics", "id": ",".join(video_ids), "key": credential("youtube_api_key")},
                 )
                 details = {row["id"]: row for row in details_payload.get("items", [])}
                 for video_id in video_ids:
@@ -2627,10 +2628,10 @@ class RedditConnector(SourceConnector):
 
     @property
     def configured(self) -> bool:
-        return bool(settings.reddit_client_id and settings.reddit_client_secret)
+        return bool(credential("reddit_client_id") and credential("reddit_client_secret"))
 
     async def healthcheck(self) -> ConnectorStatus:
-        if not settings.reddit_client_id or not settings.reddit_client_secret:
+        if not credential("reddit_client_id") or not credential("reddit_client_secret"):
             return ConnectorStatus(
                 "not_configured",
                 "Add REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET for official Reddit OAuth search.",
@@ -2643,7 +2644,7 @@ class RedditConnector(SourceConnector):
         checkpoint: dict[str, Any] | None = None,
     ) -> AsyncIterator[RawContentItem]:
         """Search public Reddit submissions through application-only OAuth."""
-        if not settings.reddit_client_id or not settings.reddit_client_secret:
+        if not credential("reddit_client_id") or not credential("reddit_client_secret"):
             return
         if checkpoint and not query.legacy_checkpoint:
             query.legacy_checkpoint = dict(checkpoint)
@@ -2652,12 +2653,12 @@ class RedditConnector(SourceConnector):
         async with httpx.AsyncClient(
             timeout=30,
             follow_redirects=False,
-            headers={"User-Agent": settings.reddit_user_agent},
+            headers={"User-Agent": credential("reddit_user_agent", "ContentBot/0.1 (local research tool)")},
         ) as client:
             access_token = await reddit_token_cache.get(
                 client,
-                client_id=settings.reddit_client_id,
-                client_secret=settings.reddit_client_secret,
+                client_id=credential("reddit_client_id"),
+                client_secret=credential("reddit_client_secret"),
             )
             client.headers["Authorization"] = f"Bearer {access_token}"
             pseudonymizer = self._pseudonymizer()
@@ -2760,7 +2761,7 @@ class RedditConnector(SourceConnector):
         sort: str = "new",
         cancellation: CancellationToken | None = None,
     ) -> RedditCommentScan:
-        if not settings.reddit_client_id or not settings.reddit_client_secret:
+        if not credential("reddit_client_id") or not credential("reddit_client_secret"):
             raise CrawlerFailure(
                 CrawlerErrorCode.AUTH_REQUIRED,
                 "Reddit OAuth credentials are not configured.",
@@ -2768,12 +2769,12 @@ class RedditConnector(SourceConnector):
         async with httpx.AsyncClient(
             timeout=30,
             follow_redirects=False,
-            headers={"User-Agent": settings.reddit_user_agent},
+            headers={"User-Agent": credential("reddit_user_agent", "ContentBot/0.1 (local research tool)")},
         ) as client:
             access_token = await reddit_token_cache.get(
                 client,
-                client_id=settings.reddit_client_id,
-                client_secret=settings.reddit_client_secret,
+                client_id=credential("reddit_client_id"),
+                client_secret=credential("reddit_client_secret"),
             )
             client.headers["Authorization"] = f"Bearer {access_token}"
             provider = RedditApiCommentProvider(
