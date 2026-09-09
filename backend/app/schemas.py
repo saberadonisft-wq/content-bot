@@ -295,7 +295,13 @@ class SubtitleWordV2(BaseModel):
         return self
 
 
+class SubtitlePosition(BaseModel):
+    x: float = Field(ge=0, le=100, allow_inf_nan=False)
+    y: float = Field(ge=0, le=100, allow_inf_nan=False)
+
+
 class SubtitleCueV2(BaseModel):
+    layout: SubtitlePosition | None = None
     id: str = Field(
         min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
     )
@@ -616,6 +622,8 @@ class SubtitleRenderOptionsV2(BaseModel):
 
 
 class SubtitleRenderRequestV2(BaseModel):
+    voice_project_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{12,32}$")
+    voice_revision: int | None = Field(default=None, ge=0)
     video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
     document: SubtitleDocumentV2
     options: SubtitleRenderOptionsV2 = Field(default_factory=SubtitleRenderOptionsV2)
@@ -629,6 +637,7 @@ class SubtitleRenderRequestV2(BaseModel):
             and self.overlay is None
             and not self.masks
             and not self.options.video_segments
+            and not self.voice_project_id
         ):
             raise ValueError(
                 "At least one subtitle cue, overlay, mask, or video segment is required"

@@ -18,7 +18,6 @@ import {
   api,
   type ChannelSubscription,
   type Keyword,
-  type LiveWallSessionStatus,
   type LiveWallSlots,
   type Source,
 } from "./api";
@@ -228,16 +227,6 @@ function TikTokCreatorEmbed({ url, refreshKey = 0, onError }: EmbedProps) {
   );
 }
 
-function displayBounds() {
-  const currentScreen = window.screen as Screen & { availLeft?: number; availTop?: number };
-  return {
-    left: Math.round(currentScreen.availLeft ?? 0),
-    top: Math.round(currentScreen.availTop ?? 0),
-    width: Math.max(640, Math.round(currentScreen.availWidth || window.innerWidth)),
-    height: Math.max(480, Math.round(currentScreen.availHeight || window.innerHeight)),
-  };
-}
-
 function channelUrl(channel: ChannelSubscription) {
   return channel.normalized_url || channel.url;
 }
@@ -310,8 +299,6 @@ export function LiveChannelWall({
   const [refreshKey, setRefreshKey] = useState(0);
   const [failedEmbeds, setFailedEmbeds] = useState<string[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [session, setSession] = useState<LiveWallSessionStatus | null>(null);
-  const [externalMode, setExternalMode] = useState<"all" | "fallback" | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [desktopEnabled, setDesktopEnabled] = useState(
@@ -319,21 +306,6 @@ export function LiveChannelWall({
   );
   const [desktopLoadAll, setDesktopLoadAll] = useState(true);
   const [desktopPriorityId, setDesktopPriorityId] = useState<string | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void api.liveWallStatus(controller.signal).then(setSession).catch(() => undefined);
-    return () => controller.abort();
-  }, []);
-
-  const pollSession = Boolean(session && session.state !== "idle");
-  useEffect(() => {
-    if (!pollSession) return undefined;
-    const timer = window.setInterval(() => {
-      void api.liveWallStatus().then(setSession).catch(() => undefined);
-    }, 2_000);
-    return () => window.clearInterval(timer);
-  }, [pollSession]);
 
   const byId = useMemo(
     () => new Map((selected?.channels ?? []).filter((channel) => channel.id).map((channel) => [channel.id as string, channel])),
@@ -369,29 +341,7 @@ export function LiveChannelWall({
   const fallbackChannels = visibleChannels.filter(
     (channel) => !channelSupportsEmbed(channel, sources) || (channel.id && failedEmbeds.includes(channel.id)),
   );
-  const statusDetail =
-    message ||
-    desktop.error ||
-    (session?.state !== "idle" ? session?.detail : null);
-
-  useEffect(() => {
-    if (!selected || !externalMode || !session?.owned_by_current_user || session.state === "idle") {
-      return undefined;
-    }
-    const channels = externalMode === "fallback" ? fallbackChannels : visibleChannels;
-    const ids = channels.map((channel) => channel.id).filter(Boolean) as string[];
-    const currentIds = session.windows.map((windowStatus) => windowStatus.channel_id);
-    if (!ids.length || ids.join("\0") === currentIds.join("\0")) return undefined;
-    const timer = window.setTimeout(() => {
-      void api
-        .openLiveWall(selected.id, ids, displayBounds())
-        .then(setSession)
-        .catch((error: unknown) => {
-          setMessage(error instanceof Error ? error.message : "Không đồng bộ được Cốc Cốc Live Wall.");
-        });
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [externalMode, fallbackChannels, selected, session, visibleChannels]);
+  const statusDetail = message || desktop.error;
 
   const save = async () => {
     if (!selected) return;
@@ -409,51 +359,21 @@ export function LiveChannelWall({
     }
   };
 
-  const openExternal = async (
-    channels: ChannelSubscription[],
-    mode: "all" | "fallback",
-  ) => {
+  const openInCoccoc = async (channels: ChannelSubscription[]) => {
     if (!selected) return;
     const ids = channels.map((channel) => channel.id).filter(Boolean) as string[];
     if (!ids.length) return;
     setBusy(true);
     setMessage(null);
     try {
-      const next = await api.openLiveWall(selected.id, ids, displayBounds());
-      setSession(next);
-      setExternalMode(mode);
+      const result = await api.openInCoccoc(selected.id, ids);
+      setMessage(
+        result.channel_count === 1
+          ? "Đã mở kênh trong Cốc Cốc của bạn."
+          : `Đã mở ${result.channel_count} kênh trong Cốc Cốc của bạn.`,
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Không mở được Cốc Cốc Live Wall.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const reflow = () => {
-    const channels = externalMode === "fallback" ? fallbackChannels : visibleChannels;
-    void openExternal(channels, externalMode ?? "all");
-  };
-
-  const closeExternal = async () => {
-    setBusy(true);
-    try {
-      setSession(await api.closeLiveWall());
-      setExternalMode(null);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Không đóng được Live Wall.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const deleteProfile = async () => {
-    if (!window.confirm("Xóa toàn bộ phiên đăng nhập Cốc Cốc Live Wall của tài khoản này?")) return;
-    setBusy(true);
-    try {
-      await api.deleteLiveWallProfile();
-      setMessage("Đã xóa profile đăng nhập Live Wall.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Không xóa được profile.");
     } finally {
       setBusy(false);
     }
@@ -527,18 +447,12 @@ export function LiveChannelWall({
         <button className="button secondary" type="button" onClick={refreshVisibleChannels} disabled={!visibleChannels.length}>
           <RefreshCw size={15} /> {desktop.available && desktopEnabled ? "Tải lại kênh" : "Tải lại embed"}
         </button>
-        <button className="button secondary" type="button" onClick={() => void openExternal(fallbackChannels, "fallback")} disabled={busy || !fallbackChannels.length}>
+        <button className="button secondary" type="button" onClick={() => void openInCoccoc(fallbackChannels)} disabled={busy || !fallbackChannels.length}>
           <Monitor size={15} /> Mở ô fallback
         </button>
-        <button className="button" type="button" onClick={() => void openExternal(visibleChannels, "all")} disabled={busy || !visibleChannels.length}>
+        <button className="button" type="button" onClick={() => void openInCoccoc(visibleChannels)} disabled={busy || !visibleChannels.length}>
           <Monitor size={15} /> Mở trang này trong Cốc Cốc
         </button>
-        {session?.state !== "idle" && session?.owned_by_current_user && (
-          <>
-            <button className="button secondary" type="button" onClick={reflow} disabled={busy || !visibleChannels.length}>Xếp lại</button>
-            <button className="button secondary" type="button" onClick={() => void closeExternal()} disabled={busy}><SquareX size={15} /> Đóng Cốc Cốc</button>
-          </>
-        )}
       </div>
 
       {pickerOpen && (
@@ -563,16 +477,12 @@ export function LiveChannelWall({
               );
             })}
           </div>
-          <div className="live-wall-picker-actions">
-            <button className="button secondary" type="button" onClick={() => void deleteProfile()} disabled={busy || session?.state !== "idle"}>Xóa phiên đăng nhập</button>
-          </div>
         </section>
       )}
 
       {statusDetail && (
-        <div className={`live-wall-status ${session?.state ?? ""}`}>
+        <div className="live-wall-status">
           <span>{statusDetail}</span>
-          {session && session.state !== "idle" && <small>{session.windows.filter((windowStatus) => windowStatus.state === "open").length}/{session.windows.length} cửa sổ đang mở</small>}
         </div>
       )}
 
@@ -592,9 +502,6 @@ export function LiveChannelWall({
             const id = channel.id as string;
             const canEmbed = channelSupportsEmbed(channel, sources) && !failedEmbeds.includes(id);
             const url = channelUrl(channel);
-            const externalStatus = session?.windows.find(
-              (windowStatus) => windowStatus.channel_id === id,
-            );
             const desktopSupported = desktopCanRenderSource(channel.source_id ?? "");
             const desktopStatus = desktop.statuses[id];
             const desktopDeferred = desktop.available && desktopEnabled && desktopSupported && !activeDesktopIds.has(id);
@@ -605,7 +512,7 @@ export function LiveChannelWall({
                   <span>
                     <small>{channel.source_id ?? "web"}</small>
                     <strong>{channel.label || channel.source_id || "Kênh"}</strong>
-                    <em className={`live-wall-channel-state ${useDesktopTile ? desktopStatus?.state ?? "loading" : desktopDeferred ? "paused" : externalStatus?.state ?? ""}`}>
+                    <em className={`live-wall-channel-state ${useDesktopTile ? desktopStatus?.state ?? "loading" : desktopDeferred ? "paused" : ""}`}>
                       {useDesktopTile
                         ? desktopStatus?.state === "ready"
                           ? "Đang hiển thị trong app"
@@ -614,8 +521,6 @@ export function LiveChannelWall({
                             : "Đang mở trong app"
                         : desktopDeferred
                           ? "Tạm dừng để giảm tải máy"
-                        : externalStatus
-                        ? `Cốc Cốc: ${externalStatus.state}`
                         : canEmbed
                           ? "Embed trong app"
                           : "Cần mở bằng Cốc Cốc"}
@@ -635,7 +540,7 @@ export function LiveChannelWall({
                       </button>
                     )}
                     <a href={url} target="_blank" rel="noreferrer" aria-label="Mở trang gốc"><ExternalLink size={15} /></a>
-                    <button type="button" aria-label="Mở riêng trong Cốc Cốc" onClick={() => void openExternal([channel], "all")} disabled={busy}><Monitor size={15} /></button>
+                    <button type="button" aria-label="Mở trong Cốc Cốc của bạn" onClick={() => void openInCoccoc([channel])} disabled={busy}><Monitor size={15} /></button>
                     <button type="button" aria-label={expandedId === id ? "Thu nhỏ" : "Phóng lớn"} onClick={() => setExpandedId((value) => value === id ? null : id)}>{expandedId === id ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
                   </span>
                 </header>
@@ -679,10 +584,10 @@ export function LiveChannelWall({
                       </strong>
                       <p>
                         {failedEmbeds.includes(id) && channel.source_id === "x"
-                          ? "Hãy cho phép nội dung từ platform.x.com trên trình duyệt, hoặc mở kênh bằng profile Cốc Cốc riêng."
-                          : "Mở kênh bằng profile Cốc Cốc riêng của Content Bot để xem trực tiếp."}
+                          ? "Hãy cho phép nội dung từ platform.x.com, hoặc mở kênh trong Cốc Cốc của bạn."
+                          : "Mở kênh trong Cốc Cốc của bạn để xem trực tiếp."}
                       </p>
-                      <button className="button" type="button" onClick={() => void openExternal([channel], "all")} disabled={busy}>Mở riêng trong Cốc Cốc</button>
+                      <button className="button" type="button" onClick={() => void openInCoccoc([channel])} disabled={busy}>Mở trong Cốc Cốc</button>
                     </div>
                   )}
                 </div>

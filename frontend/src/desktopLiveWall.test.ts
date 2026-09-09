@@ -36,4 +36,15 @@ describe("desktop live wall placement", () => {
       visible: false,
     });
   });
+
+  it("hides a native view when renderer content obscures its host", () => {
+    expect(desktopViewPlacement(
+      { left: 40, top: 120, right: 440, bottom: 720, width: 400, height: 600 },
+      { width: 1200, height: 800 },
+      false,
+    )).toEqual({
+      bounds: { x: 40, y: 120, width: 400, height: 600 },
+      visible: false,
+    });
+  });
 });

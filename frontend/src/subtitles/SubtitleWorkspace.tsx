@@ -236,7 +236,11 @@ function SubtitleStatusBar({
   );
 }
 
+import { useVoicePlayback } from "../voiceover/useVoicePlayback";
+
 type SubtitleWorkspaceProps = {
+  voice?: import("../voiceover/useVoiceover").VoiceController;
+  onOpenVoice?: () => void;
   originalVideoUrl: string | null;
   renderedVideoUrl: string | null;
   thumbnailCacheKey: string | null;
@@ -256,6 +260,8 @@ type SubtitleWorkspaceProps = {
   onDurationChange: (durationMs: number) => void;
   onSelectCue: (cueId: string | null) => void;
   onUpdateCueText: (cueId: string, text: string) => void;
+  onCuePositionChange: (cueId: string, position: { x: number; y: number }) => void;
+  onActiveCueChange: (cueId: string | null) => void;
   onCueTimingCommit: (cueId: string, startMs: number, endMs: number) => void;
   onOptionsChange: (options: SubtitleBurnOptions) => void;
   onOverlayLayoutChange: (layout: OverlayLayout) => void;
@@ -282,6 +288,8 @@ export const SubtitleWorkspace = forwardRef<
   SubtitleWorkspaceHandle,
   SubtitleWorkspaceProps
 >(function SubtitleWorkspace({
+  voice,
+  onOpenVoice,
   originalVideoUrl,
   renderedVideoUrl,
   thumbnailCacheKey,
@@ -301,6 +309,8 @@ export const SubtitleWorkspace = forwardRef<
   onDurationChange,
   onSelectCue,
   onUpdateCueText,
+  onCuePositionChange,
+  onActiveCueChange,
   onCueTimingCommit,
   onOptionsChange,
   onOverlayLayoutChange,
@@ -331,6 +341,7 @@ export const SubtitleWorkspace = forwardRef<
       ? renderedVideoUrl
       : originalVideoUrl;
   const previewVolume = Math.max(0, Math.min(1, options.volume ?? 1));
+  useVoicePlayback(videoElement, voice?.document ?? null, effectivePreviewMode === "live", previewVolume, voice?.setError);
   const selectedVideoClip = videoClips.find((clip) => clip.id === selectedVideoClipId) ?? null;
 
   useEffect(() => {
@@ -421,7 +432,7 @@ export const SubtitleWorkspace = forwardRef<
   );
 
   return (
-    <div ref={workspaceRef} className="subtitle-workspace">
+    <div ref={workspaceRef} className={`subtitle-workspace${voice ? ' has-voice-track' : ''}`}>
       <PlaybackClock
         video={videoElement}
         sourceKey={activeVideoUrl ?? "empty"}
@@ -455,6 +466,8 @@ export const SubtitleWorkspace = forwardRef<
         onSelectCue={onSelectCue}
         onUpdateCueText={onUpdateCueText}
         onOptionsCommit={onOptionsChange}
+        onCuePositionChange={onCuePositionChange}
+        onActiveCueChange={onActiveCueChange}
         onOverlayLayoutCommit={onOverlayLayoutChange}
         onSelectMask={onSelectMask}
         onMaskChange={onMaskChange}
@@ -505,6 +518,8 @@ export const SubtitleWorkspace = forwardRef<
         </span>
       </div>
       <SubtitleTimeline
+        voice={voice}
+        onOpenVoice={onOpenVoice}
         cues={cues}
         selectedCueId={selectedCueId}
         durationMs={effectiveDurationMs}

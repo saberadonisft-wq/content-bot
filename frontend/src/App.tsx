@@ -90,6 +90,45 @@ const channelErrorDetail = (channel: ChannelSubscription) =>
     ? "X API chưa có credits hoặc access tier phù hợp. Kênh vẫn có thể mở để xem; chỉ thử quét lại sau khi đã cấp quyền trong X Developer Console."
     : channel.last_error;
 
+/** Extract a human-readable channel name from the URL when label is empty. */
+const channelDisplayName = (channel: ChannelSubscription): string => {
+  if (channel.label) return channel.label;
+  const raw = channel.normalized_url || channel.url;
+  try {
+    const parsed = new URL(raw);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const src = channel.source_id ?? "";
+    if (["x", "tiktok", "instagram"].includes(src) && parts.length) {
+      return `@${parts[parts.length - 1].replace(/^@/, "")}`;
+    }
+    if (src === "youtube" && parts.length) {
+      return parts[parts.length - 1];
+    }
+    if (src === "bluesky" && parts.length >= 2 && parts[0] === "profile") {
+      return `@${parts[1]}`;
+    }
+    if (src === "mastodon" && parts.length) {
+      const last = parts[parts.length - 1];
+      return last.startsWith("@") ? last : `@${last}`;
+    }
+    if (src === "reddit" && parts.length >= 2) {
+      if (parts[0] === "r") return `r/${parts[1]}`;
+      if (["u", "user"].includes(parts[0])) return `u/${parts[1]}`;
+    }
+    if (src === "bilibili" && parts.length) {
+      return `Bilibili ${parts[parts.length - 1]}`;
+    }
+    if (src === "steam" && parts.length >= 2 && parts[0] === "app") {
+      return `Steam App ${parts[1]}`;
+    }
+    if (src === "facebook" && parts.length) return parts[parts.length - 1];
+    if (parts.length) return parts[parts.length - 1];
+    return parsed.hostname;
+  } catch {
+    return raw;
+  }
+};
+
 const fmt = (value?: string | null) =>
   value
     ? new Intl.DateTimeFormat("vi-VN", {
@@ -2037,12 +2076,12 @@ function RegisteredChannels({
                   checked={isSelected}
                   onChange={() => channel.id && toggleChannel(channel.id)}
                   disabled={!canSelect || Boolean(activeBatch) || running}
-                  aria-label={`Chọn kênh ${channel.label || channel.url}`}
+                  aria-label={`Chọn kênh ${channelDisplayName(channel)}`}
                 />
               </label>
-              <div>
+              <div style={{ minWidth: 0 }}>
                 <span className="eyebrow">{channel.source_id ?? "web"}</span>
-                <h2>{channel.label || channel.url}</h2>
+                <h2 title={channel.url} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{channelDisplayName(channel)}</h2>
               </div>
               <span className={`badge ${channel.last_status ?? ""}`}>
                 {channel.mode === "embed_only"
@@ -2054,8 +2093,8 @@ function RegisteredChannels({
                       : "Đã lưu"}
               </span>
             </div>
-            <a href={channel.url} target="_blank" rel="noreferrer" className="channel-url">
-              {channel.url}
+            <a href={channel.url} target="_blank" rel="noreferrer" className="channel-url" style={{ fontSize: 12, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>
+              {channel.normalized_url || channel.url}
             </a>
             <dl className="channel-meta-grid">
               <div>

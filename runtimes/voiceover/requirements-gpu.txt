@@ -1,0 +1,6 @@
+# Install torch/torchaudio from the CUDA index first (see setup script).
+# These constraints keep installing the SDK from replacing that backend.
+vieneu==3.6.4
+torch==2.8.0
+torchaudio==2.8.0
+transformers==4.57.6

@@ -55,6 +55,7 @@ def test_offset_cues(tmp_path: Path) -> None:
             }
         ],
         offset_ms=3000,
+        chunk_duration_ms=2000,
         duration_ms=5000,
         existing_count=2,
     )
@@ -63,12 +64,38 @@ def test_offset_cues(tmp_path: Path) -> None:
     assert shifted[0]["end_ms"] == 4200
 
 
+def test_offset_cues_drops_content_after_chunk_end_and_clips_crossing_cue(
+    tmp_path: Path,
+) -> None:
+    shifted = _service(tmp_path)._offset_cues(
+        [
+            {"id": "valid", "start_ms": 800, "end_ms": 1200, "text": "Hop le"},
+            {"id": "crossing", "start_ms": 1800, "end_ms": 2600, "text": "Bi cat"},
+            {"id": "invented", "start_ms": 2400, "end_ms": 3000, "text": "Ngoai video"},
+        ],
+        offset_ms=3000,
+        chunk_duration_ms=2000,
+        duration_ms=5000,
+        existing_count=0,
+    )
+
+    assert [(cue["start_ms"], cue["end_ms"]) for cue in shifted] == [
+        (3800, 4200),
+        (4800, 5000),
+    ]
+    assert [cue["id"] for cue in shifted] == ["gm-0001-3800", "gm-0002-4800"]
+
+
 def test_prompt_bilingual_has_secondary_text(tmp_path: Path) -> None:
     svc = _service(tmp_path)
     prompt_bi = svc._build_prompt(bilingual=True, chunk_index=1, chunk_count=1, chunk_duration_ms=60000)
     prompt_vi = svc._build_prompt(bilingual=False, chunk_index=1, chunk_count=1, chunk_duration_ms=60000)
     assert "secondary_text" in prompt_bi
     assert "secondary_text" not in prompt_vi
+    assert "VIDEO_END_MS=60000" in prompt_bi
+    assert "0 <= start_ms < end_ms <= 60000" in prompt_bi
+    assert "khong dung kien thuc ve phim/video goc de viet tiep" in prompt_bi
+    assert "So cue co the bang 0" in prompt_bi
 
 
 def test_generate_content_retries_on_429(tmp_path: Path) -> None:

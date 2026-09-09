@@ -137,6 +137,52 @@ def test_live_wall_session_api_rejects_urls_and_non_watchlist_ids() -> None:
         assert unknown.status_code == 422
 
 
+def test_open_browser_uses_saved_urls_without_a_managed_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "browser.exe"
+    executable.touch()
+    opened: list[tuple[Path, tuple[str, ...]]] = []
+    monkeypatch.setattr(main.live_wall_manager, "browser_executable", executable)
+    monkeypatch.setattr(
+        main.live_wall_manager,
+        "browser_opener",
+        lambda path, urls: opened.append((path, urls)),
+    )
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            "/api/v1/keywords",
+            json=_topic_payload(
+                "Personal Cốc Cốc",
+                [
+                    {"url": "https://x.com/NTE_Ani_Info"},
+                    {"url": "https://www.reddit.com/r/gaming/"},
+                ],
+            ),
+        ).json()
+        channel_ids = [channel["id"] for channel in created["channels"]]
+        response = client.post(
+            "/api/v1/live-wall/open-browser",
+            json={"keyword_id": created["id"], "channel_ids": channel_ids},
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {"opened": True, "channel_count": 2}
+    assert opened == [
+        (
+            executable.resolve(),
+            (
+                "https://x.com/NTE_Ani_Info",
+                "https://www.reddit.com/r/gaming",
+            ),
+        )
+    ]
+    assert main.live_wall_manager._session is None
+    assert main.live_wall_manager._owner_key is None
+
+
 @pytest.mark.parametrize(
     ("count", "columns", "rows"),
     [(1, 1, 1), (2, 2, 1), (3, 2, 2), (4, 2, 2), (5, 3, 2), (6, 3, 2)],

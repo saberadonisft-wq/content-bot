@@ -759,6 +759,12 @@ def subtitles_to_ass(
     events: list[str] = []
     animation = str(options.get("animation", "none"))
     for subtitle in subtitles:
+        layout = subtitle.get("layout")
+        cue_x = int(float(layout["x"]) / 100 * play_res_x) if layout else base_x
+        cue_y = int(float(layout["y"]) / 100 * play_res_y) if layout else base_y
+        cue_vertical = "middle" if layout else vertical_position
+        cue_position = "custom" if layout else position
+        cue_alignment = {"left": 4, "center": 5, "right": 6}.get(alignment_type, 5) if layout else alignment
         start_ms, end_ms = cue_times_ms(subtitle)
         start = start_ms / 1000
         end = end_ms / 1000
@@ -773,17 +779,17 @@ def subtitles_to_ass(
         if not text_lines:
             continue
         for index, line in enumerate(text_lines):
-            if vertical_position == "top":
-                y = base_y + index * line_height
-            elif vertical_position == "bottom":
-                y = base_y - (len(text_lines) - 1 - index) * line_height
+            if cue_vertical == "top":
+                y = cue_y + index * line_height
+            elif cue_vertical == "bottom":
+                y = cue_y - (len(text_lines) - 1 - index) * line_height
             else:
-                y = base_y + (index - (len(text_lines) - 1) / 2) * line_height
+                y = cue_y + (index - (len(text_lines) - 1) / 2) * line_height
             animation_tag = _ass_animation_tag(
                 animation,
                 alignment_type,
-                position,
-                base_x / play_res_x * 100,
+                cue_position,
+                cue_x / play_res_x * 100,
                 y / play_res_y * 100,
                 play_res_x=play_res_x,
                 play_res_y=play_res_y,
@@ -792,10 +798,10 @@ def subtitles_to_ass(
             override = (
                 f"{{{animation_inner}}}"
                 if animation in {"rise", "pan"} and animation_inner
-                else f"{{\\pos({base_x},{round(y)}){animation_inner}}}"
+                else f"{{\\pos({cue_x},{round(y)}){animation_inner}}}"
             )
             line, _is_secondary = line
-            formatting_override = ""
+            formatting_override = f"{{\\an{cue_alignment}}}" if layout else ""
             safe_line = (
                 line.replace("\\", r"\\")
                 .replace("{", "\\{")

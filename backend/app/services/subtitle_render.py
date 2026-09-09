@@ -17,15 +17,15 @@ import imageio_ffmpeg
 
 from .media_probe import MediaProbeError, probe_media
 from .subtitle_timing import transform_project_cues, validate_cues
+from .subtitle_track import subtitles_to_matroska
 from .subtitles import (
     SUBTITLE_DESIGN_HEIGHT,
     css_font_size_to_ass,
     hex_to_ass_color,
     subtitles_to_ass,
-    subtitles_to_srt,
 )
 
-PRECISION_RENDERER_VERSION = "2026-08-subtitle-v3.5-video-cuts"
+PRECISION_RENDERER_VERSION = "2026-09-subtitle-v3.6-shared-ass-layout"
 SRT_PLAYRES_X = 384
 SRT_PLAYRES_Y = 288
 RenderProgress = Callable[[int, str, str], None]
@@ -531,7 +531,7 @@ def _video_filter_graph(
         subtitle_filter = (
             f"subtitles=filename='{escaped_subtitle}':fontsdir='{escaped_fonts}'"
         )
-        if subtitle_path.suffix.lower() != ".ass":
+        if subtitle_path.suffix.lower() not in {".ass", ".mks"}:
             subtitle_filter += f":charenc=UTF-8:force_style='{_force_style(options)}'"
     speed = Decimal(str(options.get("video_speed", 1)))
     setpts = "setpts=PTS-STARTPTS" if speed == 1 else f"setpts=(PTS-STARTPTS)/{speed}"
@@ -984,9 +984,13 @@ def render_precision_video(
                     encoding="utf-8",
                 )
             elif transformed:
-                subtitle_path = work_dir / "subtitles.srt"
-                subtitle_path.write_text(
-                    subtitles_to_srt(transformed), encoding="utf-8"
+                subtitle_path = work_dir / "subtitles.mks"
+                play_res_x, play_res_y = subtitle_play_resolution(media, options)
+                subtitle_path.write_bytes(
+                    subtitles_to_matroska(
+                        transformed, options,
+                        play_res_x=play_res_x, play_res_y=play_res_y,
+                    )
                 )
             filter_graph, video_map = _video_filter_graph(
                 subtitle_path,

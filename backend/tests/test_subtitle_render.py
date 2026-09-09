@@ -25,6 +25,7 @@ from app.services.subtitle_render import (
     precision_render_cache_key,
     render_precision_video,
 )
+from app.services.subtitle_track import subtitles_to_matroska
 from app.services.subtitles import subtitles_to_ass, subtitles_to_srt
 
 
@@ -532,35 +533,39 @@ def test_render_geometry_matches_desktop_live_preview(
     assert normalized_text_height == pytest.approx(0.0591, abs=0.003)
 
 
-def test_libass_preview_matches_precision_export_at_minimum_font_size(
-    tmp_path: Path,
+@pytest.mark.parametrize("width,height", [(1280, 720), (720, 1280), (720, 720)])
+@pytest.mark.parametrize("font_size", [14, 38])
+@pytest.mark.parametrize("pos_x,pos_y", [(50, 78), (35, 30)])
+def test_libass_preview_matches_precision_export_layout(
+    tmp_path: Path, width: int, height: int, font_size: int, pos_x: int, pos_y: int,
 ) -> None:
-    width, height = 1280, 720
     options = _options(
-        font_size=14,
+        font_size=font_size,
         bold=True,
         bg_enabled=True,
         outline_width=2,
         shadow_width=1,
-        pos_x=50,
-        pos_y=78,
+        pos_x=pos_x,
+        pos_y=pos_y,
     )
     cue = {
         "start_ms": 0,
         "end_ms": 5000,
-        "text": "Em muốn trở thành con rồng mạnh nhất thế giới.",
+        "text": "Em muốn trở thành con rồng mạnh nhất thế giới, cùng các bạn đi thật xa.\nĐây là dòng thứ hai.",
     }
     fonts_dir = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo"
     bounds: list[tuple[int, int, int, int]] = []
+    frames: list[bytes] = []
+    resolution = {"play_res_x": round(720 * width / height), "play_res_y": 720}
 
-    for subtitle_format in ("srt", "ass"):
+    for subtitle_format in ("mks", "ass"):
         subtitle_path = tmp_path / f"minimum-font.{subtitle_format}"
-        subtitle_path.write_text(
-            subtitles_to_srt([cue])
-            if subtitle_format == "srt"
-            else subtitles_to_ass([cue], options),
-            encoding="utf-8",
-        )
+        if subtitle_format == "mks":
+            subtitle_path.write_bytes(subtitles_to_matroska([cue], options, **resolution))
+        else:
+            subtitle_path.write_text(
+                subtitles_to_ass([cue], options, **resolution), encoding="utf-8",
+            )
         graph, output_label = _video_filter_graph(
             subtitle_path,
             fonts_dir,
@@ -597,7 +602,9 @@ def test_libass_preview_matches_precision_export_at_minimum_font_size(
         bounds.append(
             _changed_pixel_bounds(frame, width=width, height=height)
         )
+        frames.append(frame)
 
+    assert frames[0] == frames[1]
     for preview_value, export_value in zip(bounds[1], bounds[0], strict=True):
         assert preview_value == pytest.approx(export_value, abs=2)
 

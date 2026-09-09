@@ -146,28 +146,6 @@ export type Keyword = {
   created_at: string;
   updated_at: string;
 };
-export type LiveWallWindowStatus = {
-  channel_id: string;
-  source_id: string;
-  label: string;
-  state: "opening" | "open" | "closed" | "failed";
-  reason_code: string | null;
-};
-export type LiveWallSessionStatus = {
-  session_id: string | null;
-  keyword_id: number | null;
-  state: "idle" | "opening" | "ready" | "partial" | "failed" | "closing";
-  owned_by_current_user: boolean;
-  reason_code: string | null;
-  detail: string;
-  windows: LiveWallWindowStatus[];
-};
-export type LiveWallDisplayBounds = {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-};
 export type Item = {
   id: number;
   source_id: string;
@@ -634,23 +612,10 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(config),
     }),
-  liveWallStatus: (signal?: AbortSignal) =>
-    request<LiveWallSessionStatus>("/live-wall/session", { signal }),
-  openLiveWall: (
-    keywordId: number,
-    channelIds: string[],
-    display: LiveWallDisplayBounds,
-  ) =>
-    request<LiveWallSessionStatus>("/live-wall/session", {
-      method: "PUT",
-      body: JSON.stringify({ keyword_id: keywordId, channel_ids: channelIds, display }),
-    }),
-  closeLiveWall: () =>
-    request<LiveWallSessionStatus>("/live-wall/session", { method: "DELETE" }),
-  deleteLiveWallProfile: () =>
-    request<{ deleted: boolean }>("/live-wall/profile", {
-      method: "DELETE",
-      body: JSON.stringify({ confirmation: "DELETE LIVE WALL PROFILE" }),
+  openInCoccoc: (keywordId: number, channelIds: string[]) =>
+    request<{ opened: boolean; channel_count: number }>("/live-wall/open-browser", {
+      method: "POST",
+      body: JSON.stringify({ keyword_id: keywordId, channel_ids: channelIds }),
     }),
   items: (keywordId: number, filters: ItemFilters = {}, signal?: AbortSignal) => {
     const params = new URLSearchParams({
@@ -808,6 +773,7 @@ export const api = {
     overlay?: SubtitleOverlayRenderOptions | null,
     masks?: readonly SubtitleMaskRegion[],
     signal?: AbortSignal,
+    voice?: { project_id: string; revision: number } | null,
   ) =>
     request<SubtitleRenderJob>("/subtitles/v2/render", {
       method: "POST",
@@ -817,6 +783,7 @@ export const api = {
         options,
         ...(overlay ? { overlay } : {}),
         ...(masks?.length ? { masks } : {}),
+        ...(voice ? { voice_project_id: voice.project_id, voice_revision: voice.revision } : {}),
       }),
       signal,
     }),

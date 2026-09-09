@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import logging
 import shutil
+import subprocess
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -83,6 +84,17 @@ class LiveWallWindow:
 
 
 DriverFactory = Callable[[], PlaywrightPersistentDriver]
+BrowserOpener = Callable[[Path, tuple[str, ...]], None]
+
+
+def _open_urls_in_user_browser(executable: Path, urls: tuple[str, ...]) -> None:
+    subprocess.Popen(
+        [str(executable), *urls],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
 
 
 def tile_bounds(display: DisplayBounds, count: int, *, gap: int = 8) -> list[dict[str, int]]:
@@ -122,10 +134,12 @@ class LiveWallManager:
         profile_root: Path,
         browser_executable: Path | None,
         driver_factory: DriverFactory = PlaywrightPersistentDriver,
+        browser_opener: BrowserOpener = _open_urls_in_user_browser,
     ) -> None:
         self.profile_root = profile_root.expanduser().resolve()
         self.browser_executable = browser_executable
         self.driver_factory = driver_factory
+        self.browser_opener = browser_opener
         self._lock = asyncio.Lock()
         self._owner_key: str | None = None
         self._keyword_id: int | None = None
@@ -139,6 +153,35 @@ class LiveWallManager:
         self._reason_code: str | None = None
         self._detail = "No external Live Wall is open."
         self._windows: list[LiveWallWindow] = []
+
+    async def open_in_user_browser(
+        self,
+        channels: list[LiveWallChannel],
+    ) -> dict[str, Any]:
+        """Open saved channel URLs in the user's normal Cốc Cốc profile."""
+        if not 1 <= len(channels) <= 6:
+            raise LiveWallFailure(
+                "INVALID_CHANNEL_COUNT", "Choose between one and six saved channels."
+            )
+        try:
+            executable = BrowserExecutableResolver().resolve(self.browser_executable)
+        except FileNotFoundError as exc:
+            raise LiveWallFailure(
+                "BROWSER_EXECUTABLE_NOT_FOUND",
+                "Cốc Cốc was not found. Configure CONTENT_BOT_COCCOC_EXECUTABLE_PATH.",
+            ) from exc
+        try:
+            await asyncio.to_thread(
+                self.browser_opener,
+                executable,
+                tuple(channel.url for channel in channels),
+            )
+        except OSError as exc:
+            raise LiveWallFailure(
+                "BROWSER_LAUNCH_FAILED",
+                "Không thể mở các kênh trong Cốc Cốc của người dùng.",
+            ) from exc
+        return {"opened": True, "channel_count": len(channels)}
 
     async def open_or_update(
         self,

@@ -1,4 +1,6 @@
-import { Film, Image, Subtitles } from "lucide-react";
+import { AudioLines, Film, Image, Subtitles } from "lucide-react";
+import { VoiceTrack } from "../voiceover/VoiceTrack";
+import type { VoiceController } from "../voiceover/useVoiceover";
 import {
   memo,
   startTransition,
@@ -387,6 +389,8 @@ function TimelinePlayhead({
 }
 
 export type SubtitleTimelineProps = {
+  voice?: VoiceController;
+  onOpenVoice?: () => void;
   cues: readonly SubtitleCueV2[];
   selectedCueId: string | null;
   durationMs: number;
@@ -409,6 +413,8 @@ export type SubtitleTimelineProps = {
 };
 
 export function SubtitleTimeline({
+  voice,
+  onOpenVoice,
   cues,
   selectedCueId,
   durationMs,
@@ -597,9 +603,10 @@ export function SubtitleTimeline({
   };
 
   return (
-    <section className="subtitle-timeline" aria-label="Timeline phụ đề">
+    <section className={`subtitle-timeline${voice ? ' has-voice-track' : ''}`} aria-label="Timeline phụ đề">
       <div className="subtitle-timeline-rail" aria-label="Các lớp timeline">
         <div className="subtitle-timeline-rail-spacer" />
+        {voice && <button type="button" className="timeline-track-button voice-track-label" onClick={onOpenVoice} aria-label="Mở công cụ giọng đọc AI" title="Giọng đọc AI"><AudioLines size={17} /><span>AI</span></button>}
         <button type="button" className="timeline-track-button is-active" aria-label="Lớp phụ đề" title="Phụ đề">
           <Subtitles size={17} />
           <span>CC</span>
@@ -685,6 +692,14 @@ export function SubtitleTimeline({
             <span />
           </div>
 
+          {voice && <VoiceTrack clips={voice.document?.clips ?? []} job={voice.job} selectedId={voice.selectedId}
+            pixelsPerSecond={pixelsPerSecond} startMs={visibleStartMs} endMs={visibleEndMs}
+            onSelect={id => {
+              voice.setSelectedId(id); onOpenVoice?.();
+              const clip = voice.document?.clips.find(c => c.id === id);
+              if (clip?.source_cue_ids[0]) onSelectCue(clip.source_cue_ids[0]);
+            }}
+            onMove={(id, offset_ms) => voice.edit(doc => ({ ...doc, clips: doc.clips.map(c => c.id === id ? { ...c, offset_ms } : c) }))} />}
           <div className="subtitle-track-row">
             {visibleCues.map((cue) => (
               <SubtitleCueBlock

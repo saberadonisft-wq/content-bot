@@ -50,7 +50,7 @@ class GeminiSubtitleSettings:
     retry_base_seconds: float = 30.0
 
 
-PROMPT_VERSION = 5
+PROMPT_VERSION = 6
 
 _GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
 
@@ -683,26 +683,30 @@ class GeminiSubtitleService:
             if bilingual
             else ""
         )
-        chunk_duration_s = chunk_duration_ms // 1000
-        gap_threshold = chunk_duration_s // 3 if chunk_duration_s > 30 else 10
+        chunk_duration_s = f"{chunk_duration_ms / 1000:.3f}".rstrip("0").rstrip(".")
+        gap_threshold = chunk_duration_ms // 3000 if chunk_duration_ms > 30_000 else 10
         return (
-            f"Ban la bien tap vien phu de tieng Viet chuyen nghiep. Nhiem vu: dich TOAN BO phu de xuat hien trong video dinh kem, KHONG BO SOT BAT KY CUE NAO.\n\n"
-            f"THONG TIN DOAN: Day la doan {chunk_index}/{chunk_count}. Thoi luong: {chunk_duration_s} giay (0s -> {chunk_duration_s}s). Moi timestamp tinh tu 0 ms.\n\n"
+            f"Ban la bien tap vien phu de tieng Viet chuyen nghiep. Nhiem vu: dich cac phu de/loi thoai THUC SU QUAN SAT DUOC trong video dinh kem. Khong suy dien, khong hoan thanh cau bi cat, khong them canh tiep theo.\n\n"
+            f"THONG TIN DOAN: Day la doan {chunk_index}/{chunk_count}. VIDEO_END_MS={chunk_duration_ms}. Thoi luong chinh xac: {chunk_duration_s} giay. Moi timestamp tinh tu dau doan nay (0 ms).\n"
+            f"GIOI HAN CUNG: Moi cue phai thoa 0 <= start_ms < end_ms <= {chunk_duration_ms}. Khong co noi dung nao sau VIDEO_END_MS={chunk_duration_ms}.\n\n"
             f"BUOC XU LY BAT BUOC:\n"
-            f"1. QUET TIMELINE TU DAU DEN CUOI: Xem video tu giay 0 den giay {chunk_duration_s}. Ghi nhan MOI khoang co phu de hoac loi thoai. Khong duoc dung som.\n"
+            f"1. QUET TIMELINE TU DAU DEN CUOI: Xem video tu 0 ms den dung {chunk_duration_ms} ms. Chi ghi nhan khoang co bang chung truc tiep tu hinh hoac audio trong tep dinh kem.\n"
             f"2. DOC PHU DE TREN HINH: Neu co chu/phu de tren hinh (tieng Trung, Nhat, Han...) - DAY LA NGUON DUY NHAT. Phai dich TUNG cue. Khong gop cue goc. Kho doc dung ... va needs_review=true.\n"
-            f"3. KIEM TRA KHOANG TRONG: Ra soat khoang tren {gap_threshold} giay khong co cue ma van co phu de/loi thoai -> bo sung cue con thieu.\n\n"
-            f"QUY TAC DICH: Uu tien (1)phu de tren hinh -> (2)audio -> (3)ngu canh. Dich tu nhien sang tieng Viet. Khong de sot chu Trung/Nhat/Han. Khong bia loi. {secondary_rule}\n\n"
+            f"3. KIEM TRA KHOANG TRONG: Ra soat khoang tren {gap_threshold} giay. Chi bo sung cue neu THUC SU nhin thay phu de hoac nghe thay loi thoai trong chinh khoang do; neu khong thi giu nguyen khoang trong.\n"
+            f"4. DUNG DUNG LUC: Khi tep ket thuc o {chunk_duration_ms} ms, dung ngay. Neu cau/canh bi cat, khong doan phan con lai va khong dung kien thuc ve phim/video goc de viet tiep.\n\n"
+            f"QUY TAC DICH: Uu tien (1) phu de tren hinh -> (2) audio -> (3) ngu canh chi de hieu nghia, KHONG dung ngu canh de tao them loi. Dich tu nhien sang tieng Viet. Khong de sot chu Trung/Nhat/Han da quan sat duoc. Khong bia loi. {secondary_rule}\n\n"
             f"QUY TAC TIMING BAT BUOC:\n"
+            f"[T0] GIOI HAN TUYET DOI: 0 <= start_ms < end_ms <= {chunk_duration_ms}. Cue bat dau tai/sau {chunk_duration_ms} ms la khong hop le va phai xoa, khong duoc kep vao cuoi video.\n"
             f"[T1] Moi cue 1-6 giay; max 10s cho loi thoai. Cue > 10s phai tach. Max 84 ky tu.\n"
             f"[T2] end_ms = luc am/phu de ket thuc + max 500ms. KHONG keo den cue tiep theo.\n"
             f"[T3] Im lang/nhac nen/chuyen canh = GAP TRONG (khong tao cue). Ngoai le: loi bai hat, thong bao quan trong.\n"
             f"[T4] start_ms[N+1] >= end_ms[N].\n"
             f"[T5] Khong lam tron: 3.7s -> start_ms=3700.\n"
-            f"[T6] Cue theo thu tu thoi gian tang dan. start_ms < end_ms >= 0.\n"
+            f"[T6] Cue theo thu tu thoi gian tang dan. Cue cuoi cung cung phai co end_ms <= {chunk_duration_ms}.\n"
             f"[T7] confidence: 0.95=ro rang, 0.7-0.9=khong chac, <0.7=doan nhieu. needs_review=true khi khong ro loi/timing.\n"
             f"[T8] timing_precision_ms: 100 neu co phu de ro/audio ro; 1000 neu chi chac den giay.\n\n"
-            f"CANH BAO: Neu < 5 cue tren moi 60 giay video co loi thoai, ban dang BO SOT cue. Kiem tra lai.\n\n"
+            f"UU TIEN BANG CHUNG: So cue co the bang 0 neu doan khong co loi thoai/phu de. Khong tao cue chi de dat mot so luong toi thieu.\n\n"
+            f"TU KIEM TRA TRUOC KHI TRA JSON: Tim max(end_ms). Neu gia tri nay > {chunk_duration_ms}, xoa cue nam hoan toan ngoai video va cat end_ms cua cue giao voi diem ket thuc ve dung {chunk_duration_ms}. Sau do kiem tra lai moi cue theo T0.\n\n"
             f"CHI tra ve mot JSON hop le, khong Markdown, khong giai thich:\n"
             '{{\n'
             '  "schema_version": 2,\n'
@@ -728,16 +732,23 @@ class GeminiSubtitleService:
         cues: list[dict[str, Any]],
         *,
         offset_ms: int,
+        chunk_duration_ms: int,
         duration_ms: int,
         existing_count: int,
     ) -> list[dict[str, Any]]:
         shifted: list[dict[str, Any]] = []
-        for index, cue in enumerate(cues):
-            start_ms = min(duration_ms - 1, max(0, int(cue["start_ms"]) + offset_ms))
-            end_ms = min(duration_ms, max(start_ms + 1, int(cue["end_ms"]) + offset_ms))
+        for cue in cues:
+            local_start_ms = max(0, int(cue["start_ms"]))
+            local_end_ms = min(chunk_duration_ms, int(cue["end_ms"]))
+            if local_start_ms >= chunk_duration_ms or local_end_ms <= local_start_ms:
+                continue
+            start_ms = local_start_ms + offset_ms
+            end_ms = min(duration_ms, local_end_ms + offset_ms)
+            if end_ms <= start_ms:
+                continue
             next_cue = {
                 **cue,
-                "id": f"gm-{existing_count + index + 1:04d}-{start_ms}",
+                "id": f"gm-{existing_count + len(shifted) + 1:04d}-{start_ms}",
                 "start_ms": start_ms,
                 "end_ms": end_ms,
                 "timing_source": "gemini_estimate",
@@ -771,6 +782,17 @@ class GeminiSubtitleService:
         started = time.monotonic()
         chunk_ms = max(30_000, self.settings.chunk_seconds * 1000)
         chunk_count = max(1, math.ceil(duration_ms / chunk_ms))
+        # Keep completed responses outside the disposable per-job workspace so a
+        # new job can resume after a process restart or a transient API failure.
+        source_stat = video_path.stat()
+        checkpoint_key = gemini_generation_cache_key(
+            {**media, "fingerprint": [media.get("fingerprint"), str(video_path.resolve()),
+                                      source_stat.st_size, source_stat.st_mtime_ns]},
+            {**options, "chunk_ms": chunk_ms, "duration_ms": duration_ms},
+            model=selected_model,
+        )
+        checkpoint_dir = job_root / "checkpoints" / checkpoint_key
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
         combined_cues: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         uploaded_files: list[str] = []
@@ -781,80 +803,101 @@ class GeminiSubtitleService:
                 offset_ms = chunk_index * chunk_ms
                 current_duration_ms = min(chunk_ms, duration_ms - offset_ms)
                 progress = 5 + round((chunk_index / chunk_count) * 85)
-                context.update(
-                    progress,
-                    "preparing_video",
-                    f"Dang nen video ({chunk_index + 1}/{chunk_count})",
-                )
-                chunk_dir = workspace / f"chunk-{chunk_index + 1:03d}"
-                chunk_dir.mkdir(parents=True, exist_ok=True)
-                proxy_path = chunk_dir / "proxy.mp4"
-                can_use_original = (
-                    chunk_count == 1
-                    and video_path.suffix.lower() == ".mp4"
-                    and video_path.stat().st_size <= self.settings.max_input_mb * 1024 * 1024
-                )
-                if can_use_original:
-                    shutil.copy2(video_path, proxy_path)
-                else:
-                    self._create_proxy(
-                        video_path,
-                        proxy_path,
-                        start_seconds=offset_ms / 1000,
-                        duration_seconds=current_duration_ms / 1000,
-                        cancel_event=context.cancel_event,
+                checkpoint_path = checkpoint_dir / f"chunk-{chunk_index + 1:03d}.json"
+                raw_text = None
+                try:
+                    cached_text = checkpoint_path.read_text(encoding="utf-8")
+                    cached_document, _ = parse_subtitles_v2(
+                        cached_text, media_duration_ms=current_duration_ms
                     )
-                context.update(
-                    min(90, progress + 3),
-                    "uploading_video",
-                    f"Dang tai video len Gemini ({chunk_index + 1}/{chunk_count})",
-                )
-                file_name = self._upload_file(
-                    proxy_path,
-                    cancel_event=context.cancel_event,
-                    status_callback=lambda msg, ci=chunk_index + 1, cc=chunk_count, base_progress=progress: context.update(
-                        min(90, base_progress + 3),
+                    if cached_document["segments"]:
+                        raw_text = cached_text
+                except (OSError, ValueError, TypeError, KeyError):
+                    pass
+                if raw_text is None:
+                    context.update(
+                        progress,
+                        "preparing_video",
+                        f"Dang nen video ({chunk_index + 1}/{chunk_count})",
+                    )
+                    chunk_dir = workspace / f"chunk-{chunk_index + 1:03d}"
+                    chunk_dir.mkdir(parents=True, exist_ok=True)
+                    proxy_path = chunk_dir / "proxy.mp4"
+                    can_use_original = (
+                        chunk_count == 1
+                        and video_path.suffix.lower() == ".mp4"
+                        and video_path.stat().st_size <= self.settings.max_input_mb * 1024 * 1024
+                    )
+                    if can_use_original:
+                        shutil.copy2(video_path, proxy_path)
+                    else:
+                        self._create_proxy(
+                            video_path,
+                            proxy_path,
+                            start_seconds=offset_ms / 1000,
+                            duration_seconds=current_duration_ms / 1000,
+                            cancel_event=context.cancel_event,
+                        )
+                    context.update(
+                        min(90, progress + 3),
                         "uploading_video",
-                        f"[{ci}/{cc}] {msg}",
-                    ),
-                    client=client,
-                    api_key=api_key,
-                )
-                uploaded_files.append(file_name)
-                context.update(
-                    min(90, progress + 6),
-                    "gemini_analyzing",
-                    f"Gemini dang xem va dich doan {chunk_index + 1}/{chunk_count}",
-                )
-                prompt = self._build_prompt(
-                    bilingual=bool(options.get("bilingual", True)),
-                    chunk_index=chunk_index + 1,
-                    chunk_count=chunk_count,
-                    chunk_duration_ms=current_duration_ms,
-                )
-                raw_text = self._generate_content(
-                    file_name,
-                    prompt,
-                    cancel_event=context.cancel_event,
-                    status_callback=lambda msg, ci=chunk_index + 1, cc=chunk_count, base_progress=progress: context.update(
-                        min(90, base_progress + 6),
+                        f"Dang tai video len Gemini ({chunk_index + 1}/{chunk_count})",
+                    )
+                    file_name = self._upload_file(
+                        proxy_path,
+                        cancel_event=context.cancel_event,
+                        status_callback=lambda msg, ci=chunk_index + 1, cc=chunk_count, base_progress=progress: context.update(
+                            min(90, base_progress + 3),
+                            "uploading_video",
+                            f"[{ci}/{cc}] {msg}",
+                        ),
+                        client=client,
+                        api_key=api_key,
+                    )
+                    uploaded_files.append(file_name)
+                    context.update(
+                        min(90, progress + 6),
                         "gemini_analyzing",
-                        f"[{ci}/{cc}] {msg}",
-                    ),
-                    client=client,
-                    api_key=api_key,
-                    model=selected_model,
-                )
+                        f"Gemini dang xem va dich doan {chunk_index + 1}/{chunk_count}",
+                    )
+                    prompt = self._build_prompt(
+                        bilingual=bool(options.get("bilingual", True)),
+                        chunk_index=chunk_index + 1,
+                        chunk_count=chunk_count,
+                        chunk_duration_ms=current_duration_ms,
+                    )
+                    raw_text = self._generate_content(
+                        file_name,
+                        prompt,
+                        cancel_event=context.cancel_event,
+                        status_callback=lambda msg, ci=chunk_index + 1, cc=chunk_count, base_progress=progress: context.update(
+                            min(90, base_progress + 6),
+                            "gemini_analyzing",
+                            f"[{ci}/{cc}] {msg}",
+                        ),
+                        client=client,
+                        api_key=api_key,
+                        model=selected_model,
+                    )
+                    document, chunk_warnings = parse_subtitles_v2(
+                        raw_text, media_duration_ms=current_duration_ms
+                    )
+                    if not document["segments"]:
+                        raise GeminiSubtitleError(
+                            f"Gemini khong tra ve cue hop le cho doan {chunk_index + 1}"
+                        )
+                    temporary = checkpoint_path.with_suffix(f".{context.job_id}.part")
+                    temporary.write_text(raw_text, encoding="utf-8")
+                    temporary.replace(checkpoint_path)
+                else:
+                    context.update(progress, "resuming", f"Dùng lại đoạn đã hoàn tất ({chunk_index + 1}/{chunk_count})")
                 document, chunk_warnings = parse_subtitles_v2(
                     raw_text, media_duration_ms=current_duration_ms
                 )
-                if not document["segments"]:
-                    raise GeminiSubtitleError(
-                        f"Gemini khong tra ve cue hop le cho doan {chunk_index + 1}"
-                    )
                 shifted = self._offset_cues(
                     document["segments"],
                     offset_ms=offset_ms,
+                    chunk_duration_ms=current_duration_ms,
                     duration_ms=duration_ms,
                     existing_count=len(combined_cues),
                 )
@@ -873,7 +916,9 @@ class GeminiSubtitleService:
                 timing_precision_ms=document_precision,
                 segments=combined_cues,
             ).model_dump(mode="json")
-            warnings.extend(validate_cues(final_doc["segments"]))
+            warnings.extend(
+                validate_cues(final_doc["segments"], media_duration_ms=duration_ms)
+            )
             return {
                 "document": final_doc,
                 "warnings": warnings,

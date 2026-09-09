@@ -97,6 +97,7 @@ export function desktopCanRenderSource(sourceId: string) {
 export function desktopViewPlacement(
   rect: Pick<DOMRect, "left" | "top" | "right" | "bottom" | "width" | "height">,
   viewport: { width: number; height: number },
+  unobscured = true,
 ): { bounds: DesktopViewBounds; visible: boolean } | null {
   const width = Math.floor(rect.width);
   const height = Math.floor(rect.height);
@@ -109,6 +110,7 @@ export function desktopViewPlacement(
       height,
     },
     visible:
+      unobscured &&
       rect.right > 0 &&
       rect.bottom > 0 &&
       rect.left < viewport.width &&
@@ -116,11 +118,42 @@ export function desktopViewPlacement(
   };
 }
 
+function hostIsUnobscured(
+  element: HTMLElement,
+  rect: Pick<DOMRect, "left" | "top" | "right" | "bottom">,
+  viewport: { width: number; height: number },
+) {
+  if (document.visibilityState === "hidden" || !element.isConnected) return false;
+
+  // WebContentsView is native Electron chrome and always paints above renderer
+  // DOM. Hide it while a modal is open because an HTML backdrop cannot cover it.
+  const modal = document.querySelector("dialog[open], [aria-modal='true']");
+  if (modal && !modal.contains(element)) return false;
+
+  const left = Math.max(0, rect.left);
+  const top = Math.max(0, rect.top);
+  const right = Math.min(viewport.width, rect.right);
+  const bottom = Math.min(viewport.height, rect.bottom);
+  if (right <= left || bottom <= top) return false;
+
+  const topElement = document.elementFromPoint(
+    Math.floor((left + right) / 2),
+    Math.floor((top + bottom) / 2),
+  );
+  return !topElement || topElement === element || element.contains(topElement);
+}
+
 function viewPlacement(element: HTMLElement) {
-  return desktopViewPlacement(element.getBoundingClientRect(), {
+  const rect = element.getBoundingClientRect();
+  const viewport = {
     width: window.innerWidth,
     height: window.innerHeight,
-  });
+  };
+  return desktopViewPlacement(
+    rect,
+    viewport,
+    hostIsUnobscured(element, rect, viewport),
+  );
 }
 
 export function useDesktopLiveWall({
@@ -210,13 +243,23 @@ export function useDesktopLiveWall({
     }
     const observer = new ResizeObserver(scheduleSync);
     for (const host of hostsRef.current.values()) observer.observe(host);
+    const visibilityObserver = new MutationObserver(scheduleSync);
+    visibilityObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["aria-hidden", "aria-modal", "hidden", "open"],
+      childList: true,
+      subtree: true,
+    });
     window.addEventListener("resize", scheduleSync);
     window.addEventListener("scroll", scheduleSync, true);
+    document.addEventListener("visibilitychange", scheduleSync);
     scheduleSync();
     return () => {
       observer.disconnect();
+      visibilityObserver.disconnect();
       window.removeEventListener("resize", scheduleSync);
       window.removeEventListener("scroll", scheduleSync, true);
+      document.removeEventListener("visibilitychange", scheduleSync);
       if (frameRef.current !== null) {
         window.cancelAnimationFrame(frameRef.current);
         frameRef.current = null;

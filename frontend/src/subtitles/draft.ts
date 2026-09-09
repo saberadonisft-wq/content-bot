@@ -84,6 +84,9 @@ const normalizeCue = (
     start_ms: startMs,
     end_ms: endMs,
     text: text.slice(0, 4000),
+    ...(isRecord(candidate.layout) && finiteNumber(candidate.layout.x) && finiteNumber(candidate.layout.y)
+      ? { layout: { x: Math.max(0, Math.min(100, candidate.layout.x)), y: Math.max(0, Math.min(100, candidate.layout.y)) } }
+      : {}),
     ...(typeof candidate.secondary_text === "string" && candidate.secondary_text.trim()
       ? { secondary_text: candidate.secondary_text.trim().slice(0, 4000) }
       : {}),

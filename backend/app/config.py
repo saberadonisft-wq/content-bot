@@ -38,7 +38,9 @@ class Settings(BaseSettings):
     # Optional comma-separated DNS servers used only for mongodb+srv lookups.
     # This helps when Windows exposes an unreachable resolver from a disconnected adapter.
     mongodb_dns_servers: str = ""
-    content_bot_max_video_size_bytes: int = 524_288_000
+    # Keep uploads practical for long-form source videos while still preventing
+    # accidental unbounded disk usage. Override with CONTENT_BOT_MAX_VIDEO_SIZE_BYTES.
+    content_bot_max_video_size_bytes: int = 2_147_483_648
     content_bot_max_overlay_size_bytes: int = 10_485_760
     content_bot_media_probe_timeout_seconds: int = 120
     content_bot_thumbnail_timeout_seconds: int = 90

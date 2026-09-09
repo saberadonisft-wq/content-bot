@@ -43,6 +43,8 @@ type PreviewStageProps = {
   onTogglePlay: () => void;
   onSelectCue: (cueId: string | null) => void;
   onUpdateCueText: (cueId: string, text: string) => void;
+  onCuePositionChange: (cueId: string, position: { x: number; y: number }) => void;
+  onActiveCueChange: (cueId: string | null) => void;
   onOptionsCommit: (options: SubtitleBurnOptions) => void;
   onOverlayLayoutCommit: (layout: OverlayLayout) => void;
   onSelectMask: (maskId: string | null) => void;
@@ -51,6 +53,7 @@ type PreviewStageProps = {
 };
 
 type PositionDrag = {
+  cueId: string;
   pointerId: number;
   clientX: number;
   clientY: number;
@@ -113,6 +116,8 @@ export function PreviewStage({
   onTogglePlay,
   onSelectCue,
   onUpdateCueText,
+  onCuePositionChange,
+  onActiveCueChange,
   onOptionsCommit,
   onOverlayLayoutCommit,
   onSelectMask,
@@ -148,6 +153,8 @@ export function PreviewStage({
     () => sortedCues.find((cue) => cue.id === activeCueId) ?? null,
     [activeCueId, sortedCues],
   );
+  const cuePosition = activeCue?.layout ?? { x: options.pos_x, y: options.pos_y };
+  useEffect(() => { onActiveCueChange(activeCueId); }, [activeCueId, onActiveCueChange]);
   const previewMetrics = previewSubtitleMetrics(
     frameBox.height,
     options.font_size,
@@ -267,7 +274,7 @@ export function PreviewStage({
         ),
       ),
     );
-    overlay.style.fontSize = `${Math.max(10, drag.resultSize * previewScale)}px`;
+    overlay.style.fontSize = `${drag.resultSize * previewScale}px`;
   };
 
   const paintImagePositionDrag = () => {
@@ -359,11 +366,9 @@ export function PreviewStage({
       const drag = positionDragRef.current;
       positionDragRef.current = null;
       setIsDragging(false);
-      onOptionsCommit({
-        ...options,
-        position: "custom",
-        pos_x: Math.round(drag.resultX * 10) / 10,
-        pos_y: Math.round(drag.resultY * 10) / 10,
+      onCuePositionChange(drag.cueId, {
+        x: Math.round(drag.resultX * 10) / 10,
+        y: Math.round(drag.resultY * 10) / 10,
       });
     }
     if (resizeDragRef.current?.pointerId === event.pointerId) {
@@ -406,19 +411,21 @@ export function PreviewStage({
   };
 
   const startPositionDrag = (event: PointerEvent<HTMLElement>) => {
-    if (previewMode !== "live" || isEditing) return;
+    if (previewMode !== "live" || isEditing || !activeCue) return;
+    onSelectCue(activeCue.id);
     event.preventDefault();
     event.stopPropagation();
     positionDragRef.current = {
+      cueId: activeCue.id,
       pointerId: event.pointerId,
       clientX: event.clientX,
       clientY: event.clientY,
-      startX: options.pos_x,
-      startY: options.pos_y,
+      startX: cuePosition.x,
+      startY: cuePosition.y,
       pointerX: event.clientX,
       pointerY: event.clientY,
-      resultX: options.pos_x,
-      resultY: options.pos_y,
+      resultX: cuePosition.x,
+      resultY: cuePosition.y,
     };
     setIsDragging(true);
     listenForPointer();
@@ -518,8 +525,8 @@ export function PreviewStage({
     lineHeight: options.line_spacing || 1.2,
     textTransform: options.uppercase ? "uppercase" : "none",
     letterSpacing: `${options.spacing * previewScale}px`,
-    left: `${options.pos_x}%`,
-    top: `${options.pos_y}%`,
+    left: `${cuePosition.x}%`,
+    top: `${cuePosition.y}%`,
     transform: `translate(${options.alignment_type === "left" ? "0%" : options.alignment_type === "right" ? "-100%" : "-50%"}, -50%)`,
     paintOrder: "stroke fill",
     WebkitTextStroke:

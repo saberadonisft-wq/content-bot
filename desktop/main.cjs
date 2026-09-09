@@ -2,6 +2,8 @@ const crypto = require("node:crypto");
 const http = require("node:http");
 const path = require("node:path");
 
+
+
 const {
   app,
   BrowserWindow,
@@ -115,11 +117,20 @@ function startQueuedLoad(record) {
   });
 }
 
+const STAGGER_DELAY_MS = 3_000;
+let pumpTimer = null;
+
 function pumpLoadQueue() {
-  while (activeLoadCount < MAX_CONCURRENT_LOADS && loadQueue.length) {
-    const record = loadQueue.shift();
-    if (!record || record.destroyed || !record.queued) continue;
-    startQueuedLoad(record);
+  clearTimeout(pumpTimer);
+  if (activeLoadCount >= MAX_CONCURRENT_LOADS || !loadQueue.length) return;
+  const record = loadQueue.shift();
+  if (!record || record.destroyed || !record.queued) {
+    pumpLoadQueue();
+    return;
+  }
+  startQueuedLoad(record);
+  if (loadQueue.length) {
+    pumpTimer = setTimeout(() => pumpLoadQueue(), STAGGER_DELAY_MS);
   }
 }
 
@@ -152,7 +163,12 @@ function configurePartition(record) {
     }
     callback(isHeavyMedia ? { cancel: true } : {});
   });
-  const userAgent = browserSession.getUserAgent().replace(/\sElectron\/\S+/i, "");
+  const userAgent = browserSession
+    .getUserAgent()
+    .replace(/\s*Electron\/\S+/gi, "")
+    .replace(/\s*content[- ]bot[- ]\S*\/\S+/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
   browserSession.setUserAgent(userAgent);
 }
 

@@ -41,6 +41,19 @@ class LiveWallSessionInput(BaseModel):
         return self
 
 
+class UserBrowserOpenInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keyword_id: int = Field(gt=0)
+    channel_ids: list[str] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_channel_ids(self) -> UserBrowserOpenInput:
+        if len(set(self.channel_ids)) != len(self.channel_ids):
+            raise ValueError("channel_ids must be unique")
+        return self
+
+
 class LiveWallProfileDeleteInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -57,25 +70,21 @@ def build_live_wall_router(
     async def session_status(user: dict = Depends(get_current_user)):
         return await manager.status(_user_id(user))
 
-    @router.put("/session", status_code=202)
-    async def open_session(
-        payload: LiveWallSessionInput,
-        user: dict = Depends(get_current_user),
-    ):
-        keyword = get_store().keyword(payload.keyword_id)
+    def saved_channels(keyword_id: int, channel_ids: list[str]) -> list[LiveWallChannel]:
+        keyword = get_store().keyword(keyword_id)
         if not keyword:
             raise HTTPException(404, "Keyword not found")
         by_id = {
             str(channel.get("id") or ""): channel
             for channel in keyword.get("channels", [])
         }
-        unknown = [channel_id for channel_id in payload.channel_ids if channel_id not in by_id]
+        unknown = [channel_id for channel_id in channel_ids if channel_id not in by_id]
         if unknown:
             raise HTTPException(
                 422, f"Unknown channel IDs for this keyword: {', '.join(unknown)}"
             )
         channels: list[LiveWallChannel] = []
-        for channel_id in payload.channel_ids:
+        for channel_id in channel_ids:
             stored = by_id[channel_id]
             url = str(stored.get("normalized_url") or stored.get("url") or "")
             parsed = urlparse(url)
@@ -94,11 +103,30 @@ def build_live_wall_router(
                     url=url,
                 )
             )
+        return channels
+
+    @router.post("/open-browser", status_code=202)
+    async def open_user_browser(
+        payload: UserBrowserOpenInput,
+        _user: dict = Depends(get_current_user),
+    ):
+        try:
+            return await manager.open_in_user_browser(
+                saved_channels(payload.keyword_id, payload.channel_ids)
+            )
+        except LiveWallFailure as exc:
+            raise HTTPException(409, {"reason_code": exc.code, "message": exc.detail}) from exc
+
+    @router.put("/session", status_code=202)
+    async def open_session(
+        payload: LiveWallSessionInput,
+        user: dict = Depends(get_current_user),
+    ):
         try:
             return await manager.open_or_update(
                 _user_id(user),
                 payload.keyword_id,
-                channels,
+                saved_channels(payload.keyword_id, payload.channel_ids),
                 DisplayBounds(**payload.display.model_dump()),
             )
         except LiveWallFailure as exc:

@@ -14,7 +14,10 @@ export type SubtitleWordV2 = {
   confidence?: number | null;
 };
 
+export type SubtitlePosition = { x: number; y: number };
+
 export type SubtitleCueV2 = {
+  layout?: SubtitlePosition | null;
   id: string;
   start_ms: number;
   end_ms: number;

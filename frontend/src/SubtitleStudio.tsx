@@ -1,3 +1,4 @@
+import { applyCuePosition } from "./subtitles/position";
 import {
   AlignCenter,
   AlignLeft,
@@ -86,8 +87,17 @@ import {
 } from "./subtitles/video-clips";
 import { useSubtitleHistory } from "./subtitles/useSubtitleHistory";
 import "./subtitle-studio.css";
+import { useVoiceover } from "./voiceover/useVoiceover";
+import { VoicePanel } from "./voiceover/VoicePanel";
+import "./voiceover/voiceover.css";
 
 const GEMINI_PROMPT_TEMPLATE = `Bạn là biên tập viên phụ đề chuyên nghiệp cho video hội thoại. Hãy xem và nghe TOÀN BỘ video, xác định lời thoại theo audio và dịch sang tiếng Việt. Kết quả sẽ được đưa qua một bước forced alignment riêng, vì vậy bạn phải trung thực về timing và không được bịa độ chính xác.
+
+GIỚI HẠN VIDEO — BẮT BUỘC
+- Thời điểm kết thúc chính xác là VIDEO_END_MS={{VIDEO_DURATION_MS}} ms.
+- Mọi cue phải thỏa \`0 <= start_ms < end_ms <= {{VIDEO_DURATION_MS}}\`. Cue bắt đầu tại hoặc sau VIDEO_END_MS là không hợp lệ và phải bị loại bỏ.
+- Khi video kết thúc, dừng ngay. Nếu câu hoặc cảnh bị cắt, không hoàn thành phần còn lại, không suy diễn cảnh tiếp theo và không dùng kiến thức về phim/video gốc để viết tiếp.
+- Khoảng dài không có lời thoại/phụ đề là hợp lệ. Không tạo cue để lấp timeline hoặc đạt một số lượng cue tối thiểu.
 
 MỤC TIÊU VÀ THỨ TỰ ƯU TIÊN
 1. Xác định đúng đoạn hội thoại thực sự được nói, không tóm tắt và không tự thêm lời.
@@ -110,6 +120,7 @@ QUY TẮC NGUỒN VÀ BẢN DỊCH
 
 QUY TẮC TIMING — RẤT QUAN TRỌNG
 - Tất cả mốc tính từ đầu video, dùng integer milliseconds.
+- Giới hạn cứng: \`0 <= start_ms < end_ms <= {{VIDEO_DURATION_MS}}\`; cue cuối cùng cũng không được vượt VIDEO_END_MS.
 - Nếu có phụ đề gốc hiển thị trên hình, \`start_ms\`/\`end_ms\` phải bám theo thời điểm cue gốc xuất hiện để bản dịch xuất hiện đồng thời; nếu không có phụ đề gốc, dùng âm đầu tiên và sau âm cuối cùng của lời thoại.
 - Dựa vào waveform/audio và khoảng im lặng, không dựa máy móc vào dấu phẩy, dấu chấm hay độ dài bản dịch.
 - Nếu giữa hai câu có im lặng, bắt buộc để khoảng trống: \`next.start_ms > previous.end_ms\`. Không kéo cue chạm nhau chỉ để lấp timeline.
@@ -152,6 +163,7 @@ TỰ KIỂM TRA TRƯỚC KHI TRẢ KẾT QUẢ
 - schema_version = 2, language = “vi”, timebase = “milliseconds”.
 - ID không trùng, đúng thứ tự, không có segment rỗng.
 - start_ms/end_ms là integer, 0 <= start_ms < end_ms.
+- \`max(end_ms) <= {{VIDEO_DURATION_MS}}\`. Nếu vi phạm, xóa cue nằm hoàn toàn ngoài video và cắt cue giao với điểm kết thúc về đúng VIDEO_END_MS rồi kiểm tra lại.
 - Không có cue chồng lấn ngoài trường hợp hai người thực sự nói đè nhau.
 - Khoảng im lặng thật được giữ nguyên, không nối các cue thành một dải liên tục.
 - Không bịa timestamp 10 ms, không bịa lời thoại và không có văn bản nào ngoài JSON.`;
@@ -290,7 +302,7 @@ const STYLE_PRESETS: Record<string, Partial<SubtitleBurnOptions>> = {
   },
 };
 
-type StudioTab = "upload" | "transcript" | "style" | "mask" | "video" | "position";
+type StudioTab = "upload" | "transcript" | "style" | "mask" | "video" | "position" | "voice";
 
 type SubtitleStudioProps = {
   onBack?: () => void;
@@ -390,6 +402,8 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const [selectedCueId, setSelectedCueId] = useState<string | null>(
     initialDraft?.selectedCueId ?? null,
   );
+  const [allSubtitlePositions, setAllSubtitlePositions] = useState(false);
+  const [activePositionCueId, setActivePositionCueId] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<SubtitleWarning[]>([]);
   const [activeGeminiJobId, setActiveGeminiJobId] = useState<string | null>(
     initialDraft?.activeGeminiJobId ?? null,
@@ -454,6 +468,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const [error, setError] = useState<string | null>(null);
 
   const sortedCues = useMemo(() => sortCues(cues), [cues]);
+  const voice = useVoiceover(videoId, mediaMetadata?.fingerprint, sortedCues);
   const subtitleDocument = useMemo(
     () => createSubtitleDocument(sortedCues),
     [sortedCues],
@@ -478,7 +493,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     ),
   );
   const hasRenderContent =
-    sortedCues.length > 0 || Boolean(overlayId) || subtitleMasks.length > 0 || hasVideoEdits;
+    sortedCues.length > 0 || Boolean(overlayId) || subtitleMasks.length > 0 || hasVideoEdits || Boolean(voice.document?.clips.length);
   const selectedMask = subtitleMasks.find((mask) => mask.id === selectedMaskId) ?? null;
   const canRender = Boolean(
     videoId &&
@@ -880,10 +895,18 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   );
 
   const handleFileChange = async (file: File) => {
+    if (voice.document) {
+      try { await voice.save(); }
+      catch (saveError) {
+        setError(getErrorMessage(saveError, "Chưa lưu được lời đọc. Hãy lưu lại trước khi đổi video."));
+        return;
+      }
+    }
     uploadControllerRef.current?.abort();
     const controller = new AbortController();
     uploadControllerRef.current = controller;
     setVideoFile(file);
+    setVideoId(null);
     setProjectName(file.name);
     setUploading(true);
     setError(null);
@@ -977,7 +1000,11 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
 
   const handleCopyPrompt = async () => {
     try {
-      await navigator.clipboard.writeText(GEMINI_PROMPT_TEMPLATE);
+      const prompt = GEMINI_PROMPT_TEMPLATE.replaceAll(
+        "{{VIDEO_DURATION_MS}}",
+        mediaDurationMs > 0 ? String(Math.round(mediaDurationMs)) : "[ĐIỀN THỜI LƯỢNG VIDEO BẰNG MILLISECOND]",
+      );
+      await navigator.clipboard.writeText(prompt);
       setCopiedPrompt(true);
       window.setTimeout(() => setCopiedPrompt(false), 2500);
     } catch {
@@ -1140,6 +1167,25 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     [handleCueChange],
   );
 
+  const positionCue = cues.find((cue) => cue.id === selectedCueId)
+    ?? cues.find((cue) => cue.id === activePositionCueId);
+  const editPosition = positionCue?.layout ?? { x: options.pos_x, y: options.pos_y };
+
+  const handleCuePositionChange = (cueId: string, position: { x: number; y: number }) => {
+    commitCues((current) => applyCuePosition(current, cueId, position, allSubtitlePositions));
+  };
+  const toggleAllSubtitlePositions = () => {
+    if (!allSubtitlePositions) {
+      const currentMs = workspaceRef.current?.getCurrentMs() ?? 0;
+      const visible = cues.find((cue) => cue.start_ms <= currentMs && currentMs < cue.end_ms) ?? positionCue;
+      if (!visible) return;
+      const position = visible.layout ?? { x: options.pos_x, y: options.pos_y };
+      commitCues((current) => applyCuePosition(current, visible.id, position, true));
+      setSelectedCueId(visible.id);
+    }
+    setAllSubtitlePositions((current) => !current);
+  };
+
   const handleAddCue = () => {
     const cue = createManualCue(sortedCues, mediaDurationMs);
     commitCues((current) => sortCues([...current, cue]));
@@ -1194,6 +1240,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         overlayId ? { overlay_id: overlayId, ...overlayLayout } : null,
         subtitleMasks,
         controller.signal,
+        voice.document?.mix.enabled ? await voice.save() : null,
       );
       if (controller.signal.aborted) return;
       setRenderedVideoUrl(null);
@@ -1346,6 +1393,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const tabs: { id: StudioTab; label: string; icon: typeof Upload }[] = [
     { id: "upload", label: "Tải lên", icon: Upload },
     { id: "transcript", label: "Phụ đề", icon: FileText },
+    { id: "voice", label: "Giọng đọc", icon: AudioLines },
     { id: "style", label: "Kiểu chữ", icon: Type },
     { id: "mask", label: "Che chữ cũ", icon: EyeOff },
     { id: "video", label: "Video", icon: Video },
@@ -1459,6 +1507,18 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         </nav>
 
         <aside className={`subtitle-tool-panel ${sidebarOpen ? "is-open" : ""}`} aria-label="Bảng công cụ">
+          {activeTab === "voice" && <VoicePanel key={videoId ?? 'no-video'} voice={voice} exportTimeline={{ duration_ms: mediaDurationMs,
+            trim_start_ms: renderOptions.trim_start_ms, trim_end_ms: renderOptions.trim_end_ms,
+            video_speed: renderOptions.video_speed, video_segments: renderOptions.video_segments }} />}
+          <div className="studio-panel-section">
+            <label className="subtitle-generation-checkbox">
+              <input type="checkbox" checked={allSubtitlePositions} disabled={!allSubtitlePositions && !positionCue && !activePositionCueId} onChange={toggleAllSubtitlePositions} />
+              Chọn tất cả phụ đề
+            </label>
+            <small>{allSubtitlePositions
+              ? "Chỉnh vị trí sẽ áp dụng cho tất cả phụ đề."
+              : "Chọn một đoạn hoặc kéo phụ đề đang hiện để chỉnh vị trí riêng."}</small>
+          </div>
           {activeTab === "upload" && (
             <div className="studio-panel-section">
               <div className="studio-panel-heading">
@@ -1963,10 +2023,10 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
           {activeTab === "position" && (
             <div className="studio-panel-section">
               <div className="studio-panel-heading"><h2>Vị trí và nền</h2><p>Kéo trực tiếp phụ đề trên video hoặc nhập tọa độ chính xác.</p></div>
-              <label className="studio-range-field"><span>Ngang <output>{options.pos_x.toFixed(1)}%</output></span><input type="range" min={0} max={100} step={0.1} value={options.pos_x} onChange={(event) => setOptions({ ...options, position: "custom", pos_x: Number(event.target.value) })} /></label>
-              <label className="studio-range-field"><span>Dọc <output>{options.pos_y.toFixed(1)}%</output></span><input type="range" min={0} max={100} step={0.1} value={options.pos_y} onChange={(event) => setOptions({ ...options, position: "custom", pos_y: Number(event.target.value) })} /></label>
+              <label className="studio-range-field"><span>Ngang <output>{editPosition.x.toFixed(1)}%</output></span><input type="range" min={0} max={100} step={0.1} value={editPosition.x} disabled={!positionCue} onChange={(event) => positionCue && handleCuePositionChange(positionCue.id, { ...editPosition, x: Number(event.target.value) })} /></label>
+              <label className="studio-range-field"><span>Dọc <output>{editPosition.y.toFixed(1)}%</output></span><input type="range" min={0} max={100} step={0.1} value={editPosition.y} disabled={!positionCue} onChange={(event) => positionCue && handleCuePositionChange(positionCue.id, { ...editPosition, y: Number(event.target.value) })} /></label>
               <label className="studio-range-field"><span>Độ mờ nền <output>{Math.round(options.bg_opacity * 100)}%</output></span><input type="range" min={0} max={1} step={0.05} value={options.bg_opacity} disabled={!options.bg_enabled} onChange={(event) => setOptions({ ...options, bg_opacity: Number(event.target.value) })} /></label>
-              <button type="button" className="studio-secondary-button" onClick={() => setOptions({ ...options, position: "custom", pos_x: 50, pos_y: 78 })}>Đặt lại vị trí</button>
+              <button type="button" className="studio-secondary-button" disabled={!positionCue} onClick={() => positionCue && handleCuePositionChange(positionCue.id, { x: 50, y: 78 })}>Đặt lại vị trí</button>
             </div>
           )}
         </aside>
@@ -1976,6 +2036,8 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         <main className="subtitle-studio-main">
           <SubtitleWorkspace
             ref={workspaceRef}
+            voice={voice}
+            onOpenVoice={() => { setActiveTab("voice"); setSidebarOpen(true); }}
             originalVideoUrl={originalVideoUrl}
             renderedVideoUrl={renderedVideoUrl}
             thumbnailCacheKey={thumbnailCacheKey}
@@ -1993,10 +2055,16 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
             selectedVideoClipId={selectedVideoClipId}
             canRestoreVideoClip={Boolean(lastDeletedVideoClip)}
             onDurationChange={handleDurationChange}
-            onSelectCue={setSelectedCueId}
+            onSelectCue={cueId => {
+              setSelectedCueId(cueId);
+              const clip = voice.document?.clips.find(c => cueId && c.source_cue_ids.includes(cueId));
+              voice.setSelectedId(clip?.id ?? null);
+            }}
             onUpdateCueText={(cueId, text) => handleCueChange(cueId, { text })}
             onCueTimingCommit={handleCueTimingCommit}
             onOptionsChange={setOptions}
+            onCuePositionChange={handleCuePositionChange}
+            onActiveCueChange={setActivePositionCueId}
             onOverlayLayoutChange={setOverlayLayout}
             onSelectMask={(maskId) => {
               setSelectedMaskId(maskId);

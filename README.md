@@ -146,3 +146,6 @@ Each listed item also gets local, explainable `rule-based-v1` insights: a conser
 The game name and every Include term are crawl queries, not scoring-only hints. YouTube combines them as an OR query; Game News, Steam and Bluesky allocate the per-source cap across aliases and deduplicate repeated results. Editing aliases or exclusions immediately rescores stored matches. Deleting a tracked keyword removes its batches and orphaned content while retaining items referenced by another keyword.
 
 For a no-login smoke test, create the keyword `Hades II`, select **Bluesky**, **Steam reviews**, or **Game news**, set the per-source maximum to `10`, and click **Run now**. Results and the last three runs appear in the workbench; CSV and JSON exports use the same stored items.
+
+
+.\scripts\launcher.ps1 -Action desktop

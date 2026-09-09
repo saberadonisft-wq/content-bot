@@ -16,7 +16,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 import imageio_ffmpeg
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
@@ -28,6 +28,12 @@ from .api.credentials import router as credentials_router
 from .api.health import build_health_router
 from .api.live_wall import build_live_wall_router
 from .api.tiktok_auth import build_tiktok_auth_router
+from .api.voiceover import build_voiceover_router
+from .services.voiceover.manager import VoiceManager
+from .services.voiceover.store import VoiceStore
+from .services.voiceover.mix import finalize_voiced_render, verify_document, verify_voice_cuts, retained_voice_document
+from .services.subtitle_render import SubtitleRenderError
+from .middleware.auth import get_current_user
 from .config import settings
 from .crawlers.adapters.tiktok import TikTokOAuthConfig, TikTokTokenVault
 from .mongo import store
@@ -115,6 +121,7 @@ from .services.text import content_insights, insights_match
 from .services.tiktok_oauth import TikTokOAuthService
 
 logger = logging.getLogger(__name__)
+voiceover_manager = VoiceManager(VoiceStore(settings.data_dir / "voiceover"))
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv"}
 SUPPORTED_OVERLAY_CONTENT_TYPES = {
     "application/octet-stream",
@@ -204,6 +211,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await asyncio.to_thread(voiceover_manager.shutdown)
         await live_wall_manager.shutdown()
         await crawler_login_manager.shutdown()
         if task is not None:
@@ -221,6 +229,7 @@ app.include_router(build_crawler_profiles_router(crawler_login_manager))
 app.include_router(build_tiktok_auth_router(tiktok_oauth_service))
 app.include_router(build_live_wall_router(live_wall_manager, lambda: store))
 app.include_router(credentials_router)
+app.include_router(build_voiceover_router(voiceover_manager))
 
 
 @app.middleware("http")
@@ -1267,7 +1276,7 @@ def preview_subtitle_timeline_v2_endpoint(req: SubtitleAssPreviewRequestV2):
 
 
 @app.post("/api/v1/subtitles/v2/render", response_model=SubtitleJobResponse)
-def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
+def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2, user=Depends(get_current_user)):
     input_path = _uploaded_video_path(req.video_id)
     try:
         media = probe_media_cached(
@@ -1282,6 +1291,27 @@ def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
 
     document_data = req.document.model_dump(mode="json")
     options_data = req.options.model_dump(mode="json")
+    voice_document = None
+    source_gain = float(options_data.get("volume", 1))
+    if req.voice_project_id:
+        if req.voice_project_id != req.video_id:
+            raise HTTPException(422, "Giọng đọc không thuộc video này.")
+        try:
+            voice_document = voiceover_manager.store.get_document(str(user["sub"]), req.voice_project_id)
+            if voice_document.revision != req.voice_revision or voice_document.video_fingerprint != media["fingerprint"]:
+                raise ValueError("Dự án giọng vừa thay đổi. Lưu lại trước khi xuất.")
+            if not voice_document.mix.enabled:
+                voice_document = None
+            else:
+                voice_document = retained_voice_document(voice_document, options_data, media['duration_ms'])
+                verify_document(voiceover_manager.store, str(user["sub"]), voice_document, media["duration_ms"])
+                verify_voice_cuts(voice_document, options_data, media["duration_ms"])
+                options_data["voice_document"] = voice_document.model_dump()
+                options_data["voice_pipeline"] = 3
+                options_data["voice_source_gain"] = source_gain
+                options_data["volume"] = 1
+        except (ValueError, FileNotFoundError, SubtitleRenderError) as exc:
+            raise HTTPException(422, str(exc)) from exc
     overlay_data = req.overlay.model_dump(mode="json") if req.overlay else None
     masks_data = [mask.model_dump(mode="json") for mask in req.masks]
     overlay_path = None
@@ -1303,11 +1333,20 @@ def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
     fonts_dir = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo"
 
     def run_render_job(context):
+        def report_render_progress(percent, phase, message):
+            if voice_document:
+                context.update(round(percent * 0.9), "video" if phase == "complete" else phase,
+                               "Đã dựng hình, chuẩn bị ghép giọng" if phase == "complete" else message)
+            else:
+                context.update(percent, phase, message)
+
         try:
-            return render_precision_video(
-                input_path,
+            render_input = input_path
+            render_media = media
+            result = render_precision_video(
+                render_input,
                 document_data,
-                media,
+                render_media,
                 options_data,
                 settings.data_dir / "videos" / "output",
                 video_id=req.video_id,
@@ -1316,9 +1355,16 @@ def render_subtitle_timeline_v2_endpoint(req: SubtitleRenderRequestV2):
                 overlay=overlay_data,
                 masks=masks_data,
                 cancel_event=context.cancel_event,
-                progress=context.update,
+                progress=report_render_progress,
                 timeout_seconds=settings.content_bot_subtitle_render_timeout_seconds,
             )
+            if voice_document:
+                context.update(92, "voiceover", "Đang ghép giọng đọc theo timeline đã cắt")
+                result = finalize_voiced_render(voiceover_manager.store, str(user["sub"]), voice_document,
+                    result, settings.data_dir / "videos" / "output", media, options_data,
+                    source_gain, context.cancel_event)
+                context.update(100, "complete", "Đã xuất video có giọng đọc")
+            return result
         except SubtitleRenderCanceled as exc:
             raise SubtitleJobCanceled(str(exc)) from exc
 
