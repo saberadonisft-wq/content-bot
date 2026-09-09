@@ -35,6 +35,8 @@ CPU dùng `.venv`, GPU dùng `.venv-gpu` trong `runtimes/voiceover`. Hai môi tr
 
 Theo dõi hàng giọng ngay trên phụ đề. Chọn đoạn để chỉnh tốc độ, độ lệch và âm lượng. Có thể kéo đoạn, dùng phím mũi tên để dịch 10 ms (Shift: 1 giây), hoàn tác hoặc bấm **Về mốc phụ đề**. Đoạn vượt khung cần sửa lời hoặc thời gian; hệ thống không tự cắt mất lời. Chờ trạng thái **Đã lưu lời đọc** trước khi đóng ứng dụng.
 
+Mỗi phụ đề được tạo thành một đoạn giọng riêng để lời đọc bắt đầu đúng mốc của câu đó. Audio có thể kết thúc trước khi phụ đề hết thời gian hiển thị. Với dự án cũ có nhiều câu gộp vào một đoạn, bấm **Tách theo từng phụ đề**, rồi **Tạo phần còn thiếu**. Audio của các đoạn gộp cần tạo lại; các đoạn riêng đã có vẫn được giữ. Có thể **Hoàn tác** thao tác tách. Đoạn gộp có lời đọc đã sửa riêng hoặc liên kết phụ đề không còn hợp lệ được giữ để bạn duyệt lại.
+
 Nếu cùng một mục được sửa ở hai nơi, mở **Xem hai phiên bản** để đối chiếu, rồi chọn **Giữ phần sửa của tôi** hoặc **Dùng phần sửa từ máy chủ**. Lựa chọn chỉ quyết định các mục xung đột; thay đổi độc lập vẫn được giữ. Autosave tiếp tục sau khi chọn. Khi đổi video, ứng dụng lưu lời đọc trước; nếu lưu lỗi, video hiện tại được giữ để bạn xử lý.
 
 ## Tạm dừng và tiếp tục

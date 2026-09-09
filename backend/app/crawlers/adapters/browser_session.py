@@ -52,11 +52,80 @@ class NavigationPolicy:
             raise ValueError("Navigation policy login detection grace is invalid")
 
 
+BLOCKED_RESOURCE_TYPES: frozenset[str] = frozenset({"media", "font"})
+TRACKER_DOMAINS: tuple[str, ...] = (
+    "hm.baidu.com",
+    "google-analytics.com",
+    "growingio.com",
+    "sensorsdata.cn",
+    "cnzz.com",
+)
+MEDIA_EXTENSIONS: tuple[str, ...] = (
+    ".mp4",
+    ".m4s",
+    ".webm",
+    ".flv",
+    ".avi",
+    ".mov",
+    ".woff2",
+    ".woff",
+    ".ttf",
+)
+LOGIN_IMAGE_KEYWORDS: tuple[str, ...] = (
+    "qr",
+    "login",
+    "captcha",
+    "auth",
+    "verify",
+    "passport",
+    "challenge",
+)
+
+
+async def _filter_browser_route(route: Any) -> None:
+    try:
+        req = getattr(route, "request", None)
+        resource_type = getattr(req, "resource_type", "") if req else ""
+        if resource_type in BLOCKED_RESOURCE_TYPES:
+            await route.abort()
+            return
+
+        url = (getattr(req, "url", "") or "").casefold()
+        if any(tracker in url for tracker in TRACKER_DOMAINS):
+            await route.abort()
+            return
+
+        if any(url.endswith(ext) or f"{ext}?" in url for ext in MEDIA_EXTENSIONS):
+            await route.abort()
+            return
+
+        if resource_type == "image":
+            if any(kw in url for kw in LOGIN_IMAGE_KEYWORDS):
+                await route.continue_()
+                return
+            await route.abort()
+            return
+
+        await route.continue_()
+    except Exception:
+        try:
+            await route.continue_()
+        except Exception:
+            pass
+
+
 class OwnedBrowserPage:
     def __init__(self, browser: BrowserSession, policy: NavigationPolicy) -> None:
         self.browser = browser
         self.policy = policy
         self.page: Any | None = None
+
+    async def _configure_route_blocking(self, page: Any) -> None:
+        if hasattr(page, "route") and callable(page.route):
+            try:
+                await page.route("**/*", _filter_browser_route)
+            except Exception:
+                pass
 
     async def open(self, context: RunContext, cancellation: CancellationToken) -> None:
         if context.source_id != self.policy.source_id:
@@ -69,6 +138,7 @@ class OwnedBrowserPage:
             if handle.context.pages
             else await handle.context.new_page()
         )
+        await self._configure_route_blocking(self.page)
 
     async def navigate(
         self,

@@ -124,3 +124,64 @@ def test_keyword_api_works_without_mongodb(tmp_path, monkeypatch) -> None:
     assert listed.json()[0]["name"] == "Local topic"
     assert ready.json()["storage"] == "sqlite"
     assert ready.json()["database_ready"] is True
+
+
+def test_sqlite_store_ingest_content_bundle_atomic(tmp_path) -> None:
+    from app.sqlite_store import SQLiteStore
+
+    storage = SQLiteStore(tmp_path / "atomic.db")
+    storage.initialize()
+
+    keyword = storage.create_keyword({"name": "Test Game"})
+    item_values = {
+        "source_id": "steam",
+        "external_id": "item-atomic-1",
+        "canonical_url": "https://store.steampowered.com/app/100",
+        "title": "Atomic Game",
+        "body_snippet": "Description",
+        "author": "Author",
+        "hashtags": [],
+        "locale": "en",
+        "published_at": None,
+        "metrics": {"view_count": 50, "like_count": 10},
+        "raw_payload": {},
+        "first_seen_at": None,
+        "last_seen_at": None,
+    }
+    snapshot_values = {
+        "captured_at": None,
+        "view_count": 50,
+        "like_count": 10,
+        "comment_count": 2,
+        "share_count": 0,
+        "favorite_count": 0,
+    }
+    match_values = {
+        "relevance_score": 85.0,
+        "match_reasons": ["exact_name"],
+        "session_id": "batch-1",
+    }
+
+    saved = storage.ingest_content_bundle(
+        item_values,
+        snapshot_values,
+        match_values,
+        keyword["id"],
+        trend_score_fn=lambda itm: 90.0,
+    )
+
+    assert saved["id"] is not None
+    assert saved["title"] == "Atomic Game"
+
+    # Verify snapshot was persisted with proper foreign key
+    snapshots = storage.snapshots(saved["id"])
+    assert len(snapshots) == 1
+    assert snapshots[0]["content_item_id"] == saved["id"]
+    assert snapshots[0]["like_count"] == 10
+
+    # Verify match was persisted with computed trend score
+    m = storage.match(saved["id"], keyword["id"])
+    assert m is not None
+    assert m["trend_score"] == 90.0
+    assert m["relevance_score"] == 85.0
+

@@ -318,3 +318,32 @@ def test_steam_checkpoint_semantics_include_filter_language_and_purchase(
     assert fields["review_filter"] == "recent"
     assert fields["language"] == "vietnamese"
     assert fields["purchase_type"] == "steam"
+
+
+def test_steam_search_caches_discovered_app(monkeypatch) -> None:
+    storesearch_calls = 0
+
+    class TrackingSteamClient(FakeSteamClient):
+        async def get(self, url: str, params=None) -> FakeResponse:
+            nonlocal storesearch_calls
+            if "storesearch" in url:
+                storesearch_calls += 1
+                return FakeResponse({"items": [{"id": 42, "name": "Cached Game"}]})
+            return await super().get(url, params)
+
+    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: TrackingSteamClient())
+    connector = SteamReviewsConnector()
+
+    async def run_searches():
+        q1 = SearchQuery(keyword_id=1, name="Cached Game", include_terms=["Cached Game"], max_items=1)
+        async for _ in connector.search(q1):
+            pass
+        # Second search for the same term
+        q2 = SearchQuery(keyword_id=1, name="Cached Game", include_terms=["Cached Game"], max_items=1)
+        async for _ in connector.search(q2):
+            pass
+
+    asyncio.run(run_searches())
+    # storesearch should have only been called once due to discovery cache!
+    assert storesearch_calls == 1
+

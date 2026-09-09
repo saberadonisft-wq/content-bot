@@ -29,6 +29,8 @@ _AUTH_REASONS = frozenset(
         "ipRefererBlocked",
         "keyExpired",
         "keyInvalid",
+        "API_KEY_INVALID",
+        "API_KEY_SERVICE_BLOCKED",
     }
 )
 
@@ -195,13 +197,41 @@ def _safe_reason(response: httpx.Response | Any) -> str | None:
     error = payload.get("error")
     if not isinstance(error, dict):
         return None
+
+    details_list = error.get("details")
+    if isinstance(details_list, list):
+        for item in details_list:
+            if isinstance(item, dict):
+                r = str(item.get("reason") or "")
+                if r in _AUTH_REASONS or r in _QUOTA_REASONS:
+                    return r
+
     errors = error.get("errors")
     if isinstance(errors, list):
         for item in errors:
             if isinstance(item, dict):
                 reason = str(item.get("reason") or "")
                 if reason and len(reason) <= 100 and reason.replace("_", "").isalnum():
-                    return reason
+                    if reason in _AUTH_REASONS or reason in _QUOTA_REASONS:
+                        return reason
+                    if reason == "badRequest":
+                        msg = str(item.get("message") or "")
+                        if "API Key not found" in msg or "API key not valid" in msg:
+                            return "API_KEY_INVALID"
+                        if "page token" in msg.lower() or "pagetoken" in msg.lower():
+                            return "invalidPageToken"
+
+    msg = str(error.get("message") or "")
+    if "API Key not found" in msg or "API key not valid" in msg:
+        return "API_KEY_INVALID"
+    if "page token" in msg.lower() or "pagetoken" in msg.lower():
+        return "invalidPageToken"
+
+    if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+        first_r = str(errors[0].get("reason") or "")
+        if first_r and len(first_r) <= 100 and first_r.replace("_", "").isalnum():
+            return first_r
+
     status = str(error.get("status") or "")
     return status if status and len(status) <= 100 and status.replace("_", "").isalnum() else None
 

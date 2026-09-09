@@ -99,6 +99,12 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
       <button type="button" aria-label="Kiểm tra lại bộ tạo giọng" onClick={() => void voice.refreshStatus()}><RefreshCw size={16} /></button></div>
     {!status?.ready && <code className="voice-setup-command">.\scripts\setup-voiceover.ps1</code>}
     <button type="button" className="studio-primary-button" disabled={voice.loading} onClick={voice.plan}>Tạo đoạn từ phụ đề</button>
+    <small>Mỗi phụ đề có một đoạn giọng riêng, bắt đầu tại mốc của phụ đề.</small>
+    {doc?.clips.some(clip => clip.source_cue_ids.length > 1) && <div>
+      <p>Có đoạn giọng gộp nhiều phụ đề nên các câu bên trong có thể được đọc sớm. Tách để căn từng câu, rồi bấm “Tạo phần còn thiếu”. Các đoạn vừa tách cần tạo lại audio.</p>
+      <button type="button" disabled={voice.loading || voice.busy || working || Boolean(running) || voice.saveState === 'saving'}
+        onClick={voice.splitGrouped}>Tách theo từng phụ đề</button>
+    </div>}
     {!doc && <p>Nhập video và phụ đề, sau đó tạo các đoạn lời đọc để bắt đầu.</p>}
     <label>Giọng đọc<select value={profile.id} disabled={!doc || working} onChange={e => {
       const saved = profiles.find(p => p.id === e.target.value);

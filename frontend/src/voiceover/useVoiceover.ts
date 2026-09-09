@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SubtitleCueV2 } from '../subtitles/types';
 import { VoiceApiError, voiceRequest } from './api';
 import { DEFAULT_PROFILE, type VoiceDocument, type VoiceJob, type VoiceStatus } from './types';
-import { planVoiceClips, syncVoiceCues } from './planner';
+import { planVoiceClips, splitGroupedVoiceClips, syncVoiceCues } from './planner';
 import { mergeVoiceDocument } from './merge';
 
 export function useVoiceover(project: string | null, fingerprint: string | undefined, cues: readonly SubtitleCueV2[]) {
@@ -87,7 +87,7 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
         if (projectRef.current === project && current.current === source) { setSaveState('dirty'); replace(next); }
       });
     }
-  }, [cues, project, replace]);
+  }, [cues, project, loadedProject, replace]);
 
   const save = useCallback(async () => {
     if (saving.current) throw new Error('Đang lưu lời đọc, vui lòng thử lại sau giây lát.');
@@ -195,6 +195,17 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
     dirty.current = true; setSaveState('dirty'); replace({ ...doc, clips: [...doc.clips, ...added].sort((a, b) => a.start_ms - b.start_ms) });
     setSelectedId(added[0]?.id ?? doc.clips[0]?.id ?? null);
   };
+  const splitGrouped = () => {
+    const doc = current.current;
+    if (!doc || doc.project_id !== project || loadedProject !== project || busy || saving.current
+        || (job && ['queued', 'running'].includes(job.state))) return;
+    const result = splitGroupedVoiceClips(doc, cues);
+    if (result.document !== doc) {
+      edit(() => result.document);
+      setSelectedId(result.document.clips[0]?.id ?? null);
+    }
+    setError(result.skipped ? `${result.skipped} đoạn chưa tách được vì lời đọc đã sửa riêng hoặc phụ đề liên kết đã thay đổi. Hãy kiểm tra các đoạn này.` : '');
+  };
   const control = async (action: 'pause' | 'cancel' | 'resume') => {
     if (!job) return;
     try { if (action === 'resume' && dirty.current) await save();
@@ -213,6 +224,6 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
     conflict, resolveConflict,
     selectedId, setSelectedId, device, setDevice, busy, loading: !project || loadedProject !== project,
     retryLoad: () => { setError(''); setLoadAttempt(value => value + 1); },
-    saveState, edit, replace: acceptServerDocument, plan, save, run, control, history, refreshStatus };
+    saveState, edit, replace: acceptServerDocument, plan, splitGrouped, save, run, control, history, refreshStatus };
 }
 export type VoiceController = ReturnType<typeof useVoiceover>;

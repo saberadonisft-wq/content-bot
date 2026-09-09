@@ -72,6 +72,7 @@ from .services.clusters import cluster_items
 from .services.connectors import default_connectors
 from .services.crawler_login import CrawlerLoginManager
 from .services.credential_resolver import credential
+from .services.http_pool import close_http_pools
 from .services.gemini_subtitles import (
     DEFAULT_GEMINI_MODEL,
     GeminiSubtitleCanceled,
@@ -214,6 +215,7 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(voiceover_manager.shutdown)
         await live_wall_manager.shutdown()
         await crawler_login_manager.shutdown()
+        await close_http_pools()
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):

@@ -669,6 +669,88 @@ class SQLiteStore:
             self._upsert("content_items", row)
             return self.public(row)
 
+    def ingest_content_bundle(
+        self,
+        item_values: dict[str, Any],
+        snapshot_values: dict[str, Any],
+        match_values: dict[str, Any],
+        keyword_id: int,
+        trend_score_fn: Callable[[dict[str, Any]], float] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist an item, its metric snapshot, and its keyword match in a single SQLite transaction."""
+        with self._write_lock, self._connect() as connection:
+            values = deepcopy(item_values)
+            content_item_id = values.pop("id", None)
+            if content_item_id is None:
+                existing = self.item_by_source(
+                    str(values.get("source_id") or ""),
+                    str(values.get("external_id") or ""),
+                )
+                if existing:
+                    content_item_id = existing["id"]
+                else:
+                    connection.execute(
+                        "INSERT INTO local_counters(collection, value) VALUES (?, 1) "
+                        "ON CONFLICT(collection) DO UPDATE SET value = value + 1",
+                        ("content_items",),
+                    )
+                    c_row = connection.execute(
+                        "SELECT value FROM local_counters WHERE collection = ?",
+                        ("content_items",),
+                    ).fetchone()
+                    content_item_id = int(c_row["value"])
+
+            item_row = self._get("content_items", content_item_id) or {
+                "_id": content_item_id
+            }
+            item_row.update(values)
+            self._upsert_with(connection, "content_items", item_row["_id"], item_row)
+            saved_item = self.public(item_row)
+
+            connection.execute(
+                "INSERT INTO local_counters(collection, value) VALUES (?, 1) "
+                "ON CONFLICT(collection) DO UPDATE SET value = value + 1",
+                ("metric_snapshots",),
+            )
+            s_row = connection.execute(
+                "SELECT value FROM local_counters WHERE collection = ?",
+                ("metric_snapshots",),
+            ).fetchone()
+            snapshot_id = int(s_row["value"])
+            snap = deepcopy(snapshot_values)
+            snap["_id"] = snapshot_id
+            snap["content_item_id"] = content_item_id
+            self._upsert_with(connection, "metric_snapshots", snapshot_id, snap)
+
+            match_row_data = deepcopy(match_values)
+            if trend_score_fn is not None and "trend_score" not in match_row_data:
+                match_row_data["trend_score"] = trend_score_fn(saved_item)
+
+            existing_match = self.match(content_item_id, keyword_id)
+            if existing_match:
+                match_id = existing_match["id"]
+            else:
+                connection.execute(
+                    "INSERT INTO local_counters(collection, value) VALUES (?, 1) "
+                    "ON CONFLICT(collection) DO UPDATE SET value = value + 1",
+                    ("item_keyword_matches",),
+                )
+                m_row = connection.execute(
+                    "SELECT value FROM local_counters WHERE collection = ?",
+                    ("item_keyword_matches",),
+                ).fetchone()
+                match_id = int(m_row["value"])
+
+            match_row = self._get("item_keyword_matches", match_id) or {
+                "_id": match_id,
+                "content_item_id": content_item_id,
+                "keyword_id": keyword_id,
+            }
+            match_row.update(match_row_data)
+            self._upsert_with(connection, "item_keyword_matches", match_id, match_row)
+
+            return saved_item
+
     def comment_by_source(
         self, source_id: str, external_id: str
     ) -> dict[str, Any] | None:

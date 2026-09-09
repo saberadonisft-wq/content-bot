@@ -8,24 +8,39 @@ export function voiceClipsInRange(clips: readonly VoiceClip[], startMs: number, 
 }
 
 export function planVoiceClips(cues: readonly SubtitleCueV2[]): VoiceClip[] {
-  const groups: SubtitleCueV2[][] = [];
-  for (const cue of [...cues].sort((a, b) => a.start_ms - b.start_ms)) {
-    if (!cue.text.trim()) continue;
-    const current = groups.at(-1);
-    const last = current?.at(-1);
-    if (current && last && cue.start_ms >= last.end_ms && cue.start_ms - last.end_ms <= 350
-        && cue.end_ms - current[0].start_ms <= 20000
-        && current.map(c => c.text).join(' ').length + cue.text.length < 500
-        && !/[.!?…。！？][”"']?$/.test(last.text.trim())) current.push(cue);
-    else groups.push([cue]);
-  }
-  return groups.map(group => {
-    const text = group.map(c => c.text.trim()).join(' ');
-    return { id: `v-${crypto.randomUUID()}`, source_cue_ids: group.map(c => c.id), source_text: text,
-      spoken_text: text, start_ms: group[0].start_ms, end_ms: group.at(-1)!.end_ms,
+  // A single TTS asset has no internal cue timestamps. Joining adjacent cues
+  // makes later lines play before their subtitles appear.
+  return [...cues].filter(cue => cue.text.trim()).sort((a, b) => a.start_ms - b.start_ms).map(cue => {
+    const text = cue.text.trim();
+    return { id: `v-${crypto.randomUUID()}`, source_cue_ids: [cue.id], source_text: text,
+      spoken_text: text, start_ms: cue.start_ms, end_ms: cue.end_ms,
       offset_ms: 0, rate: 1.08, gain: 1, asset_id: null, generation_hash: null, duration_ms: 0,
       status: 'missing', error: null };
   });
+}
+
+export function splitGroupedVoiceClips(doc: VoiceDocument, cues: readonly SubtitleCueV2[]): {
+  document: VoiceDocument; skipped: number;
+} {
+  const index = new Map(cues.map(cue => [cue.id, cue]));
+  const references = new Map<string, number>();
+  for (const clip of doc.clips) for (const id of clip.source_cue_ids) references.set(id, (references.get(id) ?? 0) + 1);
+  let changed = false;
+  let skipped = 0;
+  const clips = doc.clips.flatMap(clip => {
+    if (clip.source_cue_ids.length <= 1) return [clip];
+    const source = clip.source_cue_ids.map(id => index.get(id));
+    // Custom narration cannot be divided safely without knowing which words
+    // belong to each cue. Leave it available for the user to review.
+    if (clip.spoken_text !== clip.source_text || source.some(cue => !cue?.text.trim())
+        || clip.source_cue_ids.some(id => references.get(id) !== 1)) {
+      skipped++;
+      return [clip];
+    }
+    changed = true;
+    return planVoiceClips(source as SubtitleCueV2[]).map(next => ({ ...next, rate: clip.rate, gain: clip.gain }));
+  });
+  return { document: changed ? { ...doc, clips: clips.sort((a, b) => a.start_ms - b.start_ms) } : doc, skipped };
 }
 
 export function syncVoiceCues(doc: VoiceDocument, cues: readonly SubtitleCueV2[]): VoiceDocument {

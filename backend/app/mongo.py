@@ -572,6 +572,25 @@ class MongoStore:
         )
         return {"id": content_item_id, **values}
 
+    def ingest_content_bundle(
+        self,
+        item_values: dict[str, Any],
+        snapshot_values: dict[str, Any],
+        match_values: dict[str, Any],
+        keyword_id: int,
+        trend_score_fn: Callable[[dict[str, Any]], float] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist an item, its metric snapshot, and its keyword match."""
+        item = self.save_item(item_values)
+        snapshot = deepcopy(snapshot_values)
+        snapshot["content_item_id"] = item["id"]
+        self.add_snapshot(snapshot)
+        match_data = deepcopy(match_values)
+        if trend_score_fn is not None and "trend_score" not in match_data:
+            match_data["trend_score"] = trend_score_fn(item)
+        self.save_match(item["id"], keyword_id, match_data)
+        return item
+
     def comment_by_source(
         self, source_id: str, external_id: str
     ) -> dict[str, Any] | None:

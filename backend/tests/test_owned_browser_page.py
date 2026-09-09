@@ -246,3 +246,50 @@ def test_owned_browser_rejects_unapproved_target_before_network(url) -> None:
 
     assert asyncio.run(run()).code is CrawlerErrorCode.CHALLENGE_REQUIRED
     assert page.goto_calls == []
+
+
+def test_owned_browser_route_blocking_filters_unneeded_resources() -> None:
+    from app.crawlers.adapters.browser_session import _filter_browser_route
+
+    class MockRequest:
+        def __init__(self, resource_type: str, url: str):
+            self.resource_type = resource_type
+            self.url = url
+
+    class MockRoute:
+        def __init__(self, resource_type: str, url: str):
+            self.request = MockRequest(resource_type, url)
+            self.action = None
+
+        async def abort(self):
+            self.action = "aborted"
+
+        async def continue_(self):
+            self.action = "continued"
+
+    test_cases = [
+        # Media / font
+        ("media", "https://bilibili.com/video.m4s", "aborted"),
+        ("font", "https://bilibili.com/font.woff2", "aborted"),
+        # Trackers
+        ("script", "https://hm.baidu.com/hm.js", "aborted"),
+        ("script", "https://www.google-analytics.com/analytics.js", "aborted"),
+        # Media extensions
+        ("other", "https://bilibili.com/stream.mp4?token=123", "aborted"),
+        # Regular images (aborted to save bandwidth/RAM)
+        ("image", "https://i0.hdslb.com/bfs/archive/cover.jpg", "aborted"),
+        # Login / QR images (must be preserved for login flow!)
+        ("image", "https://passport.bilibili.com/qrcode/getLoginUrl", "continued"),
+        ("image", "https://s.weibo.com/captcha/image.png", "continued"),
+        ("image", "https://xiaohongshu.com/login_qr.png", "continued"),
+        # Main document and page scripts (must continue for crawler DOM parsing)
+        ("document", "https://s.weibo.com/weibo?q=test", "continued"),
+        ("script", "https://s.weibo.com/bundle.js", "continued"),
+        ("xhr", "https://api.bilibili.com/x/web-interface/search", "continued"),
+    ]
+
+    for r_type, url, expected_action in test_cases:
+        route = MockRoute(r_type, url)
+        asyncio.run(_filter_browser_route(route))
+        assert route.action == expected_action, f"Failed for {r_type} @ {url}: expected {expected_action}, got {route.action}"
+

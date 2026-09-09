@@ -10,6 +10,7 @@ import os
 import shlex
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -19,7 +20,23 @@ from xml.etree import ElementTree
 
 import httpx
 
+from . import http_pool
 from ..config import settings
+
+_ORIGINAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+@asynccontextmanager
+async def pooled_client(**kwargs: Any) -> AsyncIterator[httpx.AsyncClient]:
+    """Yield a pooled persistent client, or fallback to monkeypatched httpx.AsyncClient in tests."""
+    if httpx.AsyncClient is not _ORIGINAL_ASYNC_CLIENT:
+        async with httpx.AsyncClient(**kwargs) as test_client:
+            yield test_client
+            return
+
+    client = await http_pool.get_client(**kwargs)
+    yield client
+
 from ..crawlers.adapters.bluesky import (
     BlueskyApiCommentProvider,
     BlueskyCommentBudgets,
@@ -1402,7 +1419,7 @@ class YouTubeConnector(SourceConnector):
         if not credential("youtube_api_key"):
             return await self.healthcheck()
         try:
-            async with httpx.AsyncClient(
+            async with pooled_client(
                 base_url="https://www.googleapis.com/youtube/v3",
                 timeout=30,
                 follow_redirects=False,
@@ -1443,7 +1460,7 @@ class YouTubeConnector(SourceConnector):
                 CrawlerErrorCode.AUTH_REQUIRED,
                 "YouTube Data API key is not configured.",
             )
-        async with httpx.AsyncClient(
+        async with pooled_client(
             base_url="https://www.googleapis.com/youtube/v3",
             timeout=30,
             follow_redirects=False,
@@ -1532,7 +1549,7 @@ class YouTubeConnector(SourceConnector):
             ),
         )
         published_after = (datetime.now(UTC) - timedelta(days=90)).isoformat().replace("+00:00", "Z")
-        async with httpx.AsyncClient(
+        async with pooled_client(
             base_url="https://www.googleapis.com/youtube/v3",
             timeout=30,
             follow_redirects=False,
@@ -1910,7 +1927,7 @@ class FeedConnector(SourceConnector):
         successful_documents = 0
         failures: list[CrawlerFailure] = []
         allowed_hosts = frozenset(template.host for template in self.feed_templates)
-        async with httpx.AsyncClient(
+        async with pooled_client(
             timeout=30,
             follow_redirects=False,
             headers={"User-Agent": "ContentBot/0.1 (local research tool)"},
@@ -2158,6 +2175,9 @@ class SteamReviewsConnector(SourceConnector):
         interaction_fields=("like_count", "comment_count"),
     )
 
+    def __init__(self) -> None:
+        self._discovery_cache: dict[str, tuple[list[dict[str, Any]], bool]] = {}
+
     async def healthcheck(self) -> ConnectorStatus:
         return ConnectorStatus("ready", "Public Steam game search and recent user reviews; no API key required.")
 
@@ -2191,7 +2211,7 @@ class SteamReviewsConnector(SourceConnector):
             ),
         )
         max_apps = max(1, min(settings.steam_max_discovered_apps, 10))
-        async with httpx.AsyncClient(
+        async with pooled_client(
             timeout=30,
             follow_redirects=False,
             headers={"User-Agent": "ContentBot/0.1 (local non-commercial game research)"},
@@ -2202,23 +2222,30 @@ class SteamReviewsConnector(SourceConnector):
             for search_term, game_limit in zip(query.search_terms, game_limits, strict=True):
                 if game_limit == 0:
                     continue
-                if not budget.spend_discovery():
-                    if query.warning_callback:
-                        await query.warning_callback(
-                            CrawlerErrorCode.BUDGET_EXHAUSTED.value,
-                            "Steam app-discovery request budget was exhausted.",
-                        )
-                    break
-                search_response = await get_with_retries(
-                    client,
-                    "https://store.steampowered.com/api/storesearch/",
-                    params={"term": search_term, "l": "english", "cc": "VN"},
-                )
-                selected, ambiguous = select_discovered_apps(
-                    search_term,
-                    list(search_response.json().get("items") or []),
-                    limit=game_limit,
-                )
+                cache_key = search_term.strip().casefold()
+                if cache_key in self._discovery_cache:
+                    cached_selected, ambiguous = self._discovery_cache[cache_key]
+                    selected = cached_selected[:game_limit]
+                else:
+                    if not budget.spend_discovery():
+                        if query.warning_callback:
+                            await query.warning_callback(
+                                CrawlerErrorCode.BUDGET_EXHAUSTED.value,
+                                "Steam app-discovery request budget was exhausted.",
+                            )
+                        break
+                    search_response = await get_with_retries(
+                        client,
+                        "https://store.steampowered.com/api/storesearch/",
+                        params={"term": search_term, "l": "english", "cc": "VN"},
+                    )
+                    selected, ambiguous = select_discovered_apps(
+                        search_term,
+                        list(search_response.json().get("items") or []),
+                        limit=game_limit,
+                    )
+                    if selected and not ambiguous:
+                        self._discovery_cache[cache_key] = (selected, ambiguous)
                 if ambiguous:
                     if query.warning_callback:
                         await query.warning_callback(
@@ -2369,7 +2396,7 @@ class BlueskyConnector(SourceConnector):
         sort: str = "provider",
         cancellation: CancellationToken | None = None,
     ) -> BlueskyCommentScan:
-        async with httpx.AsyncClient(
+        async with pooled_client(
             base_url="https://public.api.bsky.app",
             timeout=30,
             follow_redirects=False,
@@ -2448,7 +2475,7 @@ class BlueskyConnector(SourceConnector):
             settings.bluesky_request_budget, maximum=100
         )
         requests = 0
-        async with httpx.AsyncClient(
+        async with pooled_client(
             base_url="https://public.api.bsky.app",
             timeout=30,
             follow_redirects=False,
@@ -2861,7 +2888,7 @@ class MastodonConnector(SourceConnector):
         budget = MastodonRequestBudget(len(instances))
         for instance in instances:
             try:
-                async with httpx.AsyncClient(
+                async with pooled_client(
                     base_url=f"https://{instance}",
                     timeout=10,
                     follow_redirects=False,
@@ -2913,7 +2940,7 @@ class MastodonConnector(SourceConnector):
         target = parse_mastodon_status_target(
             target_url, allowed_instances=instances
         )
-        async with httpx.AsyncClient(
+        async with pooled_client(
             base_url=f"https://{target.instance}",
             timeout=30,
             follow_redirects=False,
@@ -3029,7 +3056,7 @@ class MastodonConnector(SourceConnector):
                 max_id = ""
                 frontier = True
                 seen_cursors: set[str] = set()
-                async with httpx.AsyncClient(
+                async with pooled_client(
                     base_url=f"https://{instance}",
                     timeout=30,
                     follow_redirects=False,

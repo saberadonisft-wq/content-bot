@@ -65,6 +65,10 @@ class EventBus:
             self._subscribers.discard(queue)
 
 
+FAST_SOURCES: frozenset[str] = frozenset({"steam", "web", "bluesky", "mastodon"})
+EARLY_EXIT_THRESHOLD: int = 5
+
+
 class RunManager:
     def __init__(
         self,
@@ -77,7 +81,9 @@ class RunManager:
         self.store = storage or store
         self._tasks: dict[str, asyncio.Task] = {}
         self._start_lock = asyncio.Lock()
-        self._semaphore = asyncio.Semaphore(3)
+        self._fast_semaphore = asyncio.Semaphore(8)
+        self._quota_semaphore = asyncio.Semaphore(3)
+        self._semaphore = self._quota_semaphore
         self._browser_semaphore = asyncio.Semaphore(1)
 
     async def _store_call(self, method, *args, **kwargs):
@@ -528,7 +534,13 @@ class RunManager:
             [keyword["name"], *keyword.get("include_terms", [])]
         )
         exclude_terms = clean_terms(keyword.get("exclude_terms", []))
-        semaphore = self._browser_semaphore if uses_browser else self._semaphore
+        source_id = str(source_run.get("source_id") or "")
+        if uses_browser:
+            semaphore = self._browser_semaphore
+        elif source_id in FAST_SOURCES:
+            semaphore = self._fast_semaphore
+        else:
+            semaphore = self._quota_semaphore
         fetched_count = 0
         ingested_count = 0
         warning_messages: list[str] = (
@@ -680,9 +692,20 @@ class RunManager:
                     if channel
                     else connector.search(query, checkpoint)
                 )
+                consecutive_known = 0
                 async for raw_item in iterator:
                     if not self._is_new_channel_item(raw_item, recent_id_set, None):
+                        consecutive_known += 1
+                        if (
+                            len(recent_id_set) >= EARLY_EXIT_THRESHOLD
+                            and consecutive_known >= EARLY_EXIT_THRESHOLD
+                        ):
+                            warning_messages.append(
+                                f"Stopped early after encountering {consecutive_known} consecutive known items."
+                            )
+                            break
                         continue
+                    consecutive_known = 0
                     fetched_count += 1
                     if uses_browser and fetched_count == 1:
                         await self._set_source_progress(
@@ -1058,33 +1081,38 @@ class RunManager:
         }
         if item:
             values["id"] = item["id"]
-        item = self.store.save_item(values)
-        self.store.add_snapshot(
-            {
-                "content_item_id": item["id"],
-                "captured_at": now,
-                "view_count": int(raw.metrics.get("view_count", 0)),
-                "like_count": int(
-                    raw.metrics.get("like_count", raw.metrics.get("reaction_count", 0))
-                ),
-                "comment_count": int(raw.metrics.get("comment_count", 0)),
-                "share_count": int(raw.metrics.get("share_count", 0)),
-                "favorite_count": int(raw.metrics.get("favorite_count", 0)),
-            }
-        )
-        self.store.save_match(
-            item["id"],
-            keyword_id,
-            {
-                "relevance_score": score,
-                "trend_score": self._trend_score(item, score),
-                "match_reasons": reasons,
-                "session_id": source_run["batch_id"],
-                "channel_id": source_run.get("channel_id"),
-                "source_run_id": source_run_id,
-                "updated_at": now,
-            },
-        )
+        snapshot_data = {
+            "captured_at": now,
+            "view_count": int(raw.metrics.get("view_count", 0)),
+            "like_count": int(
+                raw.metrics.get("like_count", raw.metrics.get("reaction_count", 0))
+            ),
+            "comment_count": int(raw.metrics.get("comment_count", 0)),
+            "share_count": int(raw.metrics.get("share_count", 0)),
+            "favorite_count": int(raw.metrics.get("favorite_count", 0)),
+        }
+        match_data = {
+            "relevance_score": score,
+            "match_reasons": reasons,
+            "session_id": source_run["batch_id"],
+            "channel_id": source_run.get("channel_id"),
+            "source_run_id": source_run_id,
+            "updated_at": now,
+        }
+        if hasattr(self.store, "ingest_content_bundle"):
+            item = self.store.ingest_content_bundle(
+                values,
+                snapshot_data,
+                match_data,
+                keyword_id,
+                trend_score_fn=lambda itm: self._trend_score(itm, score),
+            )
+        else:
+            item = self.store.save_item(values)
+            snapshot_data["content_item_id"] = item["id"]
+            self.store.add_snapshot(snapshot_data)
+            match_data["trend_score"] = self._trend_score(item, score)
+            self.store.save_match(item["id"], keyword_id, match_data)
         is_new_match = not existing_match
         self.store.update_source_run(
             source_run_id,
