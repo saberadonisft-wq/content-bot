@@ -1,7 +1,10 @@
 import asyncio
 
+import httpx
+
 from app.crawlers.runtime import IdentityPseudonymizer
-from app.services import channel_scans, connectors
+from app.services import channel_scans
+from app.services import connector_reddit as connectors
 from app.services.connectors import RedditConnector, SearchQuery
 from app.services.reddit_oauth import reddit_token_cache
 
@@ -65,7 +68,7 @@ class FakeRedditClient:
 def test_reddit_search_parses_public_submission(monkeypatch) -> None:
     reddit_token_cache.invalidate()
     client = FakeRedditClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
     monkeypatch.setattr(connectors.settings, "reddit_client_id", "client-id")
     monkeypatch.setattr(connectors.settings, "reddit_client_secret", "client-secret")
     monkeypatch.setattr(
@@ -103,7 +106,7 @@ def test_reddit_search_parses_public_submission(monkeypatch) -> None:
 def test_reddit_keyword_and_channel_share_token_cache_and_privacy(monkeypatch) -> None:
     reddit_token_cache.invalidate()
     client = FakeRedditClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
     monkeypatch.setattr(connectors.settings, "reddit_client_id", "client-id")
     monkeypatch.setattr(connectors.settings, "reddit_client_secret", "client-secret")
     monkeypatch.setattr(

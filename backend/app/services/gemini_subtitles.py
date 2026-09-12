@@ -47,7 +47,7 @@ class GeminiSubtitleSettings:
     chunk_seconds: int = 180
     max_input_mb: int = 19
     max_retries: int = 5
-    retry_base_seconds: float = 30.0
+    retry_base_seconds: float = 3.0
 
 
 PROMPT_VERSION = 6
@@ -224,12 +224,15 @@ class GeminiSubtitleService:
         detail = cls._response_error_detail(response)
         return f"{reason}: {detail}" if detail else reason
 
-    def _retry_delay(self, attempt: int, response: httpx.Response | None = None) -> float:
+    def _retry_delay(self, _attempt: int, response: httpx.Response | None = None) -> float:
         if response is not None:
             retry_after = response.headers.get("Retry-After", "").strip()
             if retry_after.isdigit():
-                return min(float(retry_after), 120.0)
-        return min(self.settings.retry_base_seconds * (2 ** max(0, attempt - 1)), 120.0)
+                return min(max(float(retry_after), self.settings.retry_base_seconds), 120.0)
+        # Keep retries responsive for interactive subtitle jobs. If Gemini
+        # explicitly asks us to wait longer via Retry-After, that value still
+        # takes precedence above.
+        return min(self.settings.retry_base_seconds, 120.0)
 
     def _wait_for_retry(
         self,

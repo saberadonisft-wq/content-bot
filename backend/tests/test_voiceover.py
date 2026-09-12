@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import array
 import math
-import wave
 import threading
+import wave
 from pathlib import Path
 
 import pytest
@@ -27,8 +27,8 @@ def test_worker_deadline_does_not_reset_for_messages_or_heartbeat():
 
 
 def test_voice_cut_validation_uses_video_segment_rules():
-    from app.services.voiceover.mix import verify_voice_cuts
     from app.services.subtitle_render import SubtitleRenderError
+    from app.services.voiceover.mix import verify_voice_cuts
     doc = document()
     doc.clips[0].duration_ms = 1000
     # Adjacent retained pieces are continuous speech, not a cut through a word.
@@ -145,6 +145,7 @@ def test_runtime_status_rejects_missing_python_and_handles_corrupt_status(tmp_pa
 
 def test_gpu_worker_uses_isolated_python_and_respects_override(tmp_path, monkeypatch):
     import os
+
     from app.services.voiceover import manager as module
     monkeypatch.setattr(module, 'RUNTIME', tmp_path)
     monkeypatch.delenv('CONTENT_BOT_VOICE_PYTHON', raising=False)
@@ -160,8 +161,9 @@ def test_gpu_worker_uses_isolated_python_and_respects_override(tmp_path, monkeyp
         assert manager.status()['installed'] is True
         assert manager.status()['ready'] is True
         assert manager.status()['devices'] == ['cuda']
+        doc = manager.store.save_document('user', document())
         with pytest.raises(ValueError, match='cpu chưa sẵn sàng'):
-            manager.start('user', 'missing-project', 'cpu')
+            manager.start('user', doc.project_id, 'cpu')
         override = tmp_path / 'custom-python'
         monkeypatch.setenv('CONTENT_BOT_VOICE_PYTHON', str(override))
         assert manager.python('cuda') == override
@@ -194,7 +196,9 @@ def test_export_combines_clip_and_video_speed_without_filter_limits(tmp_path, cl
 
 def test_final_mp4_voice_onset_after_slow_video_edit(tmp_path):
     import subprocess
+
     import imageio_ffmpeg
+
     from app.services.media_probe import probe_media
     from app.services.voiceover.mix import ffmpeg, finalize_voiced_render
     source = tmp_path / 'edited.mp4'
@@ -288,8 +292,10 @@ def test_voice_audio_export_applies_trim_and_video_speed(tmp_path):
 
 def test_audio_export_endpoint_revision_cuts_and_owner(tmp_path):
     from types import SimpleNamespace
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
     from app.api.voiceover import build_voiceover_router
     from app.middleware.auth import get_current_user
     store = VoiceStore(tmp_path)
@@ -315,8 +321,10 @@ def test_audio_export_endpoint_revision_cuts_and_owner(tmp_path):
 
 def test_waveform_api_returns_bounded_level_and_checks_owner(tmp_path):
     from types import SimpleNamespace
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
     from app.api.voiceover import build_voiceover_router
     from app.middleware.auth import get_current_user
     store = VoiceStore(tmp_path)
@@ -341,8 +349,10 @@ def test_waveform_api_returns_bounded_level_and_checks_owner(tmp_path):
 
 def test_invalid_reference_audio_returns_actionable_error(tmp_path):
     from types import SimpleNamespace
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
     from app.api.voiceover import build_voiceover_router
     from app.middleware.auth import get_current_user
     app = FastAPI()
@@ -356,6 +366,7 @@ def test_invalid_reference_audio_returns_actionable_error(tmp_path):
 
 def test_package_deduplicates_audio_shared_by_repeated_lines(tmp_path):
     import zipfile
+
     from app.services.voiceover.manager import VoiceManager
     from app.services.voiceover.packages import export_package
     store = VoiceStore(tmp_path)
@@ -408,6 +419,7 @@ def test_late_generation_does_not_overwrite_edited_text(tmp_path):
 def test_supervisor_stops_real_worker_and_preserves_committed_audio(tmp_path, monkeypatch, failure):
     import sys
     import time
+
     from app.services.voiceover import manager as module
     runtime = tmp_path / 'runtime'
     runtime.mkdir()
@@ -670,7 +682,9 @@ def test_audio_export_real_codec(tmp_path, audio_format):
 )
 def test_real_video_mix_keeps_duration_and_adds_voice(tmp_path, has_audio, mode, channels):
     import subprocess
+
     import imageio_ffmpeg
+
     from app.services.media_probe import probe_media
     from app.services.voiceover.mix import ffmpeg, prepare_voiced_video
 

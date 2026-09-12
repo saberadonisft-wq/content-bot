@@ -9,7 +9,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-from .models import SDK_VERSION, VoiceDocument
+from .models import SDK_VERSION, V2_MODEL_ID, VoiceDocument
 
 
 def digest(value) -> str:
@@ -53,15 +53,19 @@ def normalized_text(text: str, pronunciation: dict[str, str]) -> str:
 
 
 def generation_hash(document: VoiceDocument, clip, device: str) -> str:
+    profile = document.profile.model_dump()
+    # Keep existing v3 audio valid: old profiles implicitly enabled denoising.
+    if profile["denoise"] or not profile["reference_id"]:
+        profile.pop("denoise")
     return digest(
         {
             "pipeline": 1,
             "sdk": SDK_VERSION,
-            "profile": document.profile.model_dump(),
+            "profile": profile,
             "text": normalized_text(clip.spoken_text, document.pronunciation),
             "backend": device,
-            "precision": "fp32",
-            "temperature": 0.8,
+            "precision": "bf16" if document.profile.model_id == V2_MODEL_ID else "fp32",
+            "temperature": 0.4 if document.profile.model_id == V2_MODEL_ID else 0.8,
         }
     )
 

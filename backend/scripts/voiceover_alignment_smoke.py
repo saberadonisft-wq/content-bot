@@ -2,30 +2,29 @@
 import json
 
 from playwright.sync_api import expect, sync_playwright
-
 from voiceover_ui_smoke import HTML
 
 
 def main():
     cues = [
-        dict(id='a', start_ms=0, end_ms=3100, text='Nửa đêm ba canh,', revision=1),
-        dict(id='b', start_ms=3200, end_ms=6000, text='cô nương vì sao lại ở đây?', revision=1),
-        dict(id='c', start_ms=8800, end_ms=12500, text='Một câu riêng.', revision=1),
+        {'id': 'a', 'start_ms': 0, 'end_ms': 3100, 'text': 'Nửa đêm ba canh,', 'revision': 1},
+        {'id': 'b', 'start_ms': 3200, 'end_ms': 6000, 'text': 'cô nương vì sao lại ở đây?', 'revision': 1},
+        {'id': 'c', 'start_ms': 8800, 'end_ms': 12500, 'text': 'Một câu riêng.', 'revision': 1},
     ]
     html = HTML.replace(
         "const cues = [{id:'cue',start_ms:0,end_ms:5000,text:'Cô gái mở cửa.',revision:1}];",
         f'const cues = {json.dumps(cues, ensure_ascii=False)};',
     )
     text = ' '.join(cue['text'] for cue in cues[:2])
-    grouped = dict(id='group', source_cue_ids=['a', 'b'], source_text=text, spoken_text=text,
-                   start_ms=0, end_ms=6000, offset_ms=0, rate=1.08, gain=1,
-                   asset_id='a' * 64, generation_hash='a' * 64, duration_ms=2800,
-                   status='ready', error=None)
+    grouped = {'id': 'group', 'source_cue_ids': ['a', 'b'], 'source_text': text, 'spoken_text': text,
+                   'start_ms': 0, 'end_ms': 6000, 'offset_ms': 0, 'rate': 1.08, 'gain': 1,
+                   'asset_id': 'a' * 64, 'generation_hash': 'a' * 64, 'duration_ms': 2800,
+                   'status': 'ready', 'error': None}
     single = dict(grouped, id='single', source_cue_ids=['c'], source_text=cues[2]['text'],
                   spoken_text=cues[2]['text'], start_ms=8800, end_ms=12500)
-    document = dict(schema_version=1, project_id='smoke', video_fingerprint='video', revision=1,
-                    profile=dict(id='test', name='Giọng thử', preset='test'), clips=[grouped, single],
-                    pronunciation={}, mix=dict(enabled=True, muted=False, gain=1, original_gain=1, mode='mix'))
+    document = {'schema_version': 1, 'project_id': 'smoke', 'video_fingerprint': 'video', 'revision': 1,
+                    'profile': {'id': 'test', 'name': 'Giọng thử', 'preset': 'test'}, 'clips': [grouped, single],
+                    'pronunciation': {}, 'mix': {'enabled': True, 'muted': False, 'gain': 1, 'original_gain': 1, 'mode': 'mix'}}
     errors, jobs = [], []
 
     def api(route):
@@ -36,7 +35,7 @@ def main():
         if request.method == 'OPTIONS':
             pass
         elif path == '/status':
-            body = dict(ready=True, installed=True, message='Bộ tạo giọng thử', devices=['cpu'], presets=[])
+            body = {'ready': True, 'installed': True, 'message': 'Bộ tạo giọng thử', 'devices': ['cpu'], 'presets': []}
         elif path in ('/profiles', '/projects/smoke/jobs'):
             body = []
         elif path.endswith('/peaks'):
@@ -48,8 +47,8 @@ def main():
             body = document
         elif path == '/jobs':
             jobs.append(request.post_data_json)
-            body = dict(id='job', project_id='smoke', state='succeeded', total=3, completed=3,
-                        message='Đã kiểm tra yêu cầu tạo giọng', failed=[], eta_seconds=None)
+            body = {'id': 'job', 'project_id': 'smoke', 'state': 'succeeded', 'total': 3, 'completed': 3,
+                        'message': 'Đã kiểm tra yêu cầu tạo giọng', 'failed': [], 'eta_seconds': None}
         route.fulfill(json=body, headers={
             'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*',
             'Access-Control-Allow-Methods': 'GET, PUT, POST, OPTIONS',
@@ -79,14 +78,14 @@ def main():
         expect(page.get_by_text('Đã lưu lời đọc', exact=True)).to_be_visible(timeout=10000)
         page.get_by_role('button', name='Tạo phần còn thiếu', exact=True).click()
         expect(page.get_by_text('3/3 đoạn · Đã kiểm tra yêu cầu tạo giọng', exact=True)).to_be_visible()
-        assert jobs == [dict(project_id='smoke', device='cpu', clip_ids=None)]
+        assert jobs == [{'project_id': 'smoke', 'device': 'cpu', 'clip_ids': None}]
         page.reload()
         expect(page.locator('.voice-clip')).to_have_count(3)
         expect(page.get_by_role('button', name='Tách theo từng phụ đề', exact=True)).to_have_count(0)
         assert not errors, errors
         browser.close()
-    print(json.dumps(dict(passed=True, starts_ms=[0, 3200, 8800],
-                          checks=['split', 'autosave', 'retain single audio', 'undo', 'redo', 'generate request', 'reload']), ensure_ascii=False))
+    print(json.dumps({'passed': True, 'starts_ms': [0, 3200, 8800],
+                          'checks': ['split', 'autosave', 'retain single audio', 'undo', 'redo', 'generate request', 'reload']}, ensure_ascii=False))
 
 
 if __name__ == '__main__':

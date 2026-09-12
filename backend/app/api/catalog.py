@@ -14,16 +14,16 @@ from ..crawlers.contracts import (
     Operation,
     SchedulePolicy,
 )
-from ..mongo import PersistenceStore
 from ..schemas import KeywordInput, KeywordOutput, LiveWallConfig, SourceOutput
 from ..services.cbce_runtime import (
     cbce_provider_rollout_status,
     provider_overrides,
 )
-from ..services.channel_scans import CHANNEL_SCANNERS, channel_mode, normalize_channel
-from ..services.connectors import SourceConnector
+from ..services.channel_scans import channel_mode, normalize_channel
+from ..services.connector_contracts import SourceConnector
 from ..services.runs import RunManager, utcnow
 from ..services.text import normalized
+from ..storage_protocol import PersistenceStore
 
 
 def _keyword_output(keyword: dict) -> KeywordOutput:
@@ -49,7 +49,8 @@ def _keyword_output(keyword: dict) -> KeywordOutput:
 
 
 def _normalized_live_wall(
-    value: object, channels: list[dict],
+    value: object,
+    channels: list[dict],
 ) -> LiveWallConfig:
     try:
         configured = LiveWallConfig.model_validate(value or {})
@@ -68,17 +69,15 @@ def _normalized_live_wall(
 
 def build_catalog_router(
     get_store: Callable[[], PersistenceStore],
-    connectors: dict[str, SourceConnector],
-    run_manager: RunManager,
+    connectors: dict[str, SourceConnector] | Callable[[], dict[str, SourceConnector]],
+    run_manager: RunManager | Callable[[], RunManager],
 ) -> APIRouter:
-    SOURCE_REGISTRY.validate_bindings(
-        connectors,
-        CHANNEL_SCANNERS,
-        renderer_ids={"x", "tiktok"},
-    )
+    connectors_provider = connectors if callable(connectors) else lambda: connectors
+    run_manager_provider = run_manager if callable(run_manager) else lambda: run_manager
     router = APIRouter(prefix="/api/v1")
 
     def default_keyword_sources() -> list[str]:
+        connectors = connectors_provider()
         selected: list[str] = []
         for manifest in SOURCE_REGISTRY:
             connector = connectors.get(manifest.id)
@@ -88,12 +87,16 @@ def build_catalog_router(
                 spec.implementation is ImplementationState.IMPLEMENTED
                 and spec.schedule_policy is SchedulePolicy.BACKGROUND_SAFE
                 and bool(spec.handler_key)
-                for _, spec in SOURCE_REGISTRY.operation_specs(manifest.id, Operation.SEARCH)
+                for _, spec in SOURCE_REGISTRY.operation_specs(
+                    manifest.id, Operation.SEARCH
+                )
             ):
                 selected.append(manifest.id)
         return selected
 
-    def normalized_channels(payload: KeywordInput, existing: dict | None = None) -> list[dict]:
+    def normalized_channels(
+        payload: KeywordInput, existing: dict | None = None
+    ) -> list[dict]:
         previous_by_url = {
             row.get("normalized_url"): row
             for row in (existing or {}).get("channels", [])
@@ -120,7 +123,9 @@ def build_catalog_router(
             channels.append(candidate)
         return channels
 
-    def selected_global_sources(payload: KeywordInput, channels: list[dict]) -> list[str]:
+    def selected_global_sources(
+        payload: KeywordInput, channels: list[dict]
+    ) -> list[str]:
         """Keep global discovery selection independent from saved channels.
 
         An empty selection remains channel-only when channels were submitted,
@@ -138,6 +143,7 @@ def build_catalog_router(
 
     @router.get("/sources", response_model=list[SourceOutput])
     async def list_sources(deep: bool = False):
+        connectors = connectors_provider()
         manifests = list(SOURCE_REGISTRY)
         statuses = await asyncio.gather(
             *(
@@ -159,7 +165,9 @@ def build_catalog_router(
                     if spec.implementation is ImplementationState.PLANNED:
                         availability = None
                         reason_code = "NOT_IMPLEMENTED"
-                        message = spec.cta or "This operation is planned but not implemented."
+                        message = (
+                            spec.cta or "This operation is planned but not implemented."
+                        )
                     elif spec.operation is Operation.RENDER_EMBED:
                         availability = AvailabilityState.READY.value
                         reason_code = None
@@ -226,8 +234,12 @@ def build_catalog_router(
                             ),
                         }
                     )
-            search_specs = SOURCE_REGISTRY.operation_specs(manifest.id, Operation.SEARCH)
-            scan_specs = SOURCE_REGISTRY.operation_specs(manifest.id, Operation.SCAN_CHANNEL)
+            search_specs = SOURCE_REGISTRY.operation_specs(
+                manifest.id, Operation.SEARCH
+            )
+            scan_specs = SOURCE_REGISTRY.operation_specs(
+                manifest.id, Operation.SCAN_CHANNEL
+            )
             primary_ready = any(
                 operation["id"] == manifest.primary_operation.value
                 and operation["enabled"]
@@ -254,11 +266,13 @@ def build_catalog_router(
                     state=legacy_state,
                     detail=legacy_detail,
                     global_search=any(
-                        spec.implementation is ImplementationState.IMPLEMENTED and bool(spec.handler_key)
+                        spec.implementation is ImplementationState.IMPLEMENTED
+                        and bool(spec.handler_key)
                         for _, spec in search_specs
                     ),
                     watchlist_filter=any(
-                        spec.implementation is ImplementationState.IMPLEMENTED and bool(spec.handler_key)
+                        spec.implementation is ImplementationState.IMPLEMENTED
+                        and bool(spec.handler_key)
                         for _, spec in scan_specs
                     ),
                     requires_login=any(
@@ -269,7 +283,8 @@ def build_catalog_router(
                     ),
                     interaction_fields=list(
                         dict.fromkeys(
-                            metric.legacy_key or metric.id for metric in manifest.metrics
+                            metric.legacy_key or metric.id
+                            for metric in manifest.metrics
                         )
                     ),
                     metrics=[
@@ -301,6 +316,7 @@ def build_catalog_router(
 
     @router.post("/keywords", response_model=KeywordOutput, status_code=201)
     def create_keyword(payload: KeywordInput):
+        connectors = connectors_provider()
         storage = get_store()
         if storage.keyword_name_exists(normalized(payload.name)):
             raise HTTPException(409, "A keyword with that name already exists")
@@ -335,6 +351,8 @@ def build_catalog_router(
 
     @router.patch("/keywords/{keyword_id}", response_model=KeywordOutput)
     def update_keyword(keyword_id: int, payload: KeywordInput):
+        connectors = connectors_provider()
+        run_manager = run_manager_provider()
         storage = get_store()
         existing = storage.keyword(keyword_id)
         if not existing:
@@ -384,7 +402,9 @@ def build_catalog_router(
             str(channel.get("id") or "") for channel in existing.get("channels", [])
         }
         unknown = [
-            channel_id for channel_id in payload.channel_ids if channel_id not in channel_ids
+            channel_id
+            for channel_id in payload.channel_ids
+            if channel_id not in channel_ids
         ]
         if unknown:
             raise HTTPException(

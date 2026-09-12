@@ -7,11 +7,12 @@ from app.services.runs import EventBus, RunManager
 
 
 def test_source_data_deletion_is_confirmed_canonical_and_cascading(
+    application_services,
     mongo_store,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(main, "store", mongo_store)
-    monkeypatch.setattr(main.run_manager, "store", mongo_store)
+    monkeypatch.setattr(application_services, "store", mongo_store)
+    monkeypatch.setattr(application_services.run_manager, "store", mongo_store)
     now = datetime.now(UTC)
     keyword = mongo_store.create_keyword(
         {

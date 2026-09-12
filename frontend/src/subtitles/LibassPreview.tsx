@@ -2,7 +2,6 @@ import { useEffect, useRef } from "react";
 import type JASSUB from "jassub";
 import modernWasmUrl from "jassub/dist/wasm/jassub-worker-modern.wasm?url";
 import wasmUrl from "jassub/dist/wasm/jassub-worker.wasm?url";
-import workerUrl from "jassub/dist/wasm/jassub-worker.js?url";
 
 type LibassPreviewProps = {
   video: HTMLVideoElement | null;
@@ -71,7 +70,8 @@ export function LibassPreview({
           video,
           canvas,
           subContent: latestTrackRef.current ?? EMPTY_ASS_TRACK,
-          workerUrl,
+          // Let JASSUB/Vite bundle its RPC worker and imports. The wasm/
+          // jassub-worker.js file is only the WASM loader, not a worker endpoint.
           wasmUrl,
           modernWasmUrl,
           fonts: [ARIMO_REGULAR_URL, ARIMO_ITALIC_URL],

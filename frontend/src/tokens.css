@@ -58,38 +58,38 @@
   --space-5: 24px;
   --space-6: 32px;
 
-  /* Subtitle Studio V2 · semantic Cobalt palette */
-  --color-paper: oklch(97.5% 0.008 245);
-  --color-paper-2: oklch(95% 0.012 245);
-  --color-paper-3: oklch(91.5% 0.014 245);
-  --color-paper-raised: oklch(99% 0.005 245);
-  --color-ink: oklch(22% 0.025 250);
-  --color-ink-2: oklch(34% 0.025 250);
-  --color-muted: oklch(48% 0.022 250);
-  --color-rule: oklch(84% 0.018 245);
-  --color-rule-strong: oklch(69% 0.03 245);
-  --color-accent: oklch(49% 0.15 250);
-  --color-accent-hover: oklch(43% 0.145 250);
-  --color-accent-soft: oklch(92% 0.035 250);
-  --color-accent-ink: oklch(98% 0.006 245);
-  --color-selection: oklch(55% 0.22 296);
-  --color-selection-soft: oklch(94% 0.035 296);
-  --color-focus: oklch(55% 0.22 296);
-  --color-cue: oklch(79% 0.14 152);
-  --color-cue-hover: oklch(75% 0.16 152);
-  --color-cue-ink: oklch(25% 0.065 152);
-  --color-cue-rule: oklch(57% 0.15 152);
-  --color-success: oklch(48% 0.13 158);
-  --color-success-soft: oklch(94% 0.035 158);
-  --color-warning: oklch(49% 0.14 70);
-  --color-warning-soft: oklch(95% 0.04 80);
-  --color-error: oklch(52% 0.19 27);
-  --color-error-soft: oklch(95% 0.035 27);
-  --color-stage: oklch(13% 0.014 250);
-  --color-stage-ink: oklch(96% 0.008 245);
-  --color-scrim: oklch(14% 0.02 250 / 0.5);
-  --color-shadow: oklch(18% 0.025 250 / 0.16);
-  --color-shadow-soft: oklch(18% 0.025 250 / 0.08);
+  /* Subtitle Studio V2 · Modern Sleek Light Palette */
+  --color-paper: #f8fafc;
+  --color-paper-2: #f1f5f9;
+  --color-paper-3: #e2e8f0;
+  --color-paper-raised: #ffffff;
+  --color-ink: #0f172a;
+  --color-ink-2: #334155;
+  --color-muted: #64748b;
+  --color-rule: #e2e8f0;
+  --color-rule-strong: #cbd5e1;
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-accent-soft: #eff6ff;
+  --color-accent-ink: #ffffff;
+  --color-selection: #8b5cf6;
+  --color-selection-soft: #f5f3ff;
+  --color-focus: #2563eb;
+  --color-cue: #10b981;
+  --color-cue-hover: #059669;
+  --color-cue-ink: #ffffff;
+  --color-cue-rule: #047857;
+  --color-success: #10b981;
+  --color-success-soft: #ecfdf5;
+  --color-warning: #d97706;
+  --color-warning-soft: #fffbeb;
+  --color-error: #ef4444;
+  --color-error-soft: #fef2f2;
+  --color-stage: #090d16;
+  --color-stage-ink: #f8fafc;
+  --color-scrim: rgba(15, 23, 42, 0.6);
+  --color-shadow: rgba(15, 23, 42, 0.08);
+  --color-shadow-soft: rgba(15, 23, 42, 0.04);
   --color-transparent: transparent;
   --font-display: var(--font-ui);
   --font-body: var(--font-ui);
@@ -124,5 +124,40 @@
   --z-sticky: 200;
   --z-modal: 400;
   --z-tooltip: 600;
+}
 
+/* Subtitle Studio V2 · Dark Studio Theme (Obsidian & Slate) */
+.subtitle-studio-shell.theme-dark,
+[data-theme="dark"] .subtitle-studio-shell {
+  --color-paper: #0b0f14;
+  --color-paper-2: #111720;
+  --color-paper-3: #18202c;
+  --color-paper-raised: #1e2837;
+  --color-ink: #f1f5f9;
+  --color-ink-2: #cbd5e1;
+  --color-muted: #8496ad;
+  --color-rule: #232e3e;
+  --color-rule-strong: #334358;
+  --color-accent: #2563eb;
+  --color-accent-hover: #3b82f6;
+  --color-accent-soft: #1d3557;
+  --color-accent-ink: #ffffff;
+  --color-selection: #a855f7;
+  --color-selection-soft: #3b185f;
+  --color-focus: #38bdf8;
+  --color-cue: #059669;
+  --color-cue-hover: #10b981;
+  --color-cue-ink: #ffffff;
+  --color-cue-rule: #34d399;
+  --color-success: #10b981;
+  --color-success-soft: #064e3b;
+  --color-warning: #f59e0b;
+  --color-warning-soft: #451a03;
+  --color-error: #ef4444;
+  --color-error-soft: #450a0a;
+  --color-stage: #06080c;
+  --color-stage-ink: #f8fafc;
+  --color-scrim: rgba(0, 0, 0, 0.75);
+  --color-shadow: rgba(0, 0, 0, 0.5);
+  --color-shadow-soft: rgba(0, 0, 0, 0.25);
 }

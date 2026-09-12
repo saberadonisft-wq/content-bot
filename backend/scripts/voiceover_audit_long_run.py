@@ -7,8 +7,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'backend'))
+import itertools
+
 from app.services.voiceover.audio import audio_metadata
-from app.services.voiceover.store import VoiceStore, generation_hash, read_json, write_json
+from app.services.voiceover.store import (
+    VoiceStore,
+    generation_hash,
+    read_json,
+    write_json,
+)
 
 
 def main():
@@ -35,7 +42,7 @@ def main():
         except (AssertionError, ValueError, OSError, KeyError, wave.Error, EOFError) as error:
             failures.append({'clip_id': clip.id, 'error': str(error)})
     bounds.sort()
-    for previous, following in zip(bounds, bounds[1:]):
+    for previous, following in itertools.pairwise(bounds):
         if following[0] < previous[1] - 2:
             failures.append({'clip_id': following[2], 'error': f'overlap with {previous[2]}'})
     report = {

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import tempfile
 import subprocess
+import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from ..middleware.auth import get_current_user
@@ -29,9 +30,11 @@ from ..services.voiceover.packages import (
 from ..services.voiceover.store import read_json, write_json
 
 
-def build_voiceover_router(manager: VoiceManager) -> APIRouter:
+def build_voiceover_router(
+    manager: VoiceManager | Callable[[], VoiceManager],
+) -> APIRouter:
+    manager_provider = manager if callable(manager) else lambda: manager
     router = APIRouter(prefix="/api/v1/voiceover", tags=["voiceover"])
-    store = manager.store
 
     def owner(user=Depends(get_current_user)):
         return str(user["sub"])
@@ -46,16 +49,22 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
 
     @router.get("/status")
     def status(_=Depends(owner)):
+        manager = manager_provider()
         return manager.status()
 
     @router.get("/profiles")
     def profiles(user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
         return [
             read_json(p) for p in (store.owner_root(user) / "profiles").glob("*.json")
         ]
 
     @router.post("/profiles")
     def save_profile(profile: VoiceProfile, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
+
         def save():
             with store.lock:
                 path = store.path(user, "profiles", profile.id)
@@ -73,8 +82,29 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
 
         return checked(save)
 
+    @router.delete("/profiles/{profile_id}")
+    def delete_profile(profile_id: str, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
+
+        def delete():
+            with store.lock:
+                path = store.path(user, "profiles", profile_id)
+                if path.exists():
+                    path.unlink()
+                return {"id": profile_id, "deleted": True}
+
+        return checked(delete)
+
     @router.post("/references")
-    async def reference(file: UploadFile = File(...), user=Depends(owner)):
+    async def reference(
+        file: UploadFile = File(...),
+        start_seconds: float = Query(default=0, ge=0, le=86400, allow_inf_nan=False),
+        duration_seconds: float = Query(default=8, ge=3, le=8, allow_inf_nan=False),
+        user=Depends(owner),
+    ):
+        manager = manager_provider()
+        store = manager.store
         try:
             with tempfile.TemporaryDirectory(prefix="voice-reference-") as tmp:
                 source = Path(tmp) / "input"
@@ -88,7 +118,13 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
                 output = Path(tmp) / "reference.wav"
                 import asyncio
 
-                metadata = await asyncio.to_thread(convert_reference, source, output)
+                metadata = await asyncio.to_thread(
+                    convert_reference,
+                    source,
+                    output,
+                    start_seconds=start_seconds,
+                    duration_seconds=duration_seconds,
+                )
                 rid = metadata["checksum"]
                 dest = store.path(user, "references", rid, ".wav")
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -97,10 +133,14 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            raise HTTPException(422, "Không đọc được mẫu giọng. Chọn file audio hợp lệ dài 3–8 giây.") from exc
+            raise HTTPException(
+                422, "Không đọc được mẫu giọng. Chọn file audio hợp lệ dài 3–8 giây."
+            ) from exc
 
     @router.get("/references/{reference_id}")
     def get_reference(reference_id: str, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
         path = checked(lambda: store.path(user, "references", reference_id, ".wav"))
         if not path.exists():
             raise HTTPException(404)
@@ -108,16 +148,22 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
 
     @router.get("/projects/{project}")
     def get_document(project: str, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
         return checked(lambda: store.get_document(user, project))
 
     @router.put("/projects/{project}")
     def save_document(project: str, document: VoiceDocument, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
         if project != document.project_id:
             raise HTTPException(422, "ID dự án không khớp.")
         return checked(lambda: store.save_document(user, document))
 
     @router.get("/projects/{project}/jobs")
     def project_jobs(project: str, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
         checked(lambda: store.path(user, "projects", project))
         rows = [read_json(p) for p in (store.owner_root(user) / "jobs").glob("*.json")]
         return sorted(
@@ -128,6 +174,8 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
 
     @router.post("/preview")
     def preview(request: PreviewRequest, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
         project = uuid.uuid4().hex[:20]
         doc = VoiceDocument(
             project_id=project,
@@ -148,6 +196,7 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
 
     @router.post("/jobs")
     def start_job(request: StartJob, user=Depends(owner)):
+        manager = manager_provider()
         return checked(
             lambda: manager.start(
                 user, request.project_id, request.device, request.clip_ids
@@ -156,26 +205,41 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
 
     @router.get("/jobs/{job_id}")
     def get_job(job_id: str, user=Depends(owner)):
+        manager = manager_provider()
         return checked(lambda: manager.get(user, job_id))
 
     @router.post("/jobs/{job_id}/{action}")
     def control(job_id: str, action: str, user=Depends(owner)):
+        manager = manager_provider()
         if action not in {"pause", "resume", "cancel"}:
             raise HTTPException(404)
         return checked(lambda: manager.control(user, job_id, action))
 
     @router.get("/assets/{asset_id}/peaks")
-    def peaks(asset_id: str, max_points: int = Query(default=250, ge=16, le=2048), user=Depends(owner)):
+    def peaks(
+        asset_id: str,
+        max_points: int = Query(default=250, ge=16, le=2048),
+        user=Depends(owner),
+    ):
+        manager = manager_provider()
+        store = manager.store
         metadata = checked(lambda: read_json(store.path(user, "assets", asset_id)))
         levels = metadata.get("peaks", [])
-        selected = next((level for level in levels if len(level) <= max_points), levels[-1] if levels else [])
+        selected = next(
+            (level for level in levels if len(level) <= max_points),
+            levels[-1] if levels else [],
+        )
         if len(selected) > max_points:
             stride = (len(selected) + max_points - 1) // max_points
-            selected = [max(selected[i:i + stride]) for i in range(0, len(selected), stride)]
+            selected = [
+                max(selected[i : i + stride]) for i in range(0, len(selected), stride)
+            ]
         return {"peaks": [selected], "duration_ms": metadata["duration_ms"]}
 
     @router.get("/assets/{asset_id}")
     def asset(asset_id: str, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
         path = checked(lambda: store.path(user, "assets", asset_id, ".wav"))
         if not path.exists():
             raise HTTPException(404)
@@ -185,6 +249,7 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
 
     @router.post("/packages/export")
     def export(request: StartJob, user=Depends(owner)):
+        manager = manager_provider()
         path = checked(
             lambda: export_package(manager, user, request.project_id, request.device)
         )
@@ -196,6 +261,7 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
     async def import_result(
         project: str, file: UploadFile = File(...), user=Depends(owner)
     ):
+        manager = manager_provider()
         import asyncio
         import zipfile
 
@@ -217,23 +283,49 @@ def build_voiceover_router(manager: VoiceManager) -> APIRouter:
 
     @router.get("/projects/{project}/audio")
     def export_audio(project: str, format: str = "wav", user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
+
         def compose():
             doc = store.get_document(user, project)
             return export_voice_audio(store, user, doc, format)
 
         path = checked(compose)
-        return FileResponse(path, media_type={"wav": "audio/wav", "flac": "audio/flac", "mp3": "audio/mpeg"}[format], filename=f"giong-doc.{format}")
+        return FileResponse(
+            path,
+            media_type={"wav": "audio/wav", "flac": "audio/flac", "mp3": "audio/mpeg"}[
+                format
+            ],
+            filename=f"giong-doc.{format}",
+        )
 
     @router.post("/projects/{project}/audio")
-    def export_edited_audio(project: str, request: AudioExportRequest, user=Depends(owner)):
+    def export_edited_audio(
+        project: str, request: AudioExportRequest, user=Depends(owner)
+    ):
+        manager = manager_provider()
+        store = manager.store
+
         def compose():
             doc = store.get_document(user, project)
             if doc.revision != request.revision:
                 raise ValueError("Lời đọc đã thay đổi. Lưu và thử xuất lại.")
-            return export_voice_audio(store, user, doc, request.format,
-                                      request.model_dump(), request.duration_ms)
+            return export_voice_audio(
+                store,
+                user,
+                doc,
+                request.format,
+                request.model_dump(),
+                request.duration_ms,
+            )
+
         path = checked(compose)
-        return FileResponse(path, media_type={"wav": "audio/wav", "flac": "audio/flac", "mp3": "audio/mpeg"}[request.format],
-                            filename=f"giong-doc.{request.format}")
+        return FileResponse(
+            path,
+            media_type={"wav": "audio/wav", "flac": "audio/flac", "mp3": "audio/mpeg"}[
+                request.format
+            ],
+            filename=f"giong-doc.{request.format}",
+        )
 
     return router

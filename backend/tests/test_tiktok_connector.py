@@ -217,7 +217,7 @@ def test_tiktok_connector_rotates_near_expiry_vault_token(monkeypatch, tmp_path)
             return None
 
     monkeypatch.setattr(
-        "app.services.connectors.TikTokOAuthClient", FakeOAuthClient
+        "app.services.connector_tiktok.TikTokOAuthClient", FakeOAuthClient
     )
     config = asyncio.run(TikTokDisplayConnector()._display_config())
 

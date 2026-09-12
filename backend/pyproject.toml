@@ -13,6 +13,7 @@ dependencies = [
   "pymongo==4.17.0",
   "httpx==0.28.1",
   "cryptography==46.0.5",
+  "PyJWT[crypto]==2.13.0",
   "pydantic-settings==2.14.2",
   "imageio-ffmpeg==0.6.0",
   "python-multipart==0.0.32",
@@ -29,6 +30,7 @@ include = ["app*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["vendor"]
+pythonpath = ["."]
 
 [tool.ruff.lint]
 ignore = ["B008", "BLE001"]

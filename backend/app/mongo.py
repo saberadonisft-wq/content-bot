@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime
 from threading import Lock
@@ -11,8 +12,14 @@ from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.database import Database
 
 from .config import settings
+from .mongo_item_query import (
+    PROJECTION_FIELD,
+    projection,
+    select_items,
+    unchanged_input,
+)
 
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 
 
 def configure_mongodb_dns() -> None:
@@ -195,6 +202,7 @@ class MongoStore:
                 [("source_id", ASCENDING), ("published_at", DESCENDING)]
             )
             self.db.content_items.create_index("last_seen_at")
+            self.db.content_items.create_index(f"{PROJECTION_FIELD}.version")
             self.db.comments.create_index(
                 [("source_id", ASCENDING), ("external_id", ASCENDING)],
                 unique=True,
@@ -262,6 +270,7 @@ class MongoStore:
             return None
         result = deepcopy(doc)
         result["id"] = result.pop("_id")
+        result.pop(PROJECTION_FIELD, None)
         return result
 
     def keyword(self, keyword_id: int) -> dict[str, Any] | None:
@@ -567,10 +576,23 @@ class MongoStore:
         content_item_id = values.pop("id", None)
         if content_item_id is None:
             content_item_id = self.next_id("content_items")
-        self.db.content_items.update_one(
-            {"_id": content_item_id}, {"$set": values}, upsert=True
-        )
-        return {"id": content_item_id, **values}
+        values.pop(PROJECTION_FIELD, None)
+        for _ in range(16):
+            previous = self.db.content_items.find_one({"_id": content_item_id})
+            document = {**(previous or {}), **values, "_id": content_item_id}
+            materialized = projection(document)
+            if previous is None:
+                self.db.content_items.insert_one({**document, PROJECTION_FIELD: materialized})
+                return {"id": content_item_id, **values}
+            result = self.db.content_items.update_one(
+                unchanged_input(previous), {"$set": {**values, PROJECTION_FIELD: materialized}},
+            )
+            if result.matched_count:
+                return {"id": content_item_id, **values}
+        raise RuntimeError("Content changed repeatedly while saving item; retry ingestion")
+
+    def query_items(self, query, *, limit=None, offset=0):
+        return select_items(self, query, limit, offset)
 
     def ingest_content_bundle(
         self,
@@ -580,7 +602,7 @@ class MongoStore:
         keyword_id: int,
         trend_score_fn: Callable[[dict[str, Any]], float] | None = None,
     ) -> dict[str, Any]:
-        """Atomically persist an item, its metric snapshot, and its keyword match."""
+        """Persist a bundle in order; standalone MongoDB has no multi-document transaction."""
         item = self.save_item(item_values)
         snapshot = deepcopy(snapshot_values)
         snapshot["content_item_id"] = item["id"]
@@ -824,6 +846,16 @@ class MongoStore:
             for row in self.db.content_items.find({"source_id": source_id}, {"_id": 1})
         ]
 
+    def source_snapshot_pairs(self, source_id: str) -> list[list[dict[str, Any]]]:
+        from .services.snapshot_pairs import latest_pairs
+
+        rows = self.db.metric_snapshots.aggregate([
+            {"$lookup": {"from": "content_items", "localField": "content_item_id", "foreignField": "_id", "as": "item"}},
+            {"$match": {"item.source_id": source_id}},
+            {"$project": {"item": 0}},
+        ])
+        return latest_pairs(self.public(row) for row in rows)
+
     def metadata(self, key: str) -> dict[str, Any] | None:
         return self.public(self.db.app_metadata.find_one({"_id": key}))
 
@@ -883,15 +915,17 @@ class MongoStore:
 
 
 from .sqlite_store import SQLiteStore
+from .storage_protocol import PersistenceStore
 
-PersistenceStore = MongoStore | SQLiteStore
 
-storage_backend = settings.content_bot_storage_backend.strip().lower()
-if storage_backend == "mongodb":
-    store: PersistenceStore = MongoStore()
-elif storage_backend == "sqlite":
-    store = SQLiteStore(settings.sqlite_path)
-else:
-    raise RuntimeError(
-        "CONTENT_BOT_STORAGE_BACKEND must be either 'sqlite' or 'mongodb'"
-    )
+def create_store() -> PersistenceStore:
+    storage_backend = settings.content_bot_storage_backend.strip().lower()
+    if storage_backend == "mongodb":
+        return MongoStore()
+    if storage_backend == "sqlite":
+        return SQLiteStore(settings.sqlite_path)
+    raise RuntimeError("CONTENT_BOT_STORAGE_BACKEND must be either 'sqlite' or 'mongodb'")
+
+
+# Compatibility for standalone ingestion scripts; construction does not connect.
+store: PersistenceStore = create_store()

@@ -136,48 +136,22 @@ def _auto_label(source_id: str, normalized_url: str) -> str:
     except Exception:
         return ""
     parts = [p for p in parsed.path.split("/") if p]
-    if source_id in {"x", "tiktok", "instagram"}:
-        # e.g. https://x.com/Vaniixdom → @Vaniixdom
-        if parts:
-            handle = parts[-1].lstrip("@")
-            return f"@{handle}" if handle else ""
-    if source_id == "youtube":
-        # e.g. https://www.youtube.com/@phongvanreview07 → @phongvanreview07
-        if parts:
-            segment = parts[-1]
-            return segment if segment.startswith("@") else segment
-    if source_id == "bluesky":
-        # e.g. https://bsky.app/profile/handle.bsky.social → @handle.bsky.social
-        if len(parts) >= 2 and parts[0] == "profile":
-            return f"@{parts[1]}"
-    if source_id == "mastodon":
-        # e.g. https://mastodon.social/@user → @user
-        if parts and parts[-1].startswith("@"):
-            return parts[-1]
-        if parts:
-            return f"@{parts[-1]}"
-    if source_id == "bilibili":
-        # e.g. https://space.bilibili.com/12345 → Bilibili 12345
-        if parts:
-            return f"Bilibili {parts[-1]}"
-    if source_id == "reddit":
-        # e.g. https://www.reddit.com/r/gaming or /user/name
-        if len(parts) >= 2:
-            if parts[0] == "r":
-                return f"r/{parts[1]}"
-            if parts[0] in {"u", "user"}:
-                return f"u/{parts[1]}"
-    if source_id == "facebook":
-        # e.g. https://www.facebook.com/PageName → PageName
-        if parts:
-            return parts[-1]
-    if source_id == "steam":
-        # e.g. https://store.steampowered.com/app/12345 → Steam App 12345
-        if len(parts) >= 2 and parts[0] == "app":
-            return f"Steam App {parts[1]}"
-    if source_id in {"douyin", "kuaishou", "weibo", "xhs", "tieba", "zhihu"}:
-        if parts:
-            return parts[-1]
+    if source_id in {"x", "tiktok", "instagram"} and parts:
+        handle = parts[-1].lstrip("@")
+        return f"@{handle}" if handle else ""
+    if source_id == "bluesky" and len(parts) >= 2 and parts[0] == "profile":
+        return f"@{parts[1]}"
+    if source_id == "mastodon" and parts:
+        return parts[-1] if parts[-1].startswith("@") else f"@{parts[-1]}"
+    if source_id == "bilibili" and parts:
+        return f"Bilibili {parts[-1]}"
+    if source_id == "reddit" and len(parts) >= 2:
+        if parts[0] == "r":
+            return f"r/{parts[1]}"
+        if parts[0] in {"u", "user"}:
+            return f"u/{parts[1]}"
+    if source_id == "steam" and len(parts) >= 2 and parts[0] == "app":
+        return f"Steam App {parts[1]}"
     if source_id == "web":
         return parsed.netloc or ""
     # Generic fallback: use the last path segment

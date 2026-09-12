@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import threading
 import time
@@ -9,7 +9,7 @@ from unittest import mock
 import httpx
 import pytest
 
-from app import main
+from app.api import subtitles as subtitles_api
 from app.schemas import GeminiSubtitleRequest, SubtitleJobResponse
 from app.services.gemini_subtitles import (
     GeminiSubtitleError,
@@ -88,8 +88,12 @@ def test_offset_cues_drops_content_after_chunk_end_and_clips_crossing_cue(
 
 def test_prompt_bilingual_has_secondary_text(tmp_path: Path) -> None:
     svc = _service(tmp_path)
-    prompt_bi = svc._build_prompt(bilingual=True, chunk_index=1, chunk_count=1, chunk_duration_ms=60000)
-    prompt_vi = svc._build_prompt(bilingual=False, chunk_index=1, chunk_count=1, chunk_duration_ms=60000)
+    prompt_bi = svc._build_prompt(
+        bilingual=True, chunk_index=1, chunk_count=1, chunk_duration_ms=60000
+    )
+    prompt_vi = svc._build_prompt(
+        bilingual=False, chunk_index=1, chunk_count=1, chunk_duration_ms=60000
+    )
     assert "secondary_text" in prompt_bi
     assert "secondary_text" not in prompt_vi
     assert "VIDEO_END_MS=60000" in prompt_bi
@@ -113,7 +117,11 @@ def test_generate_content_retries_on_429(tmp_path: Path) -> None:
                 "candidates": [
                     {
                         "content": {
-                            "parts": [{"text": '{"schema_version": 2, "language": "vi", "timebase": "milliseconds", "timing_source": "gemini_estimate", "timing_precision_ms": 100, "segments": []}'}]
+                            "parts": [
+                                {
+                                    "text": '{"schema_version": 2, "language": "vi", "timebase": "milliseconds", "timing_source": "gemini_estimate", "timing_precision_ms": 100, "segments": []}'
+                                }
+                            ]
                         },
                         "finishReason": "STOP",
                     }
@@ -123,8 +131,17 @@ def test_generate_content_retries_on_429(tmp_path: Path) -> None:
 
     transport = httpx.MockTransport(mock_send)
     with (
-        mock.patch.object(svc, "_client", lambda: httpx.Client(transport=transport, base_url="https://generativelanguage.googleapis.com")),
-        mock.patch("app.services.gemini_subtitles._interruptible_sleep", return_value=None),
+        mock.patch.object(
+            svc,
+            "_client",
+            lambda: httpx.Client(
+                transport=transport,
+                base_url="https://generativelanguage.googleapis.com",
+            ),
+        ),
+        mock.patch(
+            "app.services.gemini_subtitles._interruptible_sleep", return_value=None
+        ),
     ):
         result = svc._generate_content(
             "files/test123",
@@ -137,11 +154,23 @@ def test_generate_content_retries_on_429(tmp_path: Path) -> None:
     assert len(status_messages) == 2
     assert "HTTP 429" in status_messages[0]
     assert "Rate limit" in status_messages[0]
-    assert "thử lại sau 30s (1/5)" in status_messages[0]
-    assert "thử lại sau 60s (2/5)" in status_messages[1]
+    assert "thử lại sau 3s (1/5)" in status_messages[0]
+    assert "thử lại sau 3s (2/5)" in status_messages[1]
 
 
-def test_generate_retry_status_distinguishes_5xx_from_rate_limit(tmp_path: Path) -> None:
+def test_retry_delay_is_fixed_at_three_seconds_unless_server_requests_longer(
+    tmp_path: Path,
+) -> None:
+    svc = _service(tmp_path)
+
+    assert svc._retry_delay(1) == 3
+    assert svc._retry_delay(5) == 3
+    assert svc._retry_delay(1, httpx.Response(503, headers={"Retry-After": "30"})) == 30
+
+
+def test_generate_retry_status_distinguishes_5xx_from_rate_limit(
+    tmp_path: Path,
+) -> None:
     svc = _service(tmp_path, api_key="fake-key")
     attempts = 0
     status_messages: list[str] = []
@@ -172,7 +201,9 @@ def test_generate_retry_status_distinguishes_5xx_from_rate_limit(tmp_path: Path)
                 base_url="https://generativelanguage.googleapis.com",
             ),
         ),
-        mock.patch("app.services.gemini_subtitles._interruptible_sleep", return_value=None),
+        mock.patch(
+            "app.services.gemini_subtitles._interruptible_sleep", return_value=None
+        ),
     ):
         svc._generate_content(
             "files/test123",
@@ -226,7 +257,9 @@ def test_generate_retry_status_distinguishes_timeout_and_connection_error(
                 base_url="https://generativelanguage.googleapis.com",
             ),
         ),
-        mock.patch("app.services.gemini_subtitles._interruptible_sleep", return_value=None),
+        mock.patch(
+            "app.services.gemini_subtitles._interruptible_sleep", return_value=None
+        ),
     ):
         svc._generate_content(
             "files/test123",
@@ -235,7 +268,7 @@ def test_generate_retry_status_distinguishes_timeout_and_connection_error(
             status_callback=status_messages.append,
         )
 
-    assert status_messages == [f"{expected_message}; thử lại sau 30s (1/5)"]
+    assert status_messages == [f"{expected_message}; thử lại sau 3s (1/5)"]
 
 
 def test_gemini_uses_api_key_header_and_not_query_parameter(tmp_path: Path) -> None:
@@ -400,12 +433,14 @@ def test_upload_retry_status_reports_operation_and_http_code(tmp_path: Path) -> 
     assert status_messages == [
         (
             "Gemini giới hạn tốc độ/quota (HTTP 429) khi khởi tạo upload: "
-            "Upload quota exceeded; thử lại sau 30s (1/5)"
+            "Upload quota exceeded; thử lại sau 3s (1/5)"
         )
     ]
 
 
-def test_remote_cleanup_failure_is_reported_as_warning(tmp_path: Path, monkeypatch) -> None:
+def test_remote_cleanup_failure_is_reported_as_warning(
+    tmp_path: Path, monkeypatch
+) -> None:
     svc = _service(tmp_path, api_key="header-key")
     video = tmp_path / "video.mp4"
     video.write_bytes(b"fixture")
@@ -420,13 +455,18 @@ def test_remote_cleanup_failure_is_reported_as_warning(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         svc,
         "_generate_content",
-        lambda *args, **kwargs: '{"schema_version":2,"language":"vi","timebase":"milliseconds","timing_source":"gemini_estimate","timing_precision_ms":100,"segments":[{"id":"g1","start_ms":0,"end_ms":1000,"text":"Xin chao"}]}',
+        lambda *args, **kwargs: (
+            '{"schema_version":2,"language":"vi","timebase":"milliseconds","timing_source":"gemini_estimate","timing_precision_ms":100,"segments":[{"id":"g1","start_ms":0,"end_ms":1000,"text":"Xin chao"}]}'
+        ),
     )
     monkeypatch.setattr(svc, "_delete_file", lambda *args, **kwargs: False)
 
     result = svc.generate(video, media, {}, context)
 
-    assert any(warning["code"] == "gemini_remote_cleanup_failed" for warning in result["warnings"])
+    assert any(
+        warning["code"] == "gemini_remote_cleanup_failed"
+        for warning in result["warnings"]
+    )
 
 
 def test_generate_raises_after_max_retries(tmp_path: Path) -> None:
@@ -437,8 +477,17 @@ def test_generate_raises_after_max_retries(tmp_path: Path) -> None:
 
     transport = httpx.MockTransport(always_429)
     with (
-        mock.patch.object(svc, "_client", lambda: httpx.Client(transport=transport, base_url="https://generativelanguage.googleapis.com")),
-        mock.patch("app.services.gemini_subtitles._interruptible_sleep", return_value=None),
+        mock.patch.object(
+            svc,
+            "_client",
+            lambda: httpx.Client(
+                transport=transport,
+                base_url="https://generativelanguage.googleapis.com",
+            ),
+        ),
+        mock.patch(
+            "app.services.gemini_subtitles._interruptible_sleep", return_value=None
+        ),
         pytest.raises(GeminiSubtitleError, match="HTTP 429"),
     ):
         svc._generate_content(
@@ -464,6 +513,7 @@ def test_generate_raises_on_missing_api_key(tmp_path: Path) -> None:
 
 
 def test_gemini_endpoint_runs_as_separate_attachable_job(
+    application_services,
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -476,9 +526,9 @@ def test_gemini_endpoint_runs_as_separate_attachable_job(
         "duration_ms": 5000,
         "has_audio": True,
     }
-    monkeypatch.setattr(main, "gemini_subtitle_jobs", manager)
-    monkeypatch.setattr(main, "_uploaded_video_path", lambda _video_id: video_path)
-    monkeypatch.setattr(main, "probe_media_cached", lambda *_args, **_kwargs: media)
+    monkeypatch.setattr(application_services, "gemini_subtitle_jobs", manager)
+    monkeypatch.setattr(subtitles_api, "_uploaded_video_path", lambda _video_id: video_path)
+    monkeypatch.setattr(subtitles_api, "probe_media_cached", lambda *_args, **_kwargs: media)
 
     def fake_generate(_path, _media, _options, context):
         context.update(70, "gemini_analyzing", "Gemini dang xem video")
@@ -500,12 +550,12 @@ def test_gemini_endpoint_runs_as_separate_attachable_job(
         }
 
     monkeypatch.setattr(
-        main,
+        application_services,
         "gemini_subtitle_service",
         SimpleNamespace(generate=fake_generate),
     )
-    submitted = main.generate_subtitles_with_gemini_endpoint(
-        GeminiSubtitleRequest(video_id="a" * 12)
+    submitted = subtitles_api.generate_subtitles_with_gemini_endpoint(
+        GeminiSubtitleRequest(video_id="a" * 12), services=application_services
     )
     validated_submission = SubtitleJobResponse(**submitted)
     assert validated_submission.kind == "generation"

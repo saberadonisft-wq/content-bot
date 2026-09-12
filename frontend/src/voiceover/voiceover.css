@@ -1,49 +1,503 @@
-.voice-panel { display: flex; flex-direction: column; gap: 14px; }
-.voice-panel label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
-.voice-panel input:not([type="checkbox"]):not([type="file"]), .voice-panel select, .voice-panel textarea {
-  width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--color-border);
-  border-radius: 5px; background: var(--color-paper); color: var(--color-ink);
+/* Subtitle Studio · Voiceover Component Modern Light & Dark Styles */
+
+.voice-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
-.voice-panel textarea { resize: vertical; min-height: 70px; }
-.voice-panel details { border-top: 1px solid var(--color-border); padding-top: 10px; }
-.voice-panel summary { cursor: pointer; font-weight: 600; margin-bottom: 10px; }
-.voice-panel details > * + * { margin-top: 10px; }
-.voice-panel button { cursor: pointer; min-height: 36px; }
-.voice-panel button:disabled { cursor: not-allowed; opacity: .5; }
-.voice-panel audio { width: 100%; }
-.voice-panel fieldset { min-width: 0; border: 1px solid var(--color-border); border-radius: 6px; padding: 10px; }
-.voice-panel fieldset > * + * { margin-top: 10px; }
-.voice-runtime { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.voice-runtime span { flex: 1; }
-.voice-setup-command { overflow-wrap: anywhere; white-space: normal; font-size: 12px; }
-.voice-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.voice-actions button, .voice-runtime button { padding: 6px 10px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-paper); color: var(--color-ink); }
-.voice-actions button { display: inline-flex; align-items: center; gap: 6px; }
-.voice-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.voice-job { display: grid; gap: 8px; font-size: 12px; }
-.voice-job progress { width: 100%; }
-.voice-error { color: var(--color-danger, #b42318); overflow-wrap: anywhere; }
-.voice-track-row { height: 76px; position: relative; border-bottom: 1px solid var(--color-border); }
-.subtitle-timeline.has-voice-track { min-height: 280px; }
-.subtitle-timeline.has-voice-track .voice-track-row { position: absolute; inset: 42px 0 auto; }
-.subtitle-timeline.has-voice-track .subtitle-track-row { inset-block-start: 124px; }
+
+.voice-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-ink-2);
+}
+
+.voice-panel input:not([type="checkbox"]):not([type="file"]),
+.voice-panel select,
+.voice-panel textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--color-rule-strong);
+  border-radius: 8px;
+  background: var(--color-paper-raised);
+  color: var(--color-ink);
+  font-size: 13px;
+  line-height: 1.45;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.voice-panel input:not([type="checkbox"]):not([type="file"]):focus,
+.voice-panel select:focus,
+.voice-panel textarea:focus {
+  border-color: var(--color-focus);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.voice-panel textarea {
+  resize: vertical;
+  min-height: 72px;
+}
+
+/* ── Modern Card Accordions (<details>) ── */
+.voice-panel details {
+  border: 1px solid var(--color-rule);
+  border-radius: 10px;
+  background: var(--color-paper-raised);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.voice-panel details[open] {
+  border-color: var(--color-rule-strong);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+.voice-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-ink);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  list-style: none;
+  user-select: none;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.voice-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.voice-panel summary::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--color-muted);
+  border-bottom: 2px solid var(--color-muted);
+  transform: rotate(-45deg);
+  transition: transform 0.2s ease, border-color 0.2s ease;
+  margin-right: 2px;
+  flex-shrink: 0;
+}
+
+.voice-panel details[open] > summary::after {
+  transform: rotate(45deg);
+  border-color: var(--color-accent);
+}
+
+.voice-panel summary:hover {
+  background: var(--color-paper-2);
+}
+
+.voice-panel details > *:not(summary) {
+  margin-inline: 14px;
+}
+
+.voice-panel details > summary + * {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-paper-2);
+}
+
+.voice-panel details > *:last-child {
+  margin-bottom: 14px;
+}
+
+.voice-panel details > * + * {
+  margin-top: 10px;
+}
+
+/* ── Buttons ── */
+.voice-panel button {
+  cursor: pointer;
+  min-height: 34px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 1px solid var(--color-rule);
+  background: var(--color-paper-raised);
+  color: var(--color-ink-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+
+.voice-panel button:hover:not(:disabled) {
+  background: var(--color-paper-2);
+  border-color: var(--color-rule-strong);
+  color: var(--color-ink);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.voice-panel button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.voice-panel button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.voice-panel button.studio-primary-button {
+  border: none;
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+}
+
+.voice-panel button.studio-primary-button:hover:not(:disabled) {
+  background: linear-gradient(135deg, #1d4ed8, #1e40af);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+  transform: translateY(-1px);
+}
+
+.voice-panel audio {
+  width: 100%;
+  border-radius: 8px;
+  margin-top: 4px;
+}
+
+/* ── Fieldsets & Legends ── */
+.voice-panel fieldset {
+  min-width: 0;
+  border: 1px solid var(--color-rule);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--color-paper);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.voice-panel legend {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--color-ink);
+  padding: 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.voice-panel fieldset > * + * {
+  margin-top: 6px;
+}
+
+/* ── Runtime Info Bar ── */
+.voice-runtime {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-ink-2);
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.voice-runtime span {
+  flex: 1;
+}
+
+.voice-runtime button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+}
+
+.voice-setup-command {
+  display: block;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #0f172a;
+  color: #38bdf8;
+  font-family: var(--font-data);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* ── Action Button Grids ── */
+.voice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.voice-actions button {
+  padding: 6px 12px;
+  border: 1px solid var(--color-rule);
+  border-radius: 7px;
+  background: var(--color-paper-raised);
+  color: var(--color-ink-2);
+  font-size: 12.5px;
+}
+
+.voice-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* ── Job Progress ── */
+.voice-job {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+}
+
+.voice-job progress {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: none;
+  background: var(--color-paper-3);
+  appearance: none;
+}
+
+.voice-job progress::-webkit-progress-bar {
+  background-color: var(--color-paper-3);
+  border-radius: 999px;
+}
+
+.voice-job progress::-webkit-progress-value {
+  background: linear-gradient(90deg, #2563eb, #38bdf8);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.voice-job progress::-moz-progress-bar {
+  background: linear-gradient(90deg, #2563eb, #38bdf8);
+  border-radius: 999px;
+}
+
+.voice-error {
+  color: var(--color-error);
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+/* ── Timeline Voice Track & Clips ── */
+.voice-track-row {
+  height: 76px;
+  position: relative;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.subtitle-timeline.has-voice-track {
+  min-height: 280px;
+}
+
+.subtitle-timeline.has-voice-track .voice-track-row {
+  position: absolute;
+  inset: 42px 0 auto;
+}
+
+.subtitle-timeline.has-voice-track .subtitle-track-row {
+  inset-block-start: 124px;
+}
+
 .subtitle-timeline.has-voice-track .overlay-track-row,
-.subtitle-timeline.has-voice-track .video-track-row { inset-block-start: 172px; }
-.subtitle-timeline.has-voice-track .overlay-track-row + .video-track-row { inset-block-start: 212px; }
-.subtitle-workspace.has-voice-track { grid-template-rows: minmax(150px, 1fr) 56px 52px 280px 42px; }
-.subtitle-timeline-rail .voice-track-label { height: 76px; flex: 0 0 76px; }
-.voice-clip { position: absolute; top: 5px; height: 66px; overflow: hidden; padding: 4px 6px; text-align: left;
-  border: 1px solid #54788b; border-radius: 5px; background: #e4f0f5; color: #183d50; cursor: grab; touch-action: none; }
-.voice-clip.is-selected { outline: 2px solid var(--color-focus); outline-offset: -2px; }
-.voice-clip.is-stale, .voice-clip.is-overflow { background: #fff1d6; border-color: #9a6908; color: #624200; }
-.voice-clip.is-failed { background: #ffe8e5; color: #8a2118; }
-.voice-clip > span { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
-.voice-clip small { display: block; overflow: hidden; font-size: 10px; }
-.voice-clip svg { display: block; height: 24px; width: 100%; }
-.voice-clip path { stroke: currentColor; stroke-width: 1; fill: none; }
+.subtitle-timeline.has-voice-track .video-track-row {
+  inset-block-start: 172px;
+}
+
+.subtitle-timeline.has-voice-track .overlay-track-row + .video-track-row {
+  inset-block-start: 212px;
+}
+
+.subtitle-workspace.has-voice-track {
+  grid-template-rows: minmax(150px, 1fr) 56px 52px 280px 42px;
+}
+
+.subtitle-timeline-rail .voice-track-label {
+  height: 76px;
+  flex: 0 0 76px;
+}
+
+.voice-clip {
+  position: absolute;
+  top: 5px;
+  height: 66px;
+  overflow: hidden;
+  padding: 5px 8px;
+  text-align: left;
+  border: 1.5px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e40af;
+  cursor: grab;
+  touch-action: none;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.voice-clip:hover {
+  border-color: #93c5fd;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.12);
+}
+
+.voice-clip.is-selected {
+  border-color: #2563eb;
+  outline: 2px solid #2563eb;
+  outline-offset: -1px;
+  background: #dbeafe;
+}
+
+.voice-clip.is-stale,
+.voice-clip.is-overflow {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+
+.voice-clip.is-stale path,
+.voice-clip.is-overflow path {
+  stroke: #d97706;
+}
+
+.voice-clip.is-failed {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+.voice-clip.is-failed path {
+  stroke: #ef4444;
+}
+
+.voice-clip > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.voice-clip small {
+  display: block;
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+.voice-clip svg {
+  display: block;
+  height: 24px;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.voice-clip path {
+  stroke: #3b82f6;
+  stroke-width: 1.5;
+  fill: none;
+}
+
 @media (max-height: 700px) {
   .subtitle-workspace.has-voice-track {
     overflow-y: auto;
     min-height: 580px;
   }
+}
+
+/* ── Dark Studio Theme for Voiceover ── */
+.theme-dark .voice-panel input:not([type="checkbox"]):not([type="file"]),
+.theme-dark .voice-panel select,
+.theme-dark .voice-panel textarea {
+  background: var(--color-paper-2);
+  border-color: var(--color-rule);
+  color: var(--color-ink);
+}
+
+.theme-dark .voice-panel details {
+  background: var(--color-paper-2);
+  border-color: var(--color-rule);
+}
+
+.theme-dark .voice-panel details[open] {
+  border-color: var(--color-rule-strong);
+}
+
+.theme-dark .voice-panel summary:hover {
+  background: var(--color-paper-3);
+}
+
+.theme-dark .voice-panel summary::after {
+  border-color: var(--color-muted);
+}
+
+.theme-dark .voice-panel details[open] > summary::after {
+  border-color: #38bdf8;
+}
+
+.theme-dark .voice-panel button {
+  background: var(--color-paper-2);
+  border-color: var(--color-rule);
+  color: var(--color-ink);
+}
+
+.theme-dark .voice-panel button:hover:not(:disabled) {
+  background: var(--color-paper-3);
+  border-color: var(--color-rule-strong);
+}
+
+.theme-dark .voice-panel fieldset {
+  border-color: var(--color-rule);
+  background: var(--color-paper-2);
+}
+
+.theme-dark .voice-clip {
+  background: #111e30;
+  border-color: #1e3a5f;
+  color: #7dd3fc;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.theme-dark .voice-clip path {
+  stroke: #38bdf8;
+}
+
+.theme-dark .voice-clip.is-stale,
+.theme-dark .voice-clip.is-overflow {
+  background: #2e1d08;
+  border-color: #78350f;
+  color: #fde047;
+}
+
+.theme-dark .voice-clip.is-failed {
+  background: #381212;
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+
+.theme-dark .voice-clip.is-selected {
+  outline-color: #38bdf8;
+  border-color: #38bdf8;
 }

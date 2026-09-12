@@ -2,7 +2,7 @@ import asyncio
 
 import httpx
 
-from app.services import connectors
+from app.services import connector_support as connectors
 from app.services.connectors import get_with_retries
 
 

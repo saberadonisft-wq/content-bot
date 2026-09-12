@@ -22,9 +22,9 @@ from ..crawlers.runtime import (
     CrawlerFailure,
     RunBudgets,
 )
-from ..mongo import PersistenceStore
 from ..services.cbce_runtime import cbce_provider_rollout_status
-from ..services.connectors import SourceConnector
+from ..services.connector_contracts import SourceConnector
+from ..storage_protocol import PersistenceStore
 
 
 class CommentScanRequest(BaseModel):

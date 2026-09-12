@@ -69,3 +69,80 @@ export function syncVoiceCues(doc: VoiceDocument, cues: readonly SubtitleCueV2[]
   });
   return changed ? { ...doc, clips } : doc;
 }
+
+export function calculateFitRate(clip: VoiceClip): number {
+  const windowMs = clip.end_ms - clip.start_ms;
+  if (!clip.duration_ms || windowMs <= 0) return clip.rate;
+  const needed = clip.duration_ms / windowMs;
+  const rate = Math.ceil(needed * 100) / 100;
+  return Math.max(0.5, Math.min(2.0, rate));
+}
+
+export function autoFitVoiceClips(clips: readonly VoiceClip[]): VoiceClip[] {
+  return clips.map(clip => {
+    if (!clip.duration_ms) return clip;
+    const windowMs = clip.end_ms - clip.start_ms;
+    if (windowMs <= 0) return clip;
+    if (clip.status === 'overflow' || (clip.duration_ms / clip.rate > windowMs + 2)) {
+      const fitRate = calculateFitRate(clip);
+      const isFit = (clip.duration_ms / fitRate) <= windowMs + 2;
+      return {
+        ...clip,
+        rate: fitRate,
+        offset_ms: 0,
+        status: isFit && clip.status === 'overflow' ? 'ready' : clip.status,
+      };
+    }
+    return clip;
+  });
+}
+
+export function rippleShiftVoiceClips(clips: readonly VoiceClip[], gapMs = 60): VoiceClip[] {
+  const sorted = [...clips].sort((a, b) => a.start_ms - b.start_ms);
+  let prevEndMs = 0;
+  return sorted.map((clip, index) => {
+    const speechDuration = clip.duration_ms ? clip.duration_ms / clip.rate : (clip.end_ms - clip.start_ms);
+    let offset_ms = clip.offset_ms;
+    if (index > 0) {
+      const naturalStart = clip.start_ms + offset_ms;
+      if (naturalStart < prevEndMs + gapMs) {
+        offset_ms = Math.max(-clip.start_ms, Math.round(prevEndMs + gapMs - clip.start_ms));
+      }
+    }
+    const currentEnd = clip.start_ms + offset_ms + speechDuration;
+    prevEndMs = currentEnd;
+    return { ...clip, offset_ms };
+  });
+}
+
+export function smartResolveVoiceOverlaps(clips: readonly VoiceClip[], gapMs = 60): VoiceClip[] {
+  // First auto-fit any overflowing clips to their cue windows
+  const fitted = autoFitVoiceClips(clips);
+  // Then ensure chronological spacing without collisions
+  return rippleShiftVoiceClips(fitted, gapMs);
+}
+
+export function resetVoiceOffsets(clips: readonly VoiceClip[]): VoiceClip[] {
+  return clips.map(clip => ({ ...clip, offset_ms: 0 }));
+}
+
+export function countVoiceOverlaps(clips: readonly VoiceClip[]): { overflowCount: number; overlapCount: number } {
+  let overflowCount = 0;
+  let overlapCount = 0;
+  const sorted = [...clips].sort((a, b) => voiceClipStart(a) - voiceClipStart(b));
+  for (let i = 0; i < sorted.length; i++) {
+    const clip = sorted[i];
+    if (clip.status === 'overflow' || (clip.duration_ms > 0 && (clip.duration_ms / clip.rate > (clip.end_ms - clip.start_ms) + 2))) {
+      overflowCount++;
+    }
+    if (i > 0) {
+      const prev = sorted[i - 1];
+      const prevEnd = voiceClipEnd(prev);
+      const currStart = voiceClipStart(clip);
+      if (currStart < prevEnd - 2) {
+        overlapCount++;
+      }
+    }
+  }
+  return { overflowCount, overlapCount };
+}

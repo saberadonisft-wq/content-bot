@@ -12,7 +12,7 @@ from ..crawlers.runtime import (
     ShadowReport,
     compare_shadow,
 )
-from .connectors import SearchQuery, SourceConnector
+from .connector_contracts import SearchQuery, SourceConnector
 
 
 class ShadowProviderTimeout(TimeoutError):

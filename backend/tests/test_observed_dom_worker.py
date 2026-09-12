@@ -5,6 +5,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from app.config import settings
 from app.crawlers.observed_dom_contract import DOM_CONTRACT_SCHEMA
 from app.crawlers.runtime import (
@@ -23,6 +25,8 @@ from app.crawlers.worker import (
 )
 from app.services.cbce_connectors import CbceObservedDomConnector
 from app.services.connectors import SearchQuery, default_connectors
+
+pytestmark = pytest.mark.usefixtures("available_browser_dependency")
 
 
 def _contract(root: Path, source_id: str = "xhs") -> Path:

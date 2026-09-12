@@ -73,10 +73,10 @@ class FakeRedditComments:
 
 
 def test_manual_reddit_comment_scan_persists_and_lists(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     item = seed_reddit_item(mongo_store)
-    monkeypatch.setitem(main.connectors, "reddit", FakeRedditComments())
+    monkeypatch.setitem(application_services.connectors, "reddit", FakeRedditComments())
 
     with TestClient(main.app) as client:
         response = client.post(
@@ -132,9 +132,7 @@ def test_comment_scan_rejects_source_without_runnable_provider(
         }
     )
     with TestClient(main.app) as client:
-        response = client.post(
-            f"/api/v1/items/{item['id']}/comments/scan", json={}
-        )
+        response = client.post(f"/api/v1/items/{item['id']}/comments/scan", json={})
     assert response.status_code == 409
     assert mongo_store.db.comments.count_documents({}) == 0
 
@@ -168,7 +166,7 @@ class FakeYouTubeComments:
 
 
 def test_manual_youtube_comment_scan_uses_shared_persistence(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     now = datetime.now(UTC)
     item = mongo_store.save_item(
@@ -183,7 +181,9 @@ def test_manual_youtube_comment_scan_uses_shared_persistence(
             "last_seen_at": now,
         }
     )
-    monkeypatch.setitem(main.connectors, "youtube", FakeYouTubeComments())
+    monkeypatch.setitem(
+        application_services.connectors, "youtube", FakeYouTubeComments()
+    )
     with TestClient(main.app) as client:
         response = client.post(
             f"/api/v1/items/{item['id']}/comments/scan",
@@ -238,7 +238,7 @@ class FakeXComments:
 
 
 def test_manual_x_comment_scan_accepts_content_root_anchor(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     now = datetime.now(UTC)
     item = mongo_store.save_item(
@@ -253,7 +253,7 @@ def test_manual_x_comment_scan_accepts_content_root_anchor(
             "last_seen_at": now,
         }
     )
-    monkeypatch.setitem(main.connectors, "x", FakeXComments())
+    monkeypatch.setitem(application_services.connectors, "x", FakeXComments())
     monkeypatch.setattr("app.services.connectors.settings.x_bearer_token", "token")
     with TestClient(main.app) as client:
         response = client.post(
@@ -276,12 +276,8 @@ class FakeBlueskyComments:
         assert budgets.max_requests == 3
         assert budgets.max_depth == 5
         assert sort == "provider"
-        content_id = stable_post_id(
-            "at://did:plc:content/app.bsky.feed.post/post1"
-        )
-        root_id = stable_post_id(
-            "at://did:plc:author/app.bsky.feed.post/root1"
-        )
+        content_id = stable_post_id("at://did:plc:content/app.bsky.feed.post/post1")
+        root_id = stable_post_id("at://did:plc:author/app.bsky.feed.post/root1")
         assert content_id is not None and root_id is not None
         return SimpleNamespace(
             content_external_id=content_id,
@@ -305,12 +301,10 @@ class FakeBlueskyComments:
 
 
 def test_manual_bluesky_comment_scan_uses_provider_order_and_persists(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     now = datetime.now(UTC)
-    content_id = stable_post_id(
-        "at://did:plc:content/app.bsky.feed.post/post1"
-    )
+    content_id = stable_post_id("at://did:plc:content/app.bsky.feed.post/post1")
     assert content_id is not None
     item = mongo_store.save_item(
         {
@@ -324,7 +318,9 @@ def test_manual_bluesky_comment_scan_uses_provider_order_and_persists(
             "last_seen_at": now,
         }
     )
-    monkeypatch.setitem(main.connectors, "bluesky", FakeBlueskyComments())
+    monkeypatch.setitem(
+        application_services.connectors, "bluesky", FakeBlueskyComments()
+    )
     with TestClient(main.app) as client:
         response = client.post(
             f"/api/v1/items/{item['id']}/comments/scan",
@@ -345,15 +341,11 @@ def test_manual_bluesky_comment_scan_uses_provider_order_and_persists(
 
 
 def test_bluesky_comment_scan_rejects_recycled_handle_identity(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     now = datetime.now(UTC)
-    stored_id = stable_post_id(
-        "at://did:plc:original/app.bsky.feed.post/post1"
-    )
-    resolved_id = stable_post_id(
-        "at://did:plc:recycled/app.bsky.feed.post/post1"
-    )
+    stored_id = stable_post_id("at://did:plc:original/app.bsky.feed.post/post1")
+    resolved_id = stable_post_id("at://did:plc:recycled/app.bsky.feed.post/post1")
     assert stored_id is not None and resolved_id is not None
     item = mongo_store.save_item(
         {
@@ -381,11 +373,9 @@ def test_bluesky_comment_scan_rejects_recycled_handle_identity(
                 provider_id="bluesky_public",
             )
 
-    monkeypatch.setitem(main.connectors, "bluesky", RecycledHandle())
+    monkeypatch.setitem(application_services.connectors, "bluesky", RecycledHandle())
     with TestClient(main.app) as client:
-        response = client.post(
-            f"/api/v1/items/{item['id']}/comments/scan", json={}
-        )
+        response = client.post(f"/api/v1/items/{item['id']}/comments/scan", json={})
     assert response.status_code == 502
     assert mongo_store.db.comments.count_documents({}) == 0
 
@@ -427,7 +417,7 @@ class FakeMastodonComments:
 
 
 def test_manual_mastodon_context_scan_uses_shared_persistence(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     now = datetime.now(UTC)
     content_id = mastodon_external_id(
@@ -445,7 +435,9 @@ def test_manual_mastodon_context_scan_uses_shared_persistence(
             "last_seen_at": now,
         }
     )
-    monkeypatch.setitem(main.connectors, "mastodon", FakeMastodonComments())
+    monkeypatch.setitem(
+        application_services.connectors, "mastodon", FakeMastodonComments()
+    )
     with TestClient(main.app) as client:
         response = client.post(
             f"/api/v1/items/{item['id']}/comments/scan",
@@ -497,7 +489,7 @@ class FakeTiebaComments:
 
 
 def test_manual_tieba_root_comments_require_rollout_and_persist(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     now = datetime.now(UTC)
     item = mongo_store.save_item(
@@ -512,7 +504,7 @@ def test_manual_tieba_root_comments_require_rollout_and_persist(
             "last_seen_at": now,
         }
     )
-    monkeypatch.setitem(main.connectors, "tieba", FakeTiebaComments())
+    monkeypatch.setitem(application_services.connectors, "tieba", FakeTiebaComments())
     monkeypatch.setattr(
         "app.api.comments.cbce_provider_rollout_status",
         lambda source, provider, operation: {
@@ -564,9 +556,7 @@ def test_tieba_comment_api_fails_closed_when_cbce_rollout_is_disabled(
         },
     )
     with TestClient(main.app) as client:
-        response = client.post(
-            f"/api/v1/items/{item['id']}/comments/scan", json={}
-        )
+        response = client.post(f"/api/v1/items/{item['id']}/comments/scan", json={})
     assert response.status_code == 503
     assert response.json()["detail"] == "Enable clean-room runtime."
     assert mongo_store.db.comments.count_documents({}) == 0
@@ -603,9 +593,7 @@ class FakeBilibiliComments:
             pagination_truncated=False,
         )
 
-    async def scan_child_comments(
-        self, target, root_comment_id, budgets, *, sort
-    ):
+    async def scan_child_comments(self, target, root_comment_id, budgets, *, sort):
         assert target == "https://www.bilibili.com/video/BV1ab411c7De"
         assert root_comment_id == "9001"
         assert budgets.max_items == 2
@@ -642,7 +630,7 @@ class FakeBilibiliComments:
 
 
 def test_manual_bilibili_root_comments_require_rollout_and_persist(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     now = datetime.now(UTC)
     item = mongo_store.save_item(
@@ -657,7 +645,9 @@ def test_manual_bilibili_root_comments_require_rollout_and_persist(
             "last_seen_at": now,
         }
     )
-    monkeypatch.setitem(main.connectors, "bilibili", FakeBilibiliComments())
+    monkeypatch.setitem(
+        application_services.connectors, "bilibili", FakeBilibiliComments()
+    )
     monkeypatch.setattr(
         "app.api.comments.cbce_provider_rollout_status",
         lambda source, provider, operation: {
@@ -705,9 +695,7 @@ def test_bilibili_child_expansion_reserves_total_budget_for_all_roots() -> None:
     )
 
     class ChildScanner:
-        async def scan_child_comments(
-            self, target, root_comment_id, budgets, *, sort
-        ):
+        async def scan_child_comments(self, target, root_comment_id, budgets, *, sort):
             del target, sort
             return SimpleNamespace(
                 records=tuple(
@@ -753,19 +741,17 @@ def test_bilibili_child_expansion_reserves_total_budget_for_all_roots() -> None:
 
 
 def test_comment_api_rejects_provider_identity_mismatch(
-    mongo_store, monkeypatch
+    application_services, mongo_store, monkeypatch
 ) -> None:
     item = seed_reddit_item(mongo_store)
 
     class WrongProvider(FakeRedditComments):
         async def scan_comments(self, target, budgets, *, sort):
-            result = await super().scan_comments(
-                target, budgets, sort=sort
-            )
+            result = await super().scan_comments(target, budgets, sort=sort)
             result.provider_id = "unexpected_provider"
             return result
 
-    monkeypatch.setitem(main.connectors, "reddit", WrongProvider())
+    monkeypatch.setitem(application_services.connectors, "reddit", WrongProvider())
     with TestClient(main.app) as client:
         response = client.post(
             f"/api/v1/items/{item['id']}/comments/scan",

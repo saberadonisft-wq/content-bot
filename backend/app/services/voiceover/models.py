@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 MODEL_ID = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
 MODEL_REVISION = "8b7e9cffb4b41918cb638b9f62f0a751184d14a6"
 SDK_VERSION = "3.6.4"
+V2_MODEL_ID = "pnnbao-ump/VieNeu-TTS-v2-Turbo"
+V2_MODEL_REVISION = "afe400abff18c00b52b246bb4d21f02a86855eb7"
 
 
 class Model(BaseModel):
@@ -19,11 +21,15 @@ class VoiceProfile(Model):
     revision: int = Field(default=1, ge=1)
     preset: str | None = Field(default=None, max_length=100)
     reference_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    model_id: Literal["pnnbao-ump/VieNeu-TTS-v3-Turbo"] = MODEL_ID
-    model_revision: Literal["8b7e9cffb4b41918cb638b9f62f0a751184d14a6"] = MODEL_REVISION
+    model_id: Literal["pnnbao-ump/VieNeu-TTS-v3-Turbo", "pnnbao-ump/VieNeu-TTS-v2-Turbo"] = MODEL_ID
+    model_revision: str = MODEL_REVISION
+    denoise: bool = True
 
     @model_validator(mode="after")
     def source(self):
+        expected = V2_MODEL_REVISION if self.model_id == V2_MODEL_ID else MODEL_REVISION
+        if self.model_revision != expected:
+            raise ValueError("Phiên bản không khớp với engine giọng đọc.")
         if bool(self.preset) == bool(self.reference_id):
             raise ValueError("Chọn giọng có sẵn hoặc mẫu giọng.")
         return self

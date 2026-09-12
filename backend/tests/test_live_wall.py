@@ -138,15 +138,18 @@ def test_live_wall_session_api_rejects_urls_and_non_watchlist_ids() -> None:
 
 
 def test_open_browser_uses_saved_urls_without_a_managed_profile(
+    application_services,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     executable = tmp_path / "browser.exe"
     executable.touch()
     opened: list[tuple[Path, tuple[str, ...]]] = []
-    monkeypatch.setattr(main.live_wall_manager, "browser_executable", executable)
     monkeypatch.setattr(
-        main.live_wall_manager,
+        application_services.live_wall_manager, "browser_executable", executable
+    )
+    monkeypatch.setattr(
+        application_services.live_wall_manager,
         "browser_opener",
         lambda path, urls: opened.append((path, urls)),
     )
@@ -179,8 +182,8 @@ def test_open_browser_uses_saved_urls_without_a_managed_profile(
             ),
         )
     ]
-    assert main.live_wall_manager._session is None
-    assert main.live_wall_manager._owner_key is None
+    assert application_services.live_wall_manager._session is None
+    assert application_services.live_wall_manager._owner_key is None
 
 
 @pytest.mark.parametrize(
@@ -197,8 +200,14 @@ def test_live_wall_geometry_stays_inside_display(
     assert len({entry["top"] for entry in bounds}) == rows
     assert all(entry["left"] >= display.left for entry in bounds)
     assert all(entry["top"] >= display.top for entry in bounds)
-    assert all(entry["left"] + entry["width"] <= display.left + display.width for entry in bounds)
-    assert all(entry["top"] + entry["height"] <= display.top + display.height for entry in bounds)
+    assert all(
+        entry["left"] + entry["width"] <= display.left + display.width
+        for entry in bounds
+    )
+    assert all(
+        entry["top"] + entry["height"] <= display.top + display.height
+        for entry in bounds
+    )
 
 
 class FakeCdp:
@@ -280,7 +289,9 @@ def _channels(count: int, *, offset: int = 0) -> list[LiveWallChannel]:
     ]
 
 
-def test_live_wall_manager_reflows_tracks_closure_and_is_singleton(tmp_path: Path) -> None:
+def test_live_wall_manager_reflows_tracks_closure_and_is_singleton(
+    tmp_path: Path,
+) -> None:
     executable = tmp_path / "browser.exe"
     executable.touch()
     runtimes: list[FakeRuntime] = []
@@ -324,7 +335,9 @@ def test_live_wall_manager_reflows_tracks_closure_and_is_singleton(tmp_path: Pat
         assert status["windows"][0]["state"] == "closed"
         assert status["windows"][0]["reason_code"] == "WINDOW_CLOSED_BY_USER"
 
-        updated = await manager.open_or_update("user-a", 2, _channels(2, offset=10), display)
+        updated = await manager.open_or_update(
+            "user-a", 2, _channels(2, offset=10), display
+        )
         assert [window["channel_id"] for window in updated["windows"]] == [
             "channel-10",
             "channel-11",

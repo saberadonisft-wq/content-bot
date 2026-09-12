@@ -27,6 +27,8 @@ __pycache__/
 artifacts/
 runtimes/voiceover/models/
 runtimes/voiceover/runtime-status.json
+runtimes/voiceover/runtime-status-v2turbo.json
+runtimes/voiceover/probe-v2turbo.wav
 runtimes/voiceover/probe.wav
 temp_repo/
 test.jpg

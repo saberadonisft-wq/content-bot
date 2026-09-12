@@ -1,7 +1,10 @@
 import asyncio
 
+import httpx
+
 from app.config import settings
-from app.services import channel_scans, connectors
+from app.services import channel_scans
+from app.services import connector_bluesky as connectors
 from app.services.connectors import BlueskyConnector, SearchQuery, stable_external_id
 
 
@@ -67,7 +70,8 @@ class FakeBlueskyClient:
 
 def test_bluesky_search_is_capped_and_omits_profile_payload(monkeypatch) -> None:
     client = FakeBlueskyClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -115,7 +119,8 @@ class AliasBlueskyClient(FakeBlueskyClient):
 
 def test_bluesky_search_discovers_alias_only_posts(monkeypatch) -> None:
     client = AliasBlueskyClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -227,7 +232,8 @@ def test_bluesky_keyword_checks_frontier_before_backlog(monkeypatch) -> None:
     )
     tracker = FakeTracker(recent_ids=known, cursor="backlog")
     client = PagedBlueskyClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -288,7 +294,8 @@ def test_bluesky_uses_independent_cursor_for_every_search_term(monkeypatch) -> N
         recent_ids=known,
     )
     client = MultiTermBlueskyClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -400,7 +407,8 @@ def test_bluesky_channel_filtered_repost_page_continues_to_next_cursor(
 ) -> None:
     client = PagedBlueskyClient(channel=True, filtered_first=True)
     tracker = FakeTracker()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -434,7 +442,8 @@ def test_bluesky_request_budget_is_checkpointed_with_warning(monkeypatch) -> Non
     warnings = []
     client = PagedBlueskyClient()
     monkeypatch.setattr(settings, "bluesky_request_budget", 1)
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def warning(code, detail):
         warnings.append((code, detail))
@@ -493,7 +502,8 @@ class BulkAuthorFeedClient:
 def test_bluesky_saved_channel_paginates_past_100_with_exact_cap(monkeypatch) -> None:
     client = BulkAuthorFeedClient()
     tracker = FakeTracker()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -524,7 +534,8 @@ def test_bluesky_repeated_channel_cursor_stops_without_loop(monkeypatch) -> None
         for index in range(1, 101)
     )
     tracker.recent_ids = known
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [

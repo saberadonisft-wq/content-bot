@@ -8,8 +8,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'backend'))
-from app.services.voiceover.mix import export_voice_audio, ffmpeg, finalize_voiced_render
 from app.services.media_probe import probe_media
+from app.services.voiceover.mix import (
+    export_voice_audio,
+    ffmpeg,
+    finalize_voiced_render,
+)
 from app.services.voiceover.store import VoiceStore, write_json
 
 

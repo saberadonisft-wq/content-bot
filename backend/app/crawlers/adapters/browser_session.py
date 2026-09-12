@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,7 @@ from ..runtime import (
 )
 
 BrowserEventHandler = Callable[[], Awaitable[None] | None]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +113,7 @@ async def _filter_browser_route(route: Any) -> None:
         try:
             await route.continue_()
         except Exception:
-            pass
+            logger.debug("Browser route was already closed during fallback")
 
 
 class OwnedBrowserPage:
@@ -125,7 +127,7 @@ class OwnedBrowserPage:
             try:
                 await page.route("**/*", _filter_browser_route)
             except Exception:
-                pass
+                logger.debug("Browser page does not support resource filtering")
 
     async def open(self, context: RunContext, cancellation: CancellationToken) -> None:
         if context.source_id != self.policy.source_id:

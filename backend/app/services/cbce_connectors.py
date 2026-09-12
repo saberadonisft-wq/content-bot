@@ -37,7 +37,7 @@ from ..crawlers.runtime import (
     safe_worker_environment,
 )
 from .cbce_runtime import cbce_browser_preflight
-from .connectors import (
+from .connector_contracts import (
     ConnectorCapabilities,
     ConnectorStatus,
     RawContentItem,

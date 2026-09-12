@@ -6,11 +6,19 @@ import subprocess
 import time
 import uuid
 import wave
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 
+from ..subtitle_jobs import SubtitleJobQueueFull
 from .audio import audio_metadata
-from .models import SDK_VERSION, MODEL_REVISION, VoiceDocument
+from .models import (
+    MODEL_ID,
+    MODEL_REVISION,
+    SDK_VERSION,
+    V2_MODEL_ID,
+    V2_MODEL_REVISION,
+    VoiceDocument,
+)
 from .store import VoiceStore, generation_hash, normalized_text, read_json, write_json
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -39,13 +47,17 @@ class WorkerDeadline:
 
 
 class VoiceManager:
-    def __init__(self, store: VoiceStore):
+    def __init__(self, store: VoiceStore, *, max_pending: int = 8):
         self.store = store
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="voiceover"
         )
         self.controls: dict[str, str] = {}
         self.live: set[str] = set()
+        self._accepting = True
+        self._max_pending = max(1, max_pending)
+        self._futures = {}
+        self._processes = {}
         for path in store.root.glob("*/jobs/*.json"):
             if path.name.endswith(".manifest.json"):
                 continue
@@ -73,31 +85,45 @@ class VoiceManager:
             / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         )
 
-    def status(self) -> dict:
-        status_path = RUNTIME / "runtime-status.json"
+    def status(self, model_id: str = MODEL_ID) -> dict:
+        is_v2 = model_id == V2_MODEL_ID
+        expected_revision = V2_MODEL_REVISION if is_v2 else MODEL_REVISION
+        setup_command = "scripts/setup-voiceover.ps1" + (" -Device cuda -Engine v2turbo" if is_v2 else "")
+        status_path = RUNTIME / ("runtime-status-v2turbo.json" if is_v2 else "runtime-status.json")
         try:
             status = read_json(status_path) if status_path.exists() else {}
             if not isinstance(status, dict):
-                raise ValueError("Invalid runtime status")
-        except (ValueError, OSError):
+                raise TypeError("Invalid runtime status")
+        except (ValueError, TypeError, OSError):
             status = {"message": "Không đọc được trạng thái bộ tạo giọng. Chạy lại scripts/setup-voiceover.ps1."}
         available = {device for device in ("cpu", "cuda") if self.python(device).is_file()}
         installed = bool(available)
-        compatible = status.get("sdk_version") == SDK_VERSION and status.get("model_revision") == MODEL_REVISION
+        compatible = status.get("sdk_version") == SDK_VERSION and status.get("model_revision") == expected_revision
         prepared = status.get("devices", [])
         devices = [device for device in ("cpu", "cuda") if device in available and device in prepared] if isinstance(prepared, list) and compatible and status.get("ready") else []
+        if is_v2:
+            devices = [device for device in devices if device == "cuda"]
         return {
             "installed": installed,
             "ready": bool(devices),
             "sdk_version": SDK_VERSION,
-            "presets": status.get("presets", []),
+            "presets": status.get("presets", []) if compatible else [],
             "devices": devices,
-            "message": ("Phiên bản model/runtime đã thay đổi. Chạy lại scripts/setup-voiceover.ps1."
+            "message": (f"Phiên bản model/runtime đã thay đổi. Chạy lại {setup_command}."
                         if status.get("ready") and not compatible else status.get(
-                "message", "Chạy scripts/setup-voiceover.ps1 để chuẩn bị model."
-            )) if installed else "Chưa tìm thấy môi trường tạo giọng. Chạy scripts/setup-voiceover.ps1.",
+                "message", f"Chạy {setup_command} để chuẩn bị model."
+            )) if installed else f"Chưa tìm thấy môi trường tạo giọng. Chạy {setup_command}.",
             "model_revision": status.get("model_revision"),
+            "model_id": model_id,
+            "setup_command": setup_command,
         }
+
+    def engine_statuses(self) -> list[dict]:
+        return [{**self.status(model_id), "model_revision": revision, "name": name}
+                for model_id, revision, name in [
+                    (MODEL_ID, MODEL_REVISION, "VieNeu v3 Turbo"),
+                    (V2_MODEL_ID, V2_MODEL_REVISION, "VieNeu v2 Turbo · so sánh"),
+                ]]
 
     def manifest(
         self,
@@ -136,14 +162,17 @@ class VoiceManager:
             return read_json(self.store.path(owner, "jobs", job_id))
 
     def start(self, owner: str, project: str, device: str, clip_ids=None):
-        runtime_status = self.status()
+        document = self.store.get_document(owner, project)
+        runtime_status = self.status(document.profile.model_id) if document.profile.model_id != MODEL_ID else self.status()
         if not runtime_status["ready"]:
             raise ValueError(
-                "Model chưa sẵn sàng. Chạy scripts/setup-voiceover.ps1 trước."
+                f"Model chưa sẵn sàng. Chạy {runtime_status.get('setup_command', 'scripts/setup-voiceover.ps1')} trước."
             )
         if device not in runtime_status["devices"]:
             raise ValueError(f"Thiết bị {device} chưa sẵn sàng. Chạy scripts/setup-voiceover.ps1 cho thiết bị này.")
         with self.store.lock:
+            if not self._accepting:
+                raise SubtitleJobQueueFull("Voice manager is stopping")
             for jid in self.live:
                 try:
                     existing = self.get(owner, jid)
@@ -151,7 +180,11 @@ class VoiceManager:
                         return existing
                 except FileNotFoundError:
                     pass
+            if len(self.live) >= self._max_pending:
+                raise SubtitleJobQueueFull("Voice job queue is full")
             document = self.store.get_document(owner, project)
+            if document.profile.model_id != runtime_status.get("model_id", MODEL_ID):
+                raise ValueError("Engine vừa thay đổi. Thử tạo giọng lại.")
             manifest = self.manifest(owner, document, device, clip_ids)
             jid = uuid.uuid4().hex[:20]
             job = {
@@ -172,8 +205,20 @@ class VoiceManager:
             }
             write_json(self.store.path(owner, "jobs", jid), job)
             self.live.add(jid)
-            self.executor.submit(self._run, owner, job, manifest)
+            future = self.executor.submit(self._run, owner, job, manifest)
+            self._futures[jid] = future
+            future.add_done_callback(lambda result: self._retire(owner, job, result))
             return job.copy()
+
+    def _retire(self, owner, job, future):
+        with self.store.lock:
+            jid = job["id"]
+            if future.cancelled():
+                job.update(state="canceled", message="Đã hủy trước khi tạo giọng")
+                write_json(self.store.path(owner, "jobs", jid), job)
+            self._futures.pop(jid, None)
+            self.live.discard(jid)
+            self.controls.pop(jid, None)
 
     def control(self, owner: str, jid: str, action: str):
         with self.store.lock:
@@ -264,6 +309,10 @@ class VoiceManager:
                         if os.name == "nt"
                         else 0,
                     )
+                    with self.store.lock:
+                        self._processes[jid] = process
+                        if not self._accepting and process.poll() is None:
+                            process.kill()
                     last_change = time.monotonic()
                     deadline = WorkerDeadline(last_change)
                     previous = None
@@ -380,10 +429,34 @@ class VoiceManager:
                 process.wait(timeout=10)
             persist()
             with self.store.lock:
+                self._processes.pop(jid, None)
                 self.live.discard(jid)
                 self.controls.pop(jid, None)
 
-    def shutdown(self):
-        for jid in list(self.live):
-            self.controls[jid] = "cancel"
-        self.executor.shutdown(wait=True, cancel_futures=False)
+    def stop_accepting(self):
+        with self.store.lock:
+            self._accepting = False
+
+    def shutdown(self, *, timeout_seconds: float = 10):
+        with self.store.lock:
+            self._accepting = False
+            for jid in list(self.live):
+                self.controls[jid] = "cancel"
+            futures = list(self._futures.values())
+            for future in futures:
+                future.cancel()
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        unfinished = [future for future in futures if not future.done()]
+        if unfinished:
+            _, pending = wait(unfinished, timeout=max(0, timeout_seconds))
+            if pending:
+                with self.store.lock:
+                    processes = list(self._processes.values())
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                for process in processes:
+                    process.wait(timeout=5)
+                _, pending = wait(pending, timeout=5)
+                if pending:
+                    raise TimeoutError(f"{len(pending)} voice job(s) exceeded the shutdown deadline")

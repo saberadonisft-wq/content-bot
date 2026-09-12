@@ -127,6 +127,18 @@ def test_cbce_browser_preflight_is_safe_and_does_not_expose_local_path(
     assert str(tmp_path) not in str(status)
 
 
+def test_cbce_browser_preflight_requires_the_optional_dependency(monkeypatch, tmp_path):
+    from app.services import cbce_runtime
+
+    executable = tmp_path / "browser.exe"
+    executable.touch()
+    monkeypatch.setattr(settings, "content_bot_cbce_browser_executable_path", executable)
+    monkeypatch.setattr(settings, "content_bot_cbce_profile_root", tmp_path / "profiles")
+    monkeypatch.setattr(settings, "mediacrawler_profile_dir", tmp_path / "legacy")
+    monkeypatch.setattr(cbce_runtime, "find_spec", lambda _name: None)
+    assert cbce_browser_preflight()["ready"] is False
+
+
 def test_cbce_browser_preflight_rejects_legacy_profile_overlap(
     monkeypatch, tmp_path
 ) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from app import main
+from app.api import subtitles as subtitles_api
 from app.schemas import (
     SubtitleAssPreviewRequestV2,
     SubtitleJobResponse,
@@ -24,8 +24,8 @@ def test_preview_ass_uses_percentage_anchor_and_output_aspect(
         "duration_ms": 5000,
         "has_audio": False,
     }
-    monkeypatch.setattr(main, "_uploaded_video_path", lambda _video_id: source)
-    monkeypatch.setattr(main, "probe_media_cached", lambda *_args, **_kwargs: media)
+    monkeypatch.setattr(subtitles_api, "_uploaded_video_path", lambda _video_id: source)
+    monkeypatch.setattr(subtitles_api, "probe_media_cached", lambda *_args, **_kwargs: media)
     request = SubtitleAssPreviewRequestV2(
         video_id="a" * 12,
         document={
@@ -50,7 +50,7 @@ def test_preview_ass_uses_percentage_anchor_and_output_aspect(
         options={"font_size": 14, "pos_x": 25, "pos_y": 75},
     )
 
-    response = main.preview_subtitle_timeline_v2_endpoint(request)
+    response = subtitles_api.preview_subtitle_timeline_v2_endpoint(request)
 
     assert response.play_res_x == 1280
     assert response.play_res_y == 720
@@ -84,6 +84,7 @@ def test_render_request_allows_overlay_without_subtitle_cues() -> None:
 
 
 def test_render_endpoint_submits_progress_and_attachable_result(
+    application_services,
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -98,11 +99,11 @@ def test_render_endpoint_submits_progress_and_attachable_result(
         "duration_ms": 5000,
         "has_audio": False,
     }
-    monkeypatch.setattr(main, "subtitle_jobs", manager)
-    monkeypatch.setattr(main, "_uploaded_video_path", lambda _video_id: source)
-    monkeypatch.setattr(main, "probe_media_cached", lambda *_args, **_kwargs: media)
+    monkeypatch.setattr(application_services, "subtitle_jobs", manager)
+    monkeypatch.setattr(subtitles_api, "_uploaded_video_path", lambda _video_id: source)
+    monkeypatch.setattr(subtitles_api, "probe_media_cached", lambda *_args, **_kwargs: media)
     monkeypatch.setattr(
-        main,
+        subtitles_api,
         "resolve_subtitle_overlay",
         lambda _data_dir, _overlay_id: overlay_path,
     )
@@ -119,7 +120,7 @@ def test_render_endpoint_submits_progress_and_attachable_result(
             "duration_ms": 5000,
         }
 
-    monkeypatch.setattr(main, "render_precision_video", fake_render)
+    monkeypatch.setattr(subtitles_api, "render_precision_video", fake_render)
     request = SubtitleRenderRequestV2(
         video_id="a" * 12,
         document={
@@ -148,24 +149,28 @@ def test_render_endpoint_submits_progress_and_attachable_result(
             "y": 12,
             "width": 22,
         },
-        masks=[{
-            "id": "mask-1",
-            "shape": "rounded",
-            "effect": "blur",
-            "x": 20,
-            "y": 70,
-            "width": 60,
-            "height": 12,
-            "strength": 14,
-            "opacity": 0.85,
-            "feather": 2,
-            "cornerRadius": 18,
-            "color": "#000000",
-        }],
+        masks=[
+            {
+                "id": "mask-1",
+                "shape": "rounded",
+                "effect": "blur",
+                "x": 20,
+                "y": 70,
+                "width": 60,
+                "height": 12,
+                "strength": 14,
+                "opacity": 0.85,
+                "feather": 2,
+                "cornerRadius": 18,
+                "color": "#000000",
+            }
+        ],
     )
 
     submitted = SubtitleJobResponse(
-        **main.render_subtitle_timeline_v2_endpoint(request)
+        **subtitles_api.render_subtitle_timeline_v2_endpoint(
+            request, services=application_services
+        )
     )
     assert submitted.kind == "render"
 
@@ -178,7 +183,9 @@ def test_render_endpoint_submits_progress_and_attachable_result(
         time.sleep(0.01)
 
     assert completed is not None
-    attached = SubtitleJobResponse(**main.get_subtitle_job(submitted.id))
+    attached = SubtitleJobResponse(
+        **subtitles_api.get_subtitle_job(submitted.id, services=application_services)
+    )
     assert attached.state == "succeeded"
     assert attached.result is not None
     assert attached.result["duration_ms"] == 5000
@@ -189,19 +196,21 @@ def test_render_endpoint_submits_progress_and_attachable_result(
         "y": 12.0,
         "width": 22.0,
     }
-    assert received["masks"] == [{
-        "id": "mask-1",
-        "shape": "rounded",
-        "effect": "blur",
-        "x": 20.0,
-        "y": 70.0,
-        "width": 60.0,
-        "height": 12.0,
-        "strength": 14.0,
-        "opacity": 0.85,
-        "feather": 2.0,
-        "corner_radius": 18.0,
-        "color": "#000000",
-    }]
+    assert received["masks"] == [
+        {
+            "id": "mask-1",
+            "shape": "rounded",
+            "effect": "blur",
+            "x": 20.0,
+            "y": 70.0,
+            "width": 60.0,
+            "height": 12.0,
+            "strength": 14.0,
+            "opacity": 0.85,
+            "feather": 2.0,
+            "corner_radius": 18.0,
+            "color": "#000000",
+        }
+    ]
     assert (tmp_path / "jobs" / f"{submitted.id}.json").is_file()
     manager.shutdown()

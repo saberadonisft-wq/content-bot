@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import sys
+import hashlib
+import pytest
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -30,6 +32,39 @@ def test_paused_worker_does_not_load_model(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, 'load_engine', forbidden)
     worker.run(tmp_path)
     assert json.loads((tmp_path / 'progress.json').read_text(encoding='utf-8'))['message'] == 'Đã dừng theo yêu cầu'
+
+
+@pytest.mark.parametrize('setting,expected', [(None, True), (False, False), (True, True)])
+def test_reference_processing_setting_reaches_engine_and_checks_integrity(tmp_path, setting, expected):
+    worker = worker_module()
+    sample = tmp_path / 'reference.wav'
+    sample.write_bytes(b'reference fixture')
+    profile = {'reference_id': hashlib.sha256(sample.read_bytes()).hexdigest()}
+    if setting is not None:
+        profile['denoise'] = setting
+    calls = []
+    engine = SimpleNamespace(add_voice=lambda *args, **kwargs: calls.append((args, kwargs)))
+    assert worker.voice_arguments(engine, profile, tmp_path) == {'voice': 'content-bot-reference'}
+    assert calls[0][1] == {'denoise': expected, 'save': False}
+    sample.write_bytes(b'changed reference')
+    with pytest.raises(ValueError, match='Mẫu giọng'):
+        worker.voice_arguments(engine, profile, tmp_path)
+    assert len(calls) == 1
+
+
+def test_v2_adapter_passes_encoded_voice_instead_of_falling_back_to_preset():
+    import numpy as np
+    worker = worker_module()
+    calls = []
+    def forbidden(*args):
+        raise AssertionError('custom voice fell back to preset')
+    adapter = worker.V2Engine(SimpleNamespace(sample_rate=24000, get_preset_voice=forbidden,
+        infer=lambda text, **kwargs: calls.append(kwargs)), None)
+    codes = np.ones((1, 128), dtype=np.float32)
+    adapter.voices['clone'] = codes
+    adapter.infer('Xin chào', voice='clone')
+    assert calls[0]['voice'] is codes
+    assert calls[0]['temperature'] == 0.4
 
 
 def test_prepare_rejects_silence_and_recovers_corrupt_status(tmp_path, monkeypatch):

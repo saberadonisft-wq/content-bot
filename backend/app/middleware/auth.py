@@ -1,64 +1,83 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any
+from weakref import WeakKeyDictionary
 
 import httpx
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import settings
+from ..services.http_pool import get_client
 
 logger = logging.getLogger("content_bot.auth_middleware")
 
 security = HTTPBearer(auto_error=False)
 
-# Cached public key to avoid network roundtrips on every request
-_CACHED_PUBLIC_KEY: str | None = None
+@dataclass
+class _RemoteKey:
+    key: str | None = None
+    url: str = ""
+    expires_at: float = 0
+    retry_at: float = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-def get_public_key() -> str:
-    """Retrieve RSA public key from settings or fetch from auth server."""
-    global _CACHED_PUBLIC_KEY
+_keys: WeakKeyDictionary = WeakKeyDictionary()
 
-    # 1. Configured static public key
-    if settings.content_bot_auth_public_key:
-        return settings.content_bot_auth_public_key
 
-    # 2. Return cached key
-    if _CACHED_PUBLIC_KEY:
-        return _CACHED_PUBLIC_KEY
-
-    # 3. Fetch from auth server
-    auth_server_url = settings.content_bot_auth_server_url.rstrip("/")
-    if not auth_server_url:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Máy chủ chưa được cấu hình AUTH_SERVER_URL để xác thực JWT.",
-        )
-
-    try:
-        with httpx.Client(timeout=5.0) as client:
-            resp = client.get(f"{auth_server_url}/auth/public-key")
-            if resp.status_code == 200:
-                data = resp.json()
-                key = data.get("public_key")
-                if key:
-                    _CACHED_PUBLIC_KEY = key
-                    return key
-    except Exception as e:
-        logger.error(f"Failed to fetch public key from auth server: {e}")
-
-    raise HTTPException(
+def _unavailable() -> HTTPException:
+    return HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail="Không thể kết nối đến máy chủ xác thực để lấy khóa công khai.",
     )
 
 
-def verify_token(token: str) -> dict[str, Any]:
+async def get_public_key() -> str:
+    """Fetch asynchronously once per loop/server, with bounded cache and failure backoff."""
+    if settings.content_bot_auth_public_key:
+        return settings.content_bot_auth_public_key
+    url = settings.content_bot_auth_server_url.rstrip("/")
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Máy chủ chưa được cấu hình AUTH_SERVER_URL để xác thực JWT.",
+        )
+    loop = asyncio.get_running_loop()
+    if loop not in _keys:
+        _keys[loop] = _RemoteKey()
+    cache = _keys[loop]
+    async with cache.lock:
+        now = monotonic()
+        if cache.url != url:
+            cache.url, cache.key, cache.expires_at, cache.retry_at = url, None, 0, 0
+        if cache.key and now < cache.expires_at:
+            return cache.key
+        if now < cache.retry_at:
+            raise _unavailable()
+        try:
+            client = await get_client(timeout=httpx.Timeout(5.0), follow_redirects=False)
+            response = await client.get(f"{url}/auth/public-key")
+            response.raise_for_status()
+            key = response.json().get("public_key")
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("Auth server returned no public key")
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            cache.retry_at = monotonic() + 1.0
+            logger.warning("Public key fetch failed (%s)", type(exc).__name__)
+            raise _unavailable() from exc
+        cache.key, cache.expires_at = key, monotonic() + 300
+        return key
+
+
+async def verify_token(token: str) -> dict[str, Any]:
     """Verify and decode RS256 JWT access token."""
-    public_key = get_public_key()
+    public_key = await get_public_key()
     try:
         payload = jwt.decode(
             token,
@@ -82,6 +101,7 @@ def verify_token(token: str) -> dict[str, Any]:
 
 
 async def get_current_user(
+    request: Request,
     auth: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict[str, Any]:
     """Dependency returning authenticated user payload or mock user if auth is disabled."""
@@ -101,7 +121,9 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    payload = verify_token(auth.credentials)
+    if isinstance(getattr(request.state, "user", None), dict):
+        return request.state.user
+    payload = await verify_token(auth.credentials)
     return payload
 
 

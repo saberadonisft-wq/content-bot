@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from fastapi import APIRouter, Cookie, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 
@@ -9,11 +11,15 @@ from ..services.tiktok_oauth import TikTokOAuthService, oauth_cookie_matches
 OAUTH_COOKIE = "content_bot_tiktok_oauth_state"
 
 
-def build_tiktok_auth_router(service: TikTokOAuthService) -> APIRouter:
+def build_tiktok_auth_router(
+    service: TikTokOAuthService | Callable[[], TikTokOAuthService],
+) -> APIRouter:
+    service_provider = service if callable(service) else lambda: service
     router = APIRouter(prefix="/api/v1/auth/tiktok", tags=["TikTok OAuth"])
 
     @router.get("/status")
     async def status():
+        service = service_provider()
         return service.status().public()
 
     @router.get("/start")
@@ -21,6 +27,7 @@ def build_tiktok_auth_router(service: TikTokOAuthService) -> APIRouter:
         request: Request,
         username: str = Query(min_length=2, max_length=100),
     ):
+        service = service_provider()
         try:
             request_origin = f"{request.url.scheme}://{request.url.netloc}"
             if request_origin != service.callback_origin():
@@ -50,6 +57,7 @@ def build_tiktok_auth_router(service: TikTokOAuthService) -> APIRouter:
         error: str = Query(default="", max_length=100),
         csrf_cookie: str | None = Cookie(default=None, alias=OAUTH_COOKIE),
     ):
+        service = service_provider()
         if not oauth_cookie_matches(csrf_cookie, state):
             raise HTTPException(400, "TikTok OAuth state validation failed")
         outcome = "connected"
@@ -86,6 +94,7 @@ def build_tiktok_auth_router(service: TikTokOAuthService) -> APIRouter:
 
     @router.post("/refresh")
     async def refresh():
+        service = service_provider()
         try:
             return (await service.refresh()).public()
         except (CrawlerFailure, ValueError) as exc:
@@ -94,6 +103,7 @@ def build_tiktok_auth_router(service: TikTokOAuthService) -> APIRouter:
 
     @router.delete("/connection", status_code=204)
     async def disconnect():
+        service = service_provider()
         try:
             await service.disconnect()
         except (CrawlerFailure, ValueError) as exc:

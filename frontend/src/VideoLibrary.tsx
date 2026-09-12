@@ -1,3 +1,4 @@
+import "./canva.css";
 import { useEffect, useState } from "react";
 import { Download, Film, LoaderCircle, Trash2, Video, Eye, Heart, MessageCircle } from "lucide-react";
 import { API_BASE, api, VideoLibraryItem } from "./api";

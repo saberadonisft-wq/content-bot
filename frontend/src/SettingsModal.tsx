@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import "./settings-modal.css";
 import {
   AlertCircle,
   Check,

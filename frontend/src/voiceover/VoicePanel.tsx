@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AudioLines, Play, RefreshCw, Square, Upload, Download } from 'lucide-react';
+import { AlertTriangle, AudioLines, Download, Play, RefreshCw, Sparkles, Square, Upload, Zap } from 'lucide-react';
 import { voiceDownload, voiceFetch, voiceRequest } from './api';
 import type { VoiceController } from './useVoiceover';
-import { voiceClipsInRange } from './planner';
+import {
+  autoFitVoiceClips,
+  calculateFitRate,
+  countVoiceOverlaps,
+  resetVoiceOffsets,
+  rippleShiftVoiceClips,
+  smartResolveVoiceOverlaps,
+  voiceClipsInRange,
+} from './planner';
 import { DEFAULT_PROFILE, VOICE_STATUS_LABELS, type VoiceDocument, type VoiceJob, type VoiceProfile } from './types';
 
 function describeVoiceDocument(doc: VoiceDocument | null): string {
@@ -26,6 +34,10 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
   const [previewJob, setPreviewJob] = useState<VoiceJob | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [profileName, setProfileName] = useState('Giọng của tôi');
+  const [referenceFile, setReferenceFile] = useState<File | null>(null);
+  const [referenceStart, setReferenceStart] = useState('0');
+  const [referenceDuration, setReferenceDuration] = useState('8');
+  const [referenceDenoise, setReferenceDenoise] = useState(false);
   const [referenceSample, setReferenceSample] = useState<{ id: string; original: string; processed: string; duration_ms: number } | null>(null);
   const referenceUrls = useRef<string[]>([]);
   const mounted = useRef(false);
@@ -42,6 +54,15 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
   const running = job && ['queued', 'running'].includes(job.state);
   const previewRunning = previewJob && ['queued', 'running'].includes(previewJob.state);
   const profile = doc?.profile ?? DEFAULT_PROFILE;
+  const engineStatus = status?.engines?.find(engine => engine.model_id === profile.model_id);
+  const engineReady = engineStatus?.ready ?? status?.ready;
+  const engineDevices = engineStatus?.devices ?? status?.devices ?? [];
+  const enginePresets = engineStatus?.presets ?? status?.presets ?? [];
+  const validReferenceRange = referenceStart.trim() !== '' && referenceDuration.trim() !== ''
+    && Number.isFinite(Number(referenceStart)) && Number(referenceStart) >= 0 && Number(referenceStart) <= 86400
+    && Number(referenceDuration) >= 3 && Number(referenceDuration) <= 8;
+  const { overflowCount, overlapCount } = doc ? countVoiceOverlaps(doc.clips) : { overflowCount: 0, overlapCount: 0 };
+  const hasTimingIssues = overflowCount > 0 || overlapCount > 0;
   useEffect(() => {
     const controller = new AbortController();
     void voiceRequest<VoiceProfile[]>('/profiles', { signal: controller.signal }).then(setProfiles)
@@ -79,8 +100,30 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
     setWorking(true); voice.setError('');
     try { await fn(); } catch (e) { if (mounted.current) voice.setError(String(e)); } finally { if (mounted.current) setWorking(false); }
   };
-  const chooseProfile = (next: VoiceProfile) => voice.edit(current => current.project_id !== doc?.project_id ? current : ({ ...current, profile: next,
-    clips: current.clips.map(c => ({ ...c, status: c.asset_id ? 'stale' : 'missing' })) }));
+  const chooseProfile = (next: VoiceProfile) => {
+    const devices = status?.engines?.find(engine => engine.model_id === next.model_id)?.devices;
+    if (devices?.length && !devices.includes(voice.device)) voice.setDevice(devices[0] as 'cpu' | 'cuda');
+    setPreviewUrl(null);
+    voice.edit(current => current.project_id !== doc?.project_id ? current : ({ ...current, profile: next,
+      clips: current.clips.map(c => ({ ...c, status: c.asset_id ? 'stale' : 'missing' })) }));
+  };
+  const uploadReference = async (file: File) => {
+    setReferenceSample(null);
+    referenceUrls.current.forEach(url => URL.revokeObjectURL(url)); referenceUrls.current = [];
+    const data = new FormData(); data.append('file', file);
+    const query = new URLSearchParams({ start_seconds: referenceStart, duration_seconds: referenceDuration });
+    const reference = await voiceRequest<{ id: string; duration_ms: number }>(`/references?${query}`, { method: 'POST', body: data });
+    const response = await voiceFetch(`/references/${reference.id}`);
+    const blob = await response.blob();
+    if (!mounted.current) return;
+    const processed = URL.createObjectURL(blob), original = URL.createObjectURL(file);
+    referenceUrls.current = [original, processed];
+    setReferenceSample({ ...reference, original, processed });
+  };
+  const listenSelected = () => {
+    const asset = selected?.asset_id;
+    if (asset) void action(() => listen(asset));
+  };
   return <div className="studio-panel-section voice-panel">
     <div className="studio-panel-heading"><h2><AudioLines size={18} /> Giọng đọc AI</h2>
       <p>Giọng kể chuyện chạy trên máy. Chọn mẫu nghe trước khi tạo cả phim.</p></div>
@@ -95,58 +138,120 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
       <button type="button" onClick={() => voice.resolveConflict('remote')}>Dùng phần sửa từ máy chủ</button>
     </fieldset>}
     {voice.error && voice.loading && <button type="button" onClick={voice.retryLoad}>Thử tải lại dự án giọng đọc</button>}
-    <div className="voice-runtime"><span>{status?.message ?? 'Đang kiểm tra bộ tạo giọng…'}</span>
+    <div className="voice-runtime"><span>{engineStatus?.message ?? status?.message ?? 'Đang kiểm tra bộ tạo giọng…'}</span>
       <button type="button" aria-label="Kiểm tra lại bộ tạo giọng" onClick={() => void voice.refreshStatus()}><RefreshCw size={16} /></button></div>
-    {!status?.ready && <code className="voice-setup-command">.\scripts\setup-voiceover.ps1</code>}
+    {!engineReady && <code className="voice-setup-command">.\{engineStatus?.setup_command ?? 'scripts/setup-voiceover.ps1'}</code>}
     <button type="button" className="studio-primary-button" disabled={voice.loading} onClick={voice.plan}>Tạo đoạn từ phụ đề</button>
     <small>Mỗi phụ đề có một đoạn giọng riêng, bắt đầu tại mốc của phụ đề.</small>
+    {hasTimingIssues && <div className="voice-warning-banner" role="alert" style={{
+      background: '#fff8eb', border: '1px solid #f79009', borderRadius: 6, padding: '10px 12px',
+      color: '#7a2e0e', display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 13 }}>
+        <AlertTriangle size={16} color="#d97706" />
+        <span>
+          {overflowCount > 0 && overlapCount > 0
+            ? `Phát hiện ${overflowCount} đoạn vượt thời lượng và ${overlapCount} điểm chồng lấn`
+            : overflowCount > 0
+            ? `Phát hiện ${overflowCount} đoạn vượt thời lượng phụ đề`
+            : `Phát hiện ${overlapCount} điểm đoạn giọng đè lên nhau`}
+        </span>
+      </div>
+      <p style={{ margin: 0, fontSize: 12, lineHeight: 1.4 }}>
+        Các đoạn đè lên nhau hoặc vượt khung phụ đề gây giật tiếng khi phát và bị chặn khi xuất video. Chọn cách xử lý tự động:
+      </p>
+      <div className="voice-actions" style={{ marginTop: 2 }}>
+        <button type="button" className="studio-secondary-button"
+          title="Tự động tăng tốc độ cho các đoạn vượt để nằm vừa khung phụ đề, hết đè nhau"
+          disabled={working || voice.busy || Boolean(running)}
+          onClick={() => voice.edit(d => ({ ...d, clips: autoFitVoiceClips(d.clips) }))}>
+          <Zap size={14} /> Tự động tăng tốc vừa khung
+        </button>
+        <button type="button"
+          title="Dịch mốc bắt đầu của các câu sau để các câu nối tiếp tuần tự, không bị nói đè lên nhau"
+          disabled={working || voice.busy || Boolean(running)}
+          onClick={() => voice.edit(d => ({ ...d, clips: rippleShiftVoiceClips(d.clips) }))}>
+          Dịch mốc tránh đè
+        </button>
+        <button type="button"
+          title="Tăng tốc vừa phải kết hợp dịch mốc vào khoảng lặng để giọng đọc tự nhiên và không đè nhau"
+          disabled={working || voice.busy || Boolean(running)}
+          onClick={() => voice.edit(d => ({ ...d, clips: smartResolveVoiceOverlaps(d.clips) }))}>
+          <Sparkles size={14} /> Tối ưu thông minh
+        </button>
+      </div>
+    </div>}
     {doc?.clips.some(clip => clip.source_cue_ids.length > 1) && <div>
       <p>Có đoạn giọng gộp nhiều phụ đề nên các câu bên trong có thể được đọc sớm. Tách để căn từng câu, rồi bấm “Tạo phần còn thiếu”. Các đoạn vừa tách cần tạo lại audio.</p>
       <button type="button" disabled={voice.loading || voice.busy || working || Boolean(running) || voice.saveState === 'saving'}
         onClick={voice.splitGrouped}>Tách theo từng phụ đề</button>
     </div>}
     {!doc && <p>Nhập video và phụ đề, sau đó tạo các đoạn lời đọc để bắt đầu.</p>}
-    <label>Giọng đọc<select value={profile.id} disabled={!doc || working} onChange={e => {
+    {status?.engines && <label>Engine tạo giọng<select value={profile.model_id}
+      disabled={!doc || working || Boolean(running) || Boolean(previewRunning)} onChange={e => {
+        const engine = status.engines?.find(item => item.model_id === e.target.value);
+        if (!engine) return;
+        chooseProfile({ ...profile, id: crypto.randomUUID(), revision: 1,
+          model_id: engine.model_id, model_revision: engine.model_revision,
+          preset: profile.reference_id ? null : engine.presets[0]?.id ?? '__default__',
+          name: profile.reference_id ? profile.name : engine.presets[0]?.name ?? engine.name });
+      }}>
+      {status.engines.map(engine => <option key={engine.model_id} value={engine.model_id}>
+        {engine.name}{engine.ready ? '' : ' · cần cài đặt'}
+      </option>)}
+    </select></label>}
+    <label>Giọng đọc<select value={profile.id} disabled={!doc || working || Boolean(previewRunning)} onChange={e => {
       const saved = profiles.find(p => p.id === e.target.value);
-      const preset = status?.presets.find(p => `preset-${p.id}` === e.target.value);
+      const preset = enginePresets.find(p => `preset-${p.id}` === e.target.value);
       if (saved) chooseProfile(saved);
-      else if (preset) chooseProfile({ ...DEFAULT_PROFILE, id: `preset-${preset.id}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80), name: preset.name, preset: preset.id });
+      else if (preset) chooseProfile({ ...DEFAULT_PROFILE, model_id: profile.model_id, model_revision: profile.model_revision,
+        id: `preset-${preset.id}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80), name: preset.name, preset: preset.id });
     }}>
       <option value={profile.id}>{profile.name}</option>
-      {status?.presets.filter(p => p.id !== profile.preset).map(p => <option key={p.id} value={`preset-${p.id}`}>{p.name}</option>)}
+      {enginePresets.filter(p => p.id !== profile.preset).map(p => <option key={p.id} value={`preset-${p.id}`}>{p.name}</option>)}
       {profiles.filter(p => p.id !== profile.id).map(p => <option key={p.id} value={p.id}>{p.name} · đã lưu</option>)}
     </select></label>
+    {profile.reference_id && <label>Xử lý mẫu giọng đang dùng<select value={String(profile.denoise ?? true)}
+      disabled={working || Boolean(running) || Boolean(previewRunning)}
+      onChange={e => chooseProfile({ ...profile, denoise: e.target.value === 'true' })}>
+      <option value="false">Giữ âm gốc · mẫu đã sạch</option>
+      <option value="true">Lọc nhiễu · mẫu có tiếng nền</option>
+    </select><small>Đổi chế độ rồi bấm “Tạo mẫu nghe” để so sánh. Lựa chọn được lưu cùng dự án.</small></label>}
     <label>Chạy trên<select value={voice.device} onChange={e => voice.setDevice(e.target.value as 'cpu' | 'cuda')}>
-      <option value="cpu" disabled={!status?.devices.includes('cpu')}>CPU · nghe thử / tạo giọng</option>
-      <option value="cuda" disabled={!status?.devices.includes('cuda')}>NVIDIA GPU · xử lý nhiều đoạn</option>
+      <option value="cpu" disabled={!engineDevices.includes('cpu')}>CPU · nghe thử / tạo giọng</option>
+      <option value="cuda" disabled={!engineDevices.includes('cuda')}>NVIDIA GPU · xử lý nhiều đoạn</option>
     </select></label>
     <details><summary>Tạo hồ sơ giọng từ mẫu</summary>
       <label>Tên giọng<input value={profileName} maxLength={100} onChange={e => setProfileName(e.target.value)} /></label>
-      <p>Mẫu sạch 3–8 giây, một người nói; dùng mẫu bạn có quyền nhân bản. Chỉ lấy tối đa 8 giây đầu.</p>
+      <p>Chọn 3–8 giây nói rõ, một người, ít nhạc và tiếng vang. Dùng mẫu bạn có quyền nhân bản.</p>
+      <div className="voice-fields">
+        <label>Bắt đầu tại giây<input type="number" min={0} max={86400} step={0.1} value={referenceStart} disabled={working}
+          onChange={e => { setReferenceStart(e.target.value); setReferenceSample(null); }} /></label>
+        <label>Lấy số giây<input type="number" min={3} max={8} step={0.1} value={referenceDuration} disabled={working}
+          onChange={e => { setReferenceDuration(e.target.value); setReferenceSample(null); }} /></label>
+      </div>
+      <label>Xử lý mẫu mới<select value={String(referenceDenoise)} disabled={working}
+        onChange={e => setReferenceDenoise(e.target.value === 'true')}>
+        <option value="false">Giữ âm gốc · mẫu đã sạch</option>
+        <option value="true">Lọc nhiễu · mẫu có tiếng nền</option>
+      </select></label>
       <label className="studio-secondary-button"><Upload size={16} /> Chọn mẫu audio
-        <input type="file" accept="audio/*" disabled={working || !doc} onChange={e => {
+        <input type="file" accept="audio/*" disabled={working || !doc || !validReferenceRange} onChange={e => {
           const file = e.target.files?.[0]; e.target.value = ''; if (!file) return;
-          void action(async () => {
-            const data = new FormData(); data.append('file', file);
-            const reference = await voiceRequest<{ id: string; duration_ms: number }>('/references', { method: 'POST', body: data });
-            const response = await voiceFetch(`/references/${reference.id}`);
-            const blob = await response.blob();
-            if (!mounted.current) return;
-            const processed = URL.createObjectURL(blob);
-            const original = URL.createObjectURL(file);
-            referenceUrls.current.forEach(url => URL.revokeObjectURL(url));
-            referenceUrls.current = [original, processed];
-            setReferenceSample({ ...reference, original, processed });
-          });
+          setReferenceFile(file);
+          void action(() => uploadReference(file));
         }} />
       </label>
+      {referenceFile && <button type="button" disabled={working || !doc || !validReferenceRange}
+        onClick={() => void action(() => uploadReference(referenceFile))}>Lấy lại đoạn mẫu · {referenceFile.name}</button>}
       {referenceSample && <>
         <label>Mẫu gốc<audio controls preload="metadata" src={referenceSample.original} /></label>
-        <label>Mẫu dùng tạo giọng · {(referenceSample.duration_ms / 1000).toFixed(1)} giây
+        <label>Đoạn đã cắt · {(referenceSample.duration_ms / 1000).toFixed(1)} giây · trước lọc nhiễu
           <audio controls preload="metadata" src={referenceSample.processed} /></label>
         <button type="button" disabled={working || !doc || !profileName.trim()} onClick={() => void action(async () => {
           const saved = await voiceRequest<VoiceProfile>('/profiles', { method: 'POST', body: JSON.stringify({
             ...DEFAULT_PROFILE, id: crypto.randomUUID(), name: profileName.trim(), preset: null, reference_id: referenceSample.id,
+            model_id: profile.model_id, model_revision: profile.model_revision, denoise: referenceDenoise,
           }) });
           if (!mounted.current) return;
           setProfiles(current => [...current, saved]); chooseProfile(saved);
@@ -157,11 +262,18 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
     </details>
     <details open><summary>Nghe thử chất giọng</summary>
       <label>Lời đọc thử<textarea rows={4} value={previewText} maxLength={3000} onChange={e => setPreviewText(e.target.value)} /></label>
-      <button type="button" className="studio-secondary-button" disabled={!status?.ready || working || Boolean(previewRunning) || !previewText.trim()}
+      <button type="button" className="studio-secondary-button" disabled={!engineReady || !engineDevices.includes(voice.device) || working || Boolean(previewRunning) || !previewText.trim()}
         onClick={() => void action(async () => setPreviewJob(await voiceRequest<VoiceJob>('/preview', { method: 'POST',
           body: JSON.stringify({ profile, text: previewText, device: voice.device }) })))}><Play size={16} /> Tạo mẫu nghe</button>
-      {previewJob && <p role="status">{previewJob.message}</p>}
+      {previewJob && <p role="status">{previewJob.state === 'interrupted'
+        ? 'Tác vụ bị gián đoạn khi bộ tạo giọng khởi động lại. Bấm “Tiếp tục mẫu nghe” để chạy lại.'
+        : previewJob.message}</p>}
       {previewRunning && <button type="button" onClick={() => void action(async () => setPreviewJob(await voiceRequest<VoiceJob>(`/jobs/${previewJob.id}/cancel`, { method: 'POST' })))}>Hủy mẫu nghe</button>}
+      {previewJob && ['interrupted', 'paused', 'failed', 'canceled'].includes(previewJob.state) &&
+        <button type="button" disabled={working} onClick={() => void action(async () => {
+          setPreviewUrl(null);
+          setPreviewJob(await voiceRequest<VoiceJob>(`/jobs/${previewJob.id}/resume`, { method: 'POST' }));
+        })}>Tiếp tục mẫu nghe</button>}
       {previewUrl && <audio controls src={previewUrl} preload="metadata" aria-label="Nghe giọng đã tạo" />}
     </details>
     {doc && <>
@@ -172,11 +284,11 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
           <label>Đến giây<input type="number" min={0} step={0.001} value={rangeEnd} onChange={e => setRangeEnd(e.target.value)} /></label>
         </div>
         <p>{rangeIds.length} đoạn giao với khoảng chọn. Tạo nguyên câu, kể cả câu kéo qua biên; dùng lại audio còn hợp lệ.</p>
-        <button type="button" disabled={!status?.ready || working || voice.busy || Boolean(running) || !rangeIds.length}
+        <button type="button" disabled={!engineReady || !engineDevices.includes(voice.device) || working || voice.busy || Boolean(running) || !rangeIds.length}
           onClick={() => void voice.run(rangeIds)}>Tạo {rangeIds.length} đoạn trong khoảng</button>
       </details>
       <div className="voice-actions">
-        <button type="button" className="studio-primary-button" disabled={!status?.ready || voice.busy || Boolean(running) || working || !doc.clips.length} onClick={() => void voice.run()}>Tạo phần còn thiếu</button>
+        <button type="button" className="studio-primary-button" disabled={!engineReady || !engineDevices.includes(voice.device) || voice.busy || Boolean(running) || working || !doc.clips.length} onClick={() => void voice.run()}>Tạo phần còn thiếu</button>
         <button type="button" disabled={working || voice.busy} onClick={() => void action(voice.save)}>Lưu lời đọc</button>
         <button type="button" onClick={() => voice.history('undo')}>Hoàn tác</button>
         <button type="button" onClick={() => voice.history('redo')}>Làm lại</button>
@@ -190,7 +302,12 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
         </> : job.state !== 'succeeded' && <button type="button" onClick={() => void voice.control('resume')}>Tiếp tục</button>}</div>
         {job.failed.map(f => <small key={f.clip_id}>{f.error}</small>)}
       </div>}
-      {selected && <fieldset><legend>Đoạn đang chọn · {VOICE_STATUS_LABELS[selected.status]}</legend>
+      {selected && (() => {
+        const neededRate = selected.duration_ms && (selected.end_ms - selected.start_ms > 0)
+          ? calculateFitRate(selected)
+          : null;
+        const canFit = Boolean(neededRate && Math.abs(neededRate - selected.rate) > 0.005);
+        return <fieldset><legend>Đoạn đang chọn · {VOICE_STATUS_LABELS[selected.status]}</legend>
         <label>Lời đọc<textarea rows={5} value={selected.spoken_text} maxLength={8000} onChange={e => voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id ? { ...c, spoken_text: e.target.value, status: c.asset_id ? 'stale' : 'missing' } : c) }))} /></label>
         <div className="voice-fields"><label>Tốc độ<input type="number" min={0.5} max={2} step={0.01} value={selected.rate} onChange={e => {
           const rate = Number(e.target.value); if (rate >= 0.5 && rate <= 2) voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id ? { ...c, rate } : c) }));
@@ -200,15 +317,46 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
         }} /></label></div>
         <label>Âm lượng đoạn<input type="range" min={0} max={2} step={0.05} value={selected.gain} onChange={e => voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id ? { ...c, gain: Number(e.target.value) } : c) }))} /></label>
         {selected.error && <p className="voice-error">{selected.error}</p>}
+        {selected.status === 'overflow' && neededRate && <small style={{ color: '#b54708', display: 'block' }}>
+          Đoạn này đang vượt khung phụ đề. Cần tốc độ tối thiểu {neededRate}x để nằm gọn trong phụ đề.
+        </small>}
         <div className="voice-actions">
-          <button type="button" disabled={!selected.asset_id || working} onClick={() => void action(() => listen(selected.asset_id!))}>Nghe riêng</button>
-          <button type="button" disabled={!status?.ready || Boolean(running) || voice.busy} onClick={() => void voice.run([selected.id])}>Tạo đoạn này</button>
+          <button type="button" disabled={!selected.asset_id || working} onClick={listenSelected}>Nghe riêng</button>
+          <button type="button" disabled={!engineReady || !engineDevices.includes(voice.device) || Boolean(running) || voice.busy} onClick={() => void voice.run([selected.id])}>Tạo đoạn này</button>
+          {canFit && <button type="button" title={`Tự động đặt tốc độ thành ${neededRate}x để vừa khung phụ đề`} onClick={() => voice.edit(d => ({ ...d,
+            clips: d.clips.map(c => c.id === selected.id ? {
+              ...c, rate: neededRate!, offset_ms: 0,
+              status: (c.duration_ms / neededRate! <= (c.end_ms - c.start_ms) + 2 && c.status === 'overflow') ? 'ready' : c.status,
+            } : c),
+          }))}><Zap size={14} /> Vừa khung phụ đề ({neededRate}x)</button>}
           <button type="button" disabled={selected.offset_ms === 0} onClick={() => voice.edit(d => ({ ...d,
             clips: d.clips.map(c => c.id === selected.id ? { ...c, offset_ms: 0 } : c),
           }))}>Về mốc phụ đề</button>
           <button type="button" onClick={() => voice.edit(d => ({ ...d, clips: d.clips.filter(c => c.id !== selected.id) }))}>Bỏ đoạn giọng</button>
         </div>
-      </fieldset>}
+      </fieldset>;
+      })()}
+      <details><summary>Căn chỉnh & xử lý chồng lấn ({doc.clips.length} đoạn)</summary>
+        <p>Tối ưu tốc độ hoặc dịch mốc để tránh các đoạn giọng nói đè lên nhau.</p>
+        <div className="voice-actions">
+          <button type="button" disabled={working || voice.busy || Boolean(running)}
+            onClick={() => voice.edit(d => ({ ...d, clips: autoFitVoiceClips(d.clips) }))}>
+            <Zap size={14} /> Tăng tốc vừa khung tất cả
+          </button>
+          <button type="button" disabled={working || voice.busy || Boolean(running)}
+            onClick={() => voice.edit(d => ({ ...d, clips: rippleShiftVoiceClips(d.clips) }))}>
+            Dịch mốc tránh đè tất cả
+          </button>
+          <button type="button" disabled={working || voice.busy || Boolean(running)}
+            onClick={() => voice.edit(d => ({ ...d, clips: smartResolveVoiceOverlaps(d.clips) }))}>
+            <Sparkles size={14} /> Tối ưu thông minh
+          </button>
+          <button type="button" disabled={working || voice.busy || Boolean(running) || !doc.clips.some(c => c.offset_ms !== 0)}
+            onClick={() => voice.edit(d => ({ ...d, clips: resetVoiceOffsets(d.clips) }))}>
+            Đặt lại về mốc phụ đề
+          </button>
+        </div>
+      </details>
       <details><summary>Trộn âm thanh</summary>
         <p>Giảm âm gốc cũng giảm nhạc và hiệu ứng nằm trong cùng bản thu.</p>
         <label><input type="checkbox" checked={doc.mix.enabled} onChange={e => voice.edit(d => ({ ...d, mix: { ...d.mix, enabled: e.target.checked } }))} /> Dùng giọng AI khi xuất</label>

@@ -1,9 +1,12 @@
 import asyncio
 
+import httpx
+
 from app.config import settings
 from app.crawlers import SOURCE_REGISTRY
 from app.crawlers.contracts import AuthMode, Coverage, Operation
-from app.services import channel_scans, connectors
+from app.services import channel_scans
+from app.services import connector_youtube as connectors
 from app.services.connectors import SearchQuery, YouTubeConnector
 
 
@@ -140,7 +143,8 @@ class FakeYouTubeClient:
 def test_youtube_search_combines_primary_name_and_aliases(monkeypatch) -> None:
     client = FakeYouTubeClient()
     monkeypatch.setattr(settings, "youtube_api_key", "test-key")
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -164,7 +168,8 @@ def test_youtube_search_checks_frontier_before_resuming_backlog(monkeypatch) -> 
     client = PagedYouTubeClient()
     tracker = FakeTracker(recent_ids=("known-1", "known-2"), cursor="backlog")
     monkeypatch.setattr(settings, "youtube_api_key", "test-key")
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -202,7 +207,8 @@ def test_youtube_search_discards_expired_backlog_cursor(monkeypatch) -> None:
     client = PagedYouTubeClient(invalid_backlog=True)
     tracker = FakeTracker(recent_ids=("known-1", "known-2"), cursor="backlog")
     monkeypatch.setattr(settings, "youtube_api_key", "test-key")
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -223,7 +229,8 @@ def test_youtube_search_preserves_backlog_when_run_quota_is_exhausted(
     tracker = FakeTracker(recent_ids=("known-1", "known-2"), cursor="backlog")
     monkeypatch.setattr(settings, "youtube_api_key", "test-key")
     monkeypatch.setattr(settings, "youtube_search_request_budget", 1)
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -242,7 +249,8 @@ def test_youtube_saved_channel_uses_same_frontier_backlog_policy(monkeypatch) ->
     client = PagedYouTubeClient(channel=True)
     tracker = FakeTracker(recent_ids=("known-1", "known-2"), cursor="backlog")
     monkeypatch.setattr(settings, "youtube_api_key", "test-key")
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [

@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'backend'))
 sys.path.insert(0, str(ROOT / 'runtimes/voiceover'))
 from benchmark import TEXT
+
 from app.services.voiceover.manager import VoiceManager
 from app.services.voiceover.models import VoiceClip, VoiceDocument, VoiceProfile
 from app.services.voiceover.store import VoiceStore, write_json

@@ -19,7 +19,6 @@ def main():
     args = parser.parse_args()
 
     root = ROOT / 'artifacts/voiceover/endurance/cpu'
-    report = json.loads((root / 'render-160.json').read_text(encoding='utf-8'))
     if args.clips is None:
         if (root / 'render-240.json').exists():
             args.clips = 240
@@ -35,7 +34,6 @@ def main():
     path = Path(report['mp4']['output'])
     doc = VoiceStore(root).get_document('endurance', 'e' * 20)
     checks = []
-    for index in (0, 40, 80, 120, 159):
     indices = sorted({0, args.clips // 4, args.clips // 2, (3 * args.clips) // 4, args.clips - 1})
     for index in indices:
         clip = doc.clips[index]
@@ -53,9 +51,6 @@ def main():
             peaks.append(max(map(abs, samples), default=0))
         assert peaks[0] > 5, (index, 'missing speech')
         assert peaks[1] <= 5, (index, 'audio leaked into trailing gap')
-        checks.append({'clip': clip.id, 'start_seconds': start, 'speech_peak': peaks[0], 'gap_peak': peaks[1]})
-    write_json(root / 'mp4-decode-audit.json', {'output': str(path), 'checks': checks})
-    print(json.dumps(checks), flush=True)
         checks.append({'index': index, 'clip': clip.id, 'start_seconds': start, 'speech_peak': peaks[0], 'gap_peak': peaks[1]})
     audit = {'clips': args.clips, 'output': str(path), 'checks': checks}
     write_json(root / f'mp4-decode-audit-{args.clips}.json', audit)

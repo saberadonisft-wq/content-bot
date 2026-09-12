@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,11 +16,15 @@ class LoginStartRequest(BaseModel):
     timeout_seconds: int = Field(default=1_200, ge=30, le=7_200)
 
 
-def build_crawler_profiles_router(manager: CrawlerLoginManager) -> APIRouter:
+def build_crawler_profiles_router(
+    manager: CrawlerLoginManager | Callable[[], CrawlerLoginManager],
+) -> APIRouter:
+    manager_provider = manager if callable(manager) else lambda: manager
     router = APIRouter(prefix="/api/v1/crawler/profiles")
 
     @router.get("/{source_id}/login")
     async def login_status(source_id: str):
+        manager = manager_provider()
         try:
             return manager.status(source_id).as_dict()
         except ValueError as exc:
@@ -26,11 +32,10 @@ def build_crawler_profiles_router(manager: CrawlerLoginManager) -> APIRouter:
 
     @router.post("/{source_id}/login", status_code=status.HTTP_202_ACCEPTED)
     async def start_login(source_id: str, payload: LoginStartRequest):
+        manager = manager_provider()
         try:
             return (
-                await manager.start(
-                    source_id, timeout_seconds=payload.timeout_seconds
-                )
+                await manager.start(source_id, timeout_seconds=payload.timeout_seconds)
             ).as_dict()
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -48,6 +53,7 @@ def build_crawler_profiles_router(manager: CrawlerLoginManager) -> APIRouter:
 
     @router.delete("/{source_id}/login", status_code=status.HTTP_200_OK)
     async def stop_login(source_id: str, response: Response):
+        manager = manager_provider()
         try:
             result = await manager.stop(source_id)
         except ValueError as exc:

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from ..config import settings
 from ..crawlers import SOURCE_REGISTRY
 from ..crawlers.runtime import ProfileInUse, ProfileNamespace
-from ..mongo import PersistenceStore
+from ..storage_protocol import PersistenceStore
 
 
 class CrawlerDataDeleteRequest(BaseModel):

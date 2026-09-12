@@ -5,7 +5,7 @@ from pathlib import Path
 
 import imageio_ffmpeg
 
-from app import main
+from app.api import subtitles as subtitles_api
 from app.services.media_probe import probe_media
 from app.services.subtitle_thumbnail import (
     SPRITE_FRAME_HEIGHT,
@@ -13,6 +13,7 @@ from app.services.subtitle_thumbnail import (
     generate_thumbnail_sprite,
     thumbnail_frame_count,
 )
+from app.services.video_thumbnails import VideoThumbnails
 
 
 def test_thumbnail_frame_count_is_bounded() -> None:
@@ -21,7 +22,7 @@ def test_thumbnail_frame_count_is_bounded() -> None:
     assert thumbnail_frame_count(10_000_000) == 16
 
 
-def test_ffmpeg_thumbnail_sprite_is_atomic_and_cached(tmp_path: Path) -> None:
+def test_ffmpeg_thumbnails_are_atomic_and_cached(tmp_path: Path) -> None:
     source = tmp_path / "source.mp4"
     subprocess.run(
         [
@@ -59,6 +60,18 @@ def test_ffmpeg_thumbnail_sprite_is_atomic_and_cached(tmp_path: Path) -> None:
     assert first["path"].stat().st_size > 0
     assert not list(tmp_path.rglob("*.part.*"))
 
+    thumbnails = VideoThumbnails(timeout_seconds=10)
+    output = tmp_path / "library.jpg"
+    try:
+        assert thumbnails.get(source, output) == output
+        assert output.read_bytes().startswith(b"\xff\xd8")
+        modified = output.stat().st_mtime_ns
+        assert thumbnails.get(source, output) == output
+        assert output.stat().st_mtime_ns == modified
+        assert not list(tmp_path.rglob("*.part.*"))
+    finally:
+        thumbnails.shutdown()
+
 
 def test_thumbnail_sprite_endpoint_exposes_layout_headers(
     tmp_path: Path,
@@ -68,12 +81,12 @@ def test_thumbnail_sprite_endpoint_exposes_layout_headers(
     source.write_bytes(b"video")
     sprite_path = tmp_path / "sprite.jpg"
     sprite_path.write_bytes(b"jpeg")
-    monkeypatch.setattr(main, "_uploaded_video_path", lambda _video_id: source)
+    monkeypatch.setattr(subtitles_api, "_uploaded_video_path", lambda _video_id: source)
     monkeypatch.setattr(
-        main, "probe_media_cached", lambda *_args, **_kwargs: {"duration_ms": 1000}
+        subtitles_api, "probe_media_cached", lambda *_args, **_kwargs: {"duration_ms": 1000}
     )
     monkeypatch.setattr(
-        main,
+        subtitles_api,
         "generate_thumbnail_sprite",
         lambda *_args, **_kwargs: {
             "path": sprite_path,
@@ -84,7 +97,7 @@ def test_thumbnail_sprite_endpoint_exposes_layout_headers(
         },
     )
 
-    response = main.get_subtitle_thumbnail_sprite("fixture-video")
+    response = subtitles_api.get_subtitle_thumbnail_sprite("fixture-video")
 
     assert Path(response.path) == sprite_path
     assert response.media_type == "image/jpeg"

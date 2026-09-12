@@ -3,12 +3,13 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from app import main
+from app.api import subtitles as subtitles_api
 from app.schemas import SubtitleAlignmentRequest, SubtitleJobResponse
 from app.services.subtitle_jobs import SubtitleJobManager
 
 
 def test_alignment_endpoint_runs_as_attachable_job(
+    application_services,
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -22,9 +23,9 @@ def test_alignment_endpoint_runs_as_attachable_job(
         "has_audio": True,
     }
 
-    monkeypatch.setattr(main, "subtitle_jobs", manager)
-    monkeypatch.setattr(main, "_uploaded_video_path", lambda _video_id: video_path)
-    monkeypatch.setattr(main, "probe_media_cached", lambda *_args, **_kwargs: media)
+    monkeypatch.setattr(application_services, "subtitle_jobs", manager)
+    monkeypatch.setattr(subtitles_api, "_uploaded_video_path", lambda _video_id: video_path)
+    monkeypatch.setattr(subtitles_api, "probe_media_cached", lambda *_args, **_kwargs: media)
 
     def fake_align(_path, document, _media, **kwargs):
         kwargs["progress"](50, "audio", "Đang căn audio")
@@ -49,7 +50,7 @@ def test_alignment_endpoint_runs_as_attachable_job(
             "aligned_cue_count": 1,
         }
 
-    monkeypatch.setattr(main, "align_subtitle_document", fake_align)
+    monkeypatch.setattr(subtitles_api, "align_subtitle_document", fake_align)
     request = SubtitleAlignmentRequest(
         video_id="a" * 12,
         document={
@@ -69,7 +70,9 @@ def test_alignment_endpoint_runs_as_attachable_job(
         },
     )
 
-    submitted = main.align_subtitle_timeline_v2_endpoint(request)
+    submitted = subtitles_api.align_subtitle_timeline_v2_endpoint(
+        request, services=application_services
+    )
     validated_submission = SubtitleJobResponse(**submitted)
     assert validated_submission.kind == "alignment"
 

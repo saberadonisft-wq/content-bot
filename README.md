@@ -48,7 +48,7 @@ CONTENT_BOT_GEMINI_MODEL=gemini-3.6-flash
 
 Restart Content Bot after editing `.env`. Because Gemini accepts at most 20 MB per attached local file, Content Bot automatically creates a temporary MP4 proxy below 19 MB. Videos longer than three minutes are processed in sequential chunks and their timestamps are joined automatically. Temporary proxy files are removed after success, failure or cancellation.
 
-Set `CONTENT_BOT_GEMINI_MODEL` and the timeout/retry fields in `backend/.env` when needed. The old `CONTENT_BOT_GEMINI_CLI_*` names are accepted for one release with a deprecation warning; `CONTENT_BOT_GEMINI_CLI_PATH` has no effect. Quota, service availability and data handling follow the configured Google project/key.
+Set `CONTENT_BOT_GEMINI_MODEL` and the timeout/retry fields in `backend/.env` when needed. Failed Gemini requests retry every 3 seconds by default (`CONTENT_BOT_GEMINI_RETRY_BASE_SECONDS=3`), unless Gemini returns a longer `Retry-After` value. The old `CONTENT_BOT_GEMINI_CLI_*` names are accepted for one release with a deprecation warning; `CONTENT_BOT_GEMINI_CLI_PATH` has no effect. Quota, service availability and data handling follow the configured Google project/key.
 
 If a scan or setup step is unclear, inspect the **Content Bot: Backend** terminal. The API also exposes `/api/v1/health` and `/api/v1/ready`; credential values are never written to terminal output.
 
@@ -149,3 +149,9 @@ For a no-login smoke test, create the keyword `Hades II`, select **Bluesky**, **
 
 
 .\scripts\launcher.ps1 -Action desktop
+
+## Refactoring verification
+
+Module ownership and local verification commands are documented in [Module boundaries](docs/MODULE_BOUNDARIES.md). The [refactoring acceptance report](docs/REFACTOR_ACCEPTANCE.md) tracks measured results and remaining checks against the [original review](docs/REFACTOR_REVIEW_2026-09-12.md).
+
+SQLite query changes are additive. Set `CONTENT_BOT_INDEXED_ITEM_QUERIES=false` to use the fallback read path. Before migrating real data, create a consistent backup with `backend/scripts/backup_sqlite.py SOURCE DESTINATION`; it uses SQLite online backup, checks integrity, and refuses to overwrite the destination.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import array
 import hashlib
+import math
 import subprocess
 import sys
 import wave
@@ -46,7 +47,11 @@ def audio_metadata(path: Path) -> dict:
     }
 
 
-def convert_reference(source: Path, destination: Path) -> dict:
+def convert_reference(source: Path, destination: Path, *, start_seconds: float = 0, duration_seconds: float = 8) -> dict:
+    if not math.isfinite(start_seconds) or not 0 <= start_seconds <= 86400:
+        raise ValueError("Mốc bắt đầu mẫu giọng không hợp lệ.")
+    if not math.isfinite(duration_seconds) or not 3 <= duration_seconds <= 8:
+        raise ValueError("Độ dài mẫu giọng phải từ 3 đến 8 giây.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
@@ -55,10 +60,12 @@ def convert_reference(source: Path, destination: Path) -> dict:
             "error",
             "-nostdin",
             "-y",
+            "-ss",
+            str(start_seconds),
             "-i",
             str(source),
             "-t",
-            "8",
+            str(duration_seconds),
             "-ac",
             "1",
             "-ar",

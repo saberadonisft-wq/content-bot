@@ -1,4 +1,4 @@
-@import './canva.css';
+
 
 * {
   box-sizing: border-box;
@@ -2308,4 +2308,50 @@ dialog {
   background: var(--cobalt);
   color: #fff;
   border-color: var(--cobalt);
+}
+
+.role-tag {
+  display: inline-block;
+  padding: 2px 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 4px;
+}
+
+.role-tag-admin {
+  background: #0f5ea8;
+  color: #ffffff;
+}
+
+.role-tag-user {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.role-tag-pending {
+  background: #fef08a;
+  color: #854d0e;
+}
+
+.role-tag-banned {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+/* Admin Modal Table */
+
+.auth-container {
+  min-height: 100vh;
+  width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(circle at 20% 20%, #0d2847 0%, #061528 50%, #020912 100%);
+  position: relative;
+  overflow: hidden;
+  font-family: var(--font-ui, "Space Grotesk", sans-serif);
+  color: #f1f5f9;
+  box-sizing: border-box;
 }

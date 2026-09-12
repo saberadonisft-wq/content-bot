@@ -1,0 +1,4 @@
+# Worker protocol/audio tests use a fake engine; model/GPU packages are unnecessary.
+pytest==8.4.2
+numpy==2.5.3
+soundfile==0.14.0

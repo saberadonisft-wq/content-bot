@@ -2,10 +2,11 @@ import asyncio
 import json
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 
 from app.crawlers.runtime import CrawlerErrorCode, CrawlerFailure
-from app.services import connectors
+from app.services import connector_feed as connectors
 from app.services.connectors import FeedConnector, SearchQuery
 from app.services.feed_ingestion import parse_feed_templates
 
@@ -58,7 +59,8 @@ class FakeTracker:
 
 
 def test_feed_connector_enforces_item_cap(monkeypatch) -> None:
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: FakeClient())
     connector = FeedConnector("web", "Web", "", "https://example.test?q={query}")
 
     async def collect():
@@ -89,7 +91,8 @@ class AliasFeedClient(FakeClient):
 
 def test_feed_connector_searches_aliases(monkeypatch) -> None:
     client = AliasFeedClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -145,7 +148,8 @@ def test_feed_etag_and_last_modified_are_sent_from_checkpoint(monkeypatch) -> No
     tracker = FakeTracker(
         {"etag": '"feed-v1"', "last_modified": "Wed, 13 Aug 2026 10:00:00 GMT"}
     )
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
     connector = FeedConnector("web", "Web", "", "https://example.test/feed.xml")
 
     async def collect():
@@ -192,7 +196,8 @@ def test_feed_normalizes_date_publisher_raw_allowlist_and_reports_validators(
 ) -> None:
     client = ValidatorFeedClient()
     tracker = FakeTracker()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -245,7 +250,8 @@ class PartialFailureClient(FakeClient):
 
 def test_one_invalid_feed_does_not_discard_other_configured_feed(monkeypatch) -> None:
     client = PartialFailureClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
     templates = json.dumps(
         [
             "https://broken.test/feed.xml",
@@ -268,7 +274,8 @@ def test_one_invalid_feed_does_not_discard_other_configured_feed(monkeypatch) ->
 
 def test_all_invalid_feeds_raise_typed_parse_failure(monkeypatch) -> None:
     client = PartialFailureClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [

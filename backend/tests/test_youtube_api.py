@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from app import main
 from app.config import settings
 from app.crawlers.runtime import CrawlerErrorCode, CrawlerFailure
-from app.services import connectors
+from app.services import connector_youtube as connectors
 from app.services.connectors import ConnectorStatus, YouTubeConnector
 from app.services.youtube_api import YouTubeQuotaBudget, youtube_json
 
@@ -61,7 +61,9 @@ def test_youtube_api_errors_are_typed_and_redacted(status, reason, code) -> None
         ]
     )
     with pytest.raises(CrawlerFailure) as raised:
-        asyncio.run(youtube_json(client, "/search", params={"key": "secret"}, attempts=1))
+        asyncio.run(
+            youtube_json(client, "/search", params={"key": "secret"}, attempts=1)
+        )
     assert raised.value.code is code
     assert raised.value.details == {"provider_reason": reason}
     assert "provider-secret" not in str(raised.value)
@@ -106,14 +108,13 @@ def test_youtube_deep_health_uses_one_unit_probe(monkeypatch) -> None:
         return client
 
     monkeypatch.setattr(settings, "youtube_api_key", "test-key")
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", factory)
+    monkeypatch.setattr(connectors, "pooled_client", factory)
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
     status = asyncio.run(YouTubeConnector().deep_healthcheck())
 
     assert status.state == "ready"
     assert status.probe == "remote"
-    assert client.calls == [
-        ("/i18nLanguages", {"part": "snippet"})
-    ]
+    assert client.calls == [("/i18nLanguages", {"part": "snippet"})]
     assert kwargs["follow_redirects"] is False
 
 
@@ -127,14 +128,17 @@ def test_youtube_deep_health_reports_quota_without_claiming_ready(monkeypatch) -
         ]
     )
     monkeypatch.setattr(settings, "youtube_api_key", "test-key")
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
     status = asyncio.run(YouTubeConnector().deep_healthcheck())
     assert status.state == "rate_limited"
     assert status.reason_code == CrawlerErrorCode.RATE_LIMITED.value
     assert status.probe == "remote"
 
 
-def test_catalog_deep_probe_disables_rate_limited_youtube_operations(monkeypatch) -> None:
+def test_catalog_deep_probe_disables_rate_limited_youtube_operations(
+    application_services, monkeypatch
+) -> None:
     async def rate_limited():
         return ConnectorStatus(
             "rate_limited",
@@ -144,7 +148,7 @@ def test_catalog_deep_probe_disables_rate_limited_youtube_operations(monkeypatch
         )
 
     monkeypatch.setattr(
-        main.connectors["youtube"],
+        application_services.connectors["youtube"],
         "deep_healthcheck",
         rate_limited,
     )

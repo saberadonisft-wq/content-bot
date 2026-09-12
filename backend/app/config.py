@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     content_bot_data_dir: Path = Path("data")
     content_bot_storage_backend: str = "sqlite"
     content_bot_sqlite_path: Path | None = None
+    content_bot_indexed_item_queries: bool = True
     mongodb_uri: str | None = None
     mongodb_database: str = "content_bot"
     # Optional comma-separated DNS servers used only for mongodb+srv lookups.
@@ -97,7 +98,7 @@ class Settings(BaseSettings):
         ),
     )
     content_bot_gemini_retry_base_seconds: float = Field(
-        30.0,
+        3.0,
         validation_alias=AliasChoices(
             "CONTENT_BOT_GEMINI_RETRY_BASE_SECONDS",
             "CONTENT_BOT_GEMINI_CLI_RETRY_BASE_SECONDS",

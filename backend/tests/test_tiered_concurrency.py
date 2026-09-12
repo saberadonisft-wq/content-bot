@@ -1,8 +1,6 @@
-import asyncio
 from unittest.mock import MagicMock
 
-from app.services.connectors import ConnectorCapabilities, ConnectorStatus, SearchQuery, SourceConnector
-from app.services.runs import EventBus, FAST_SOURCES, RunManager
+from app.services.runs import FAST_SOURCES, EventBus, RunManager
 
 
 def test_fast_sources_membership() -> None:

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import shutil
 import array
-import sys
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -15,7 +15,6 @@ from pathlib import Path
 import imageio_ffmpeg
 
 from ..subtitle_render import SubtitleRenderCanceled, _effective_video_segments
-
 from .audio import audio_metadata
 from .models import VoiceDocument
 from .store import VoiceStore, digest, generation_hash, read_json

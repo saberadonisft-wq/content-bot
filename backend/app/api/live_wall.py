@@ -9,13 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..middleware.auth import get_current_user
-from ..mongo import PersistenceStore
 from ..services.live_wall import (
     DisplayBounds,
     LiveWallChannel,
     LiveWallFailure,
     LiveWallManager,
 )
+from ..storage_protocol import PersistenceStore
 
 
 class LiveWallDisplayInput(BaseModel):
@@ -61,16 +61,20 @@ class LiveWallProfileDeleteInput(BaseModel):
 
 
 def build_live_wall_router(
-    manager: LiveWallManager,
+    manager: LiveWallManager | Callable[[], LiveWallManager],
     get_store: Callable[[], PersistenceStore],
 ) -> APIRouter:
+    manager_provider = manager if callable(manager) else lambda: manager
     router = APIRouter(prefix="/api/v1/live-wall", tags=["Live Wall"])
 
     @router.get("/session")
     async def session_status(user: dict = Depends(get_current_user)):
+        manager = manager_provider()
         return await manager.status(_user_id(user))
 
-    def saved_channels(keyword_id: int, channel_ids: list[str]) -> list[LiveWallChannel]:
+    def saved_channels(
+        keyword_id: int, channel_ids: list[str]
+    ) -> list[LiveWallChannel]:
         keyword = get_store().keyword(keyword_id)
         if not keyword:
             raise HTTPException(404, "Keyword not found")
@@ -99,7 +103,9 @@ def build_live_wall_router(
                 LiveWallChannel(
                     id=channel_id,
                     source_id=str(stored.get("source_id") or "web"),
-                    label=str(stored.get("label") or stored.get("source_id") or "Channel")[:120],
+                    label=str(
+                        stored.get("label") or stored.get("source_id") or "Channel"
+                    )[:120],
                     url=url,
                 )
             )
@@ -110,18 +116,22 @@ def build_live_wall_router(
         payload: UserBrowserOpenInput,
         _user: dict = Depends(get_current_user),
     ):
+        manager = manager_provider()
         try:
             return await manager.open_in_user_browser(
                 saved_channels(payload.keyword_id, payload.channel_ids)
             )
         except LiveWallFailure as exc:
-            raise HTTPException(409, {"reason_code": exc.code, "message": exc.detail}) from exc
+            raise HTTPException(
+                409, {"reason_code": exc.code, "message": exc.detail}
+            ) from exc
 
     @router.put("/session", status_code=202)
     async def open_session(
         payload: LiveWallSessionInput,
         user: dict = Depends(get_current_user),
     ):
+        manager = manager_provider()
         try:
             return await manager.open_or_update(
                 _user_id(user),
@@ -130,24 +140,32 @@ def build_live_wall_router(
                 DisplayBounds(**payload.display.model_dump()),
             )
         except LiveWallFailure as exc:
-            raise HTTPException(409, {"reason_code": exc.code, "message": exc.detail}) from exc
+            raise HTTPException(
+                409, {"reason_code": exc.code, "message": exc.detail}
+            ) from exc
 
     @router.delete("/session")
     async def close_session(user: dict = Depends(get_current_user)):
+        manager = manager_provider()
         try:
             return await manager.close(_user_id(user))
         except LiveWallFailure as exc:
-            raise HTTPException(409, {"reason_code": exc.code, "message": exc.detail}) from exc
+            raise HTTPException(
+                409, {"reason_code": exc.code, "message": exc.detail}
+            ) from exc
 
     @router.delete("/profile")
     async def delete_profile(
         payload: LiveWallProfileDeleteInput,
         user: dict = Depends(get_current_user),
     ):
+        manager = manager_provider()
         try:
             return await manager.delete_profile(_user_id(user), payload.confirmation)
         except LiveWallFailure as exc:
-            raise HTTPException(409, {"reason_code": exc.code, "message": exc.detail}) from exc
+            raise HTTPException(
+                409, {"reason_code": exc.code, "message": exc.detail}
+            ) from exc
 
     return router
 

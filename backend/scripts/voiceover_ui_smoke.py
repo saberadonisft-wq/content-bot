@@ -2,9 +2,9 @@
 
 Run Vite on 5173 first. This does not generate speech or modify user projects.
 """
-import json
 import argparse
 import io
+import json
 import wave
 from pathlib import Path
 
@@ -66,12 +66,12 @@ def main():
     def api(route):
         nonlocal document
         request = route.request
-        path = request.url.split('/voiceover', 1)[1]
+        path = request.url.split('/voiceover', 1)[1].split('?', 1)[0]
         status, body = 200, {}
         if request.method == 'OPTIONS':
             pass
         elif path == '/status':
-            body = dict(ready=True, installed=True, message='Bộ tạo giọng thử nghiệm', devices=[args.device], presets=[], model_revision=None)
+            body = {'ready': True, 'installed': True, 'message': 'Bộ tạo giọng thử nghiệm', 'devices': [args.device], 'presets': [], 'model_revision': None}
         elif path in ('/profiles', '/projects/smoke/jobs'):
             if path == '/profiles' and request.method == 'POST':
                 pending_profile.append(route)

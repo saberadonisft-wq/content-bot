@@ -1,9 +1,11 @@
 import asyncio
 
+import httpx
 import pytest
 
 from app.config import settings
-from app.services import channel_scans, connectors
+from app.services import channel_scans
+from app.services import connector_steam as connectors
 from app.services.connectors import SearchQuery, SteamReviewsConnector
 from app.services.steam_reviews import (
     SteamRequestBudget,
@@ -59,7 +61,8 @@ class FakeSteamClient:
 
 
 def test_steam_reviews_are_capped_and_anonymized(monkeypatch) -> None:
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: FakeSteamClient())
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: FakeSteamClient())
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: FakeSteamClient())
     connector = SteamReviewsConnector()
 
     async def collect():
@@ -92,7 +95,8 @@ class AliasSteamClient(FakeSteamClient):
 
 def test_steam_search_discovers_alias_only_game(monkeypatch) -> None:
     client = AliasSteamClient()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -230,7 +234,8 @@ def test_steam_keyword_frontier_precedes_backlog_and_raw_is_minimized(
 ) -> None:
     client = PagedSteamClient(frontier_known=True)
     tracker = FakeTracker(recent_ids=("42:1", "42:2"), cursor="backlog")
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -256,7 +261,8 @@ def test_steam_saved_app_paginates_past_100_with_exact_cap_and_privacy(
 ) -> None:
     client = PagedSteamClient()
     tracker = FakeTracker()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -282,7 +288,8 @@ def test_steam_saved_app_paginates_past_100_with_exact_cap_and_privacy(
 def test_steam_repeated_cursor_stops_without_loop(monkeypatch) -> None:
     client = PagedSteamClient(repeated_cursor=True)
     tracker = FakeTracker()
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: client)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     async def collect():
         return [
@@ -331,7 +338,8 @@ def test_steam_search_caches_discovered_app(monkeypatch) -> None:
                 return FakeResponse({"items": [{"id": 42, "name": "Cached Game"}]})
             return await super().get(url, params)
 
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", lambda **_kwargs: TrackingSteamClient())
+    monkeypatch.setattr(connectors, "pooled_client", lambda **_kwargs: TrackingSteamClient())
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: TrackingSteamClient())
     connector = SteamReviewsConnector()
 
     async def run_searches():

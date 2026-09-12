@@ -15,6 +15,8 @@ from app.crawlers.runtime import (
 from app.services.cbce_connectors import CbceBilibiliConnector, CbceTiebaConnector
 from app.services.connectors import SearchQuery, default_connectors
 
+pytestmark = pytest.mark.usefixtures("available_browser_dependency")
+
 
 class FakeTracker:
     def __init__(self) -> None:

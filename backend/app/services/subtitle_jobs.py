@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
+import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -18,6 +22,10 @@ JobRunner = Callable[["SubtitleJobContext"], dict[str, Any]]
 
 
 class SubtitleJobCanceled(RuntimeError):
+    pass
+
+
+class SubtitleJobQueueFull(RuntimeError):
     pass
 
 
@@ -67,7 +75,7 @@ class SubtitleJobContext:
 
 
 class SubtitleJobManager:
-    def __init__(self, job_dir: Path, *, max_workers: int = 1) -> None:
+    def __init__(self, job_dir: Path, *, max_workers: int = 1, max_pending: int = 32, max_cached: int = 128) -> None:
         self.job_dir = job_dir
         self._lock = threading.RLock()
         self._records: dict[str, SubtitleJobRecord] = {}
@@ -75,6 +83,9 @@ class SubtitleJobManager:
         self._cancel_events: dict[str, threading.Event] = {}
         self._futures: dict[str, Future[None]] = {}
         self._last_persist_at: dict[str, float] = {}
+        self._max_pending = max(1, max_pending)
+        self._max_cached = max(0, max_cached)
+        self._accepting = True
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, max_workers),
             thread_name_prefix="subtitle-job",
@@ -84,23 +95,87 @@ class SubtitleJobManager:
     def _load_existing(self) -> None:
         if not self.job_dir.exists():
             return
-        for path in self.job_dir.glob("*.json"):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                record = SubtitleJobRecord(**payload)
-            except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                continue
-            if record.state in {"queued", "running"}:
-                record.state = "failed"
-                record.phase = "interrupted"
-                record.message = "Job bị gián đoạn khi API khởi động lại"
-                record.error = "API process restarted before the job completed"
-                record.finished_at = _now_iso()
-                record.updated_at = record.finished_at
-                self._write_record(record)
-            self._records[record.id] = record
-            if record.state in {"queued", "running", "succeeded"}:
-                self._dedupe[(record.kind, record.dedupe_key)] = record.id
+        with self._dedupe_connection() as connection:
+            for path in self.job_dir.glob("*.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    record = SubtitleJobRecord(**payload)
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if record.state in {"queued", "running"}:
+                    record.state = "failed"
+                    record.phase = "interrupted"
+                    record.message = "Job bị gián đoạn khi API khởi động lại"
+                    record.error = "API process restarted before the job completed"
+                    record.finished_at = _now_iso()
+                    record.updated_at = record.finished_at
+                    self._write_record(record)
+                self._records[record.id] = record
+                if record.state in {"queued", "running", "succeeded"}:
+                    self._dedupe[(record.kind, record.dedupe_key)] = record.id
+                if record.state == "succeeded":
+                    self._write_dedupe(record, connection)
+                self._trim_records()
+        self._last_persist_at.clear()
+
+    @contextmanager
+    def _dedupe_connection(self):
+        # Rebuildable index: job JSON remains the durable source of truth.
+        # One transaction for history recovery avoids thousands of small files.
+        self.job_dir.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.job_dir / ".dedupe.sqlite3")) as connection, connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS dedupe (kind TEXT, key TEXT, job_id TEXT NOT NULL, PRIMARY KEY (kind, key))"
+            )
+            yield connection
+
+    def _write_dedupe(self, record: SubtitleJobRecord, connection=None) -> None:
+        if connection is None:
+            with self._dedupe_connection() as current:
+                self._write_dedupe(record, current)
+            return
+        connection.execute(
+            "INSERT INTO dedupe (kind, key, job_id) VALUES (?, ?, ?) "
+            "ON CONFLICT (kind, key) DO UPDATE SET job_id=excluded.job_id "
+            "WHERE dedupe.job_id != excluded.job_id",
+            (record.kind, record.dedupe_key, record.id),
+        )
+
+    def _read_dedupe(self, kind: JobKind, key: str) -> str | None:
+        if not (self.job_dir / ".dedupe.sqlite3").exists():
+            return None
+        with self._dedupe_connection() as connection:
+            row = connection.execute(
+                "SELECT job_id FROM dedupe WHERE kind=? AND key=?", (kind, key)
+            ).fetchone()
+        return row[0] if row else None
+
+    def _read_record(self, job_id: str) -> SubtitleJobRecord | None:
+        if not re.fullmatch(r"[a-f0-9]{20}", job_id):
+            return None
+        try:
+            record = SubtitleJobRecord(**json.loads((self.job_dir / f"{job_id}.json").read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return None
+        return record if record.id == job_id else None
+
+    def _trim_records(self) -> None:
+        completed = [job_id for job_id, record in self._records.items() if record.state not in {"queued", "running"} and job_id not in self._futures]
+        for job_id in completed[:max(0, len(completed) - self._max_cached)]:
+            record = self._records.pop(job_id)
+            if self._dedupe.get((record.kind, record.dedupe_key)) == job_id:
+                self._dedupe.pop((record.kind, record.dedupe_key), None)
+            self._last_persist_at.pop(job_id, None)
+
+    def _retire(self, job_id: str, future: Future) -> None:
+        with self._lock:
+            record = self._records.get(job_id)
+            if future.cancelled() and record and record.state == "queued":
+                self._finish_canceled(record)
+            self._futures.pop(job_id, None)
+            self._cancel_events.pop(job_id, None)
+            self._last_persist_at.pop(job_id, None)
+            self._trim_records()
 
     def _write_record(self, record: SubtitleJobRecord) -> None:
         self.job_dir.mkdir(parents=True, exist_ok=True)
@@ -120,11 +195,18 @@ class SubtitleJobManager:
         runner: JobRunner,
     ) -> dict[str, Any]:
         with self._lock:
+            if not self._accepting:
+                raise SubtitleJobQueueFull("Job manager is stopping")
             existing_id = self._dedupe.get((kind, dedupe_key))
+            if not existing_id:
+                existing_id = self._read_dedupe(kind, dedupe_key)
             if existing_id:
-                existing = self._records.get(existing_id)
+                existing = self._records.get(existing_id) or self._read_record(existing_id)
                 if existing and existing.state in {"queued", "running", "succeeded"}:
                     return existing.snapshot()
+
+            if len(self._futures) >= self._max_pending:
+                raise SubtitleJobQueueFull("Job queue is full; wait for an active job to finish")
 
             job_id = uuid.uuid4().hex[:20]
             record = SubtitleJobRecord(id=job_id, kind=kind, dedupe_key=dedupe_key)
@@ -139,6 +221,7 @@ class SubtitleJobManager:
                 runner,
                 cancel_event,
             )
+            self._futures[job_id].add_done_callback(lambda future: self._retire(job_id, future))
             return record.snapshot()
 
     def _execute(
@@ -190,6 +273,7 @@ class SubtitleJobManager:
             record.finished_at = _now_iso()
             record.updated_at = record.finished_at
             self._write_record(record)
+            self._write_dedupe(record)
 
     def _finish_canceled(self, record: SubtitleJobRecord) -> None:
         record.state = "canceled"
@@ -222,12 +306,12 @@ class SubtitleJobManager:
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
-            record = self._records.get(job_id)
+            record = self._records.get(job_id) or self._read_record(job_id)
             return record.snapshot() if record else None
 
     def cancel(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
-            record = self._records.get(job_id)
+            record = self._records.get(job_id) or self._read_record(job_id)
             if not record:
                 return None
             if record.state in {"succeeded", "failed", "canceled"}:
@@ -240,16 +324,36 @@ class SubtitleJobManager:
                 cancel_event.set()
             future = self._futures.get(job_id)
             if record.state == "queued" and future and future.cancel():
-                self._finish_canceled(record)
+                return record.snapshot()  # The done callback persists cancellation.
             else:
                 self._write_record(record)
             return record.snapshot()
 
-    def shutdown(self, *, wait: bool = True) -> None:
+    def stop_accepting(self) -> None:
         with self._lock:
-            for job_id, record in self._records.items():
+            self._accepting = False
+
+    def shutdown(self, *, wait: bool = True, timeout_seconds: float = 10) -> None:
+        with self._lock:
+            self._accepting = False
+            for job_id, record in list(self._records.items()):
                 if record.state in {"queued", "running"}:
                     cancel_event = self._cancel_events.get(job_id)
                     if cancel_event:
                         cancel_event.set()
-        self._executor.shutdown(wait=wait, cancel_futures=True)
+            futures = list(self._futures.values())
+            for future in futures:
+                future.cancel()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        unfinished = [future for future in futures if not future.done()]
+        if wait and unfinished:
+            _, pending = wait_futures(unfinished, timeout=max(0, timeout_seconds))
+            if pending:
+                raise TimeoutError(f"{len(pending)} subtitle job(s) did not stop before the shutdown deadline")
+        if wait:
+            # Future.done()/wait() precede done callbacks. Finalize under the same
+            # lock so shutdown cannot return with completed runtime state retained.
+            with self._lock:
+                for job_id, future in list(self._futures.items()):
+                    if future.done():
+                        self._retire(job_id, future)

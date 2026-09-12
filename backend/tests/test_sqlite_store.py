@@ -65,7 +65,19 @@ def test_sqlite_store_imports_legacy_database_once(tmp_path) -> None:
         now = datetime.now(UTC).isoformat()
         connection.execute(
             "INSERT INTO keywords VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (1, "Điện Thoại", json.dumps(["mobile"]), "[]", "[]", 1, 60, 100, now, now, now),
+            (
+                1,
+                "Điện Thoại",
+                json.dumps(["mobile"]),
+                "[]",
+                "[]",
+                1,
+                60,
+                100,
+                now,
+                now,
+                now,
+            ),
         )
 
     storage = SQLiteStore(path)
@@ -107,15 +119,15 @@ def test_sqlite_store_cascades_local_content_and_comments(tmp_path) -> None:
     assert storage.comments_for_content("youtube", "video-1") == []
 
 
-def test_keyword_api_works_without_mongodb(tmp_path, monkeypatch) -> None:
+def test_keyword_api_works_without_mongodb(
+    application_services, tmp_path, monkeypatch
+) -> None:
     storage = SQLiteStore(tmp_path / "content-bot.db")
-    monkeypatch.setattr(main, "store", storage)
-    main.run_manager.store = storage
+    monkeypatch.setattr(application_services, "store", storage)
+    application_services.run_manager.store = storage
 
     with TestClient(main.app) as client:
-        created = client.post(
-            "/api/v1/keywords", json={"name": "Local topic"}
-        )
+        created = client.post("/api/v1/keywords", json={"name": "Local topic"})
         listed = client.get("/api/v1/keywords")
         ready = client.get("/api/v1/ready")
 
@@ -184,4 +196,3 @@ def test_sqlite_store_ingest_content_bundle_atomic(tmp_path) -> None:
     assert m is not None
     assert m["trend_score"] == 90.0
     assert m["relevance_score"] == 85.0
-

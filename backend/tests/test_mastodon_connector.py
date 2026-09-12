@@ -1,10 +1,11 @@
 import asyncio
 
+import httpx
 import pytest
 
 from app.config import settings
 from app.crawlers.runtime import CrawlerErrorCode, CrawlerFailure
-from app.services import connectors
+from app.services import connector_mastodon as connectors
 from app.services.connectors import MastodonConnector, SearchQuery, stable_external_id
 
 
@@ -79,7 +80,8 @@ class Pages:
 
 def test_mastodon_parses_post_correctly(monkeypatch) -> None:
     client = FakeMastodonFactory({"mastodon.social": [FAKE_POST]})
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    monkeypatch.setattr(connectors, "pooled_client", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
 
     async def collect():
         return [
@@ -132,7 +134,8 @@ def test_mastodon_deduplicates_across_instances(monkeypatch) -> None:
         "mastodon.gamedev.place": [same_post],
         "dice.camp": [],
     })
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    monkeypatch.setattr(connectors, "pooled_client", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
 
     async def collect():
         return [
@@ -158,7 +161,8 @@ def test_mastodon_healthcheck_is_always_ready() -> None:
 def test_mastodon_hashtag_normalisation(monkeypatch) -> None:
     """'Black Myth: Wukong' should be searched as 'blackmythwukong'."""
     client = FakeMastodonFactory({"mastodon.social": []})
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    monkeypatch.setattr(connectors, "pooled_client", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
 
     async def collect():
         return [
@@ -189,7 +193,8 @@ def test_mastodon_skips_unreachable_instance(monkeypatch) -> None:
             "dice.camp": [],
         }
     )
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    monkeypatch.setattr(connectors, "pooled_client", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
 
     async def collect():
         return [
@@ -223,7 +228,8 @@ def test_mastodon_follows_link_pagination_with_exact_cap(monkeypatch) -> None:
     )
     second = FakeResponse([_post(index) for index in range(40, 50)])
     client = FakeMastodonFactory({"mastodon.social": Pages(first, second)})
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    monkeypatch.setattr(connectors, "pooled_client", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     monkeypatch.setattr(settings, "mastodon_instances", "mastodon.social")
 
     async def collect():
@@ -251,7 +257,8 @@ def test_mastodon_partial_instance_failure_emits_visible_warning(monkeypatch) ->
             "mastodon.gamedev.place": [_post(1)],
         }
     )
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    monkeypatch.setattr(connectors, "pooled_client", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     async def no_sleep(_delay):
         return None
 
@@ -291,7 +298,8 @@ def test_mastodon_all_instances_unavailable_is_typed_failure(monkeypatch) -> Non
     client = FakeMastodonFactory(
         {"mastodon.social": real_httpx.ConnectError("secret", request=request)}
     )
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    monkeypatch.setattr(connectors, "pooled_client", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     monkeypatch.setattr(settings, "mastodon_instances", "mastodon.social")
 
     async def no_sleep(_delay):
@@ -320,7 +328,8 @@ def test_mastodon_deep_health_is_not_ready_when_all_instances_fail(monkeypatch) 
     client = FakeMastodonFactory(
         {"mastodon.social": real_httpx.ConnectError("down", request=request)}
     )
-    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    monkeypatch.setattr(connectors, "pooled_client", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     monkeypatch.setattr(settings, "mastodon_instances", "mastodon.social")
     status = asyncio.run(MastodonConnector().deep_healthcheck())
     assert status.state == "degraded"

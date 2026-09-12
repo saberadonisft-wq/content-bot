@@ -1,6 +1,7 @@
 export type VoiceProfile = {
   id: string; name: string; revision: number; preset: string | null; reference_id: string | null;
-  model_id: 'pnnbao-ump/VieNeu-TTS-v3-Turbo'; model_revision: string;
+  model_id: 'pnnbao-ump/VieNeu-TTS-v3-Turbo' | 'pnnbao-ump/VieNeu-TTS-v2-Turbo'; model_revision: string;
+  denoise?: boolean;
 };
 export type VoiceClip = {
   id: string; source_cue_ids: string[]; source_text: string; spoken_text: string;
@@ -20,7 +21,9 @@ export type VoiceJob = {
   elapsed_seconds: number; eta_seconds: number | null;
 };
 export type VoiceStatus = { ready: boolean; installed: boolean; message: string; devices: string[];
-  presets: { id: string; name: string }[]; model_revision: string | null };
+  presets: { id: string; name: string }[]; model_revision: string | null;
+  engines?: { model_id: VoiceProfile['model_id']; model_revision: string; name: string; ready: boolean;
+    devices: string[]; presets: { id: string; name: string }[]; setup_command: string; message: string }[] };
 export const DEFAULT_PROFILE: VoiceProfile = {
   id: 'ngoc-huyen', name: 'Ngọc Huyền', revision: 1, preset: 'Ngọc Huyền', reference_id: null,
   model_id: 'pnnbao-ump/VieNeu-TTS-v3-Turbo', model_revision: '8b7e9cffb4b41918cb638b9f62f0a751184d14a6',

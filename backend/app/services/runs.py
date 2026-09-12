@@ -10,8 +10,8 @@ from datetime import UTC, datetime, timedelta
 from ..crawlers import SOURCE_REGISTRY
 from ..crawlers.contracts import Operation, SchedulePolicy
 from ..crawlers.runtime import CrawlerErrorCode, CrawlerFailure
-from ..mongo import MongoStore, store
-from ..sqlite_store import SQLiteStore
+from ..mongo import store
+from ..storage_protocol import PersistenceStore
 from .cbce_runtime import cbce_provider_rollout_status
 from .channel_scans import ChannelUnavailable, channel_mode, scan_channel
 from .checkpoints import (
@@ -19,7 +19,7 @@ from .checkpoints import (
     CheckpointTracker,
     query_fingerprint,
 )
-from .connectors import RawContentItem, SearchQuery, SourceConnector
+from .connector_contracts import RawContentItem, SearchQuery, SourceConnector
 from .run_planner import plan_run_targets
 from .text import clean_terms, engagement, percentile, recency_score, relevance
 
@@ -74,12 +74,14 @@ class RunManager:
         self,
         connectors: dict[str, SourceConnector],
         events: EventBus,
-        storage: MongoStore | SQLiteStore | None = None,
+        storage: PersistenceStore | None = None,
     ) -> None:
         self.connectors = connectors
         self.events = events
         self.store = storage or store
         self._tasks: dict[str, asyncio.Task] = {}
+        self._storage_tasks: set[asyncio.Task] = set()
+        self._accepting = True
         self._start_lock = asyncio.Lock()
         self._fast_semaphore = asyncio.Semaphore(8)
         self._quota_semaphore = asyncio.Semaphore(3)
@@ -88,7 +90,16 @@ class RunManager:
 
     async def _store_call(self, method, *args, **kwargs):
         """Keep synchronous persistence calls off FastAPI's event loop."""
-        return await asyncio.to_thread(method, *args, **kwargs)
+        task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
+        self._storage_tasks.add(task)
+
+        def finished(completed):
+            self._storage_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()  # Observe errors even if the caller was canceled.
+
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
 
     async def _set_source_progress(
         self,
@@ -146,7 +157,26 @@ class RunManager:
         channel_ids: list[str] | None = None,
     ) -> str:
         async with self._start_lock:
+            if not self._accepting:
+                raise RuntimeError("Crawler manager is stopping")
             return await self._start_batch(keyword_id, trigger, source_ids, channel_ids)
+
+    def stop_accepting(self) -> None:
+        self._accepting = False
+
+    async def shutdown(self, timeout_seconds: float = 10) -> None:
+        self.stop_accepting()
+        async with asyncio.timeout(timeout_seconds):
+            async with self._start_lock:
+                tasks = list(self._tasks.values())
+                for task in tasks:
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # Cancellation cannot stop a thread that already entered SQLite or
+            # Mongo. Let those writes finish before releasing shared services.
+            if self._storage_tasks:
+                await asyncio.gather(*self._storage_tasks, return_exceptions=True)
 
     async def _start_batch(
         self,
@@ -1150,10 +1180,7 @@ class RunManager:
             )
             velocity = max((latest_value - previous_value) / elapsed, 0)
             velocities: list[float] = []
-            for content_item_id in self.store.source_item_ids(item["source_id"]):
-                pair = self.store.snapshots(content_item_id, descending=True, limit=2)
-                if len(pair) != 2:
-                    continue
+            for pair in self.store.source_snapshot_pairs(item["source_id"]):
                 current, older = pair
                 hours = max(
                     (current["captured_at"] - older["captured_at"]).total_seconds()

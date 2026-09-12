@@ -4,12 +4,22 @@ import json
 import re
 import sqlite3
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 from typing import Any
+
+from .sqlite_indexes import ensure_query_indexes
+from .sqlite_item_query import (
+    initialize_item_query,
+    queue_existing_analysis,
+    select_items,
+    update_item_analysis,
+)
 
 COLLECTIONS = (
     "keywords",
@@ -70,6 +80,15 @@ def _normalized(value: str) -> str:
     return re.sub(r"[^\w#]+", " ", value).strip()
 
 
+def _transactional(method: Callable) -> Callable:
+    """Keep each complete mutation, including nested reads, in one transaction."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._transaction():
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class SQLiteStore:
     """Local document persistence backed by one durable SQLite database."""
 
@@ -78,6 +97,7 @@ class SQLiteStore:
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()
         self._write_lock = RLock()
+        self._local = local()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -86,13 +106,39 @@ class SQLiteStore:
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        existing = getattr(self._local, "connection", None)
+        if existing is not None:
+            yield existing
+        else:
+            with closing(self._connect()) as connection, connection:
+                yield connection
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        existing = getattr(self._local, "connection", None)
+        if existing is not None:
+            yield existing
+            return
+        with self._write_lock, closing(self._connect()) as connection:
+            self._local.connection = connection
+            try:
+                with connection:
+                    # Reserve the writer before reading. SQLite also serializes
+                    # other Store instances/processes; an instance RLock cannot.
+                    connection.execute("BEGIN IMMEDIATE")
+                    yield connection
+            finally:
+                del self._local.connection
+
     @property
     def is_available(self) -> bool:
         return self.ping_cached()
 
     def ping(self) -> bool:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute("SELECT 1").fetchone()
         except sqlite3.Error:
             return False
@@ -105,7 +151,7 @@ class SQLiteStore:
     def initialize(self, ping: bool = False) -> None:
         del ping
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._write_lock, self._connect() as connection:
+        with self._write_lock, self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.executescript(
@@ -128,8 +174,12 @@ class SQLiteStore:
                 );
                 """
             )
+            initialize_item_query(connection)
+            connection.execute("BEGIN IMMEDIATE")
             self._import_legacy_tables(connection)
             self._upgrade_local_documents(connection)
+            ensure_query_indexes(connection)
+            queue_existing_analysis(connection)
 
     def _upgrade_local_documents(self, connection: sqlite3.Connection) -> None:
         marker = connection.execute(
@@ -248,13 +298,16 @@ class SQLiteStore:
             "ON CONFLICT(collection, document_key) DO UPDATE SET payload = excluded.payload",
             (collection, self._key(identifier), self._dumps(document)),
         )
+        if collection == "content_items":
+            update_item_analysis(connection, self._key(identifier), document)
 
+    @_transactional
     def _upsert(self, collection: str, document: dict[str, Any]) -> None:
-        with self._write_lock, self._connect() as connection:
+        with self._write_lock, self._connection() as connection:
             self._upsert_with(connection, collection, document["_id"], document)
 
     def _all(self, collection: str) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT payload FROM local_documents WHERE collection = ?",
                 (collection,),
@@ -262,7 +315,7 @@ class SQLiteStore:
         return [self._loads(row["payload"]) for row in rows]
 
     def _get(self, collection: str, identifier: Any) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT payload FROM local_documents WHERE collection = ? AND document_key = ?",
                 (collection, self._key(identifier)),
@@ -274,6 +327,29 @@ class SQLiteStore:
     ) -> list[dict[str, Any]]:
         return [row for row in self._all(collection) if predicate(row)]
 
+    def _select(
+        self, collection: str, predicate: str, parameters: tuple = (), *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Execute an internal SQL predicate with bound values, then decode matches only."""
+        sql = f"SELECT payload FROM local_documents WHERE collection = ? AND ({predicate})"
+        values = (collection, *parameters)
+        if limit is not None:
+            sql += " LIMIT ?"
+            values = (*values, limit)
+        with self._connection() as connection:
+            rows = connection.execute(sql, values).fetchall()
+        return [self._loads(row["payload"]) for row in rows]
+
+    def _delete_selected(self, collection: str, predicate: str, parameters: tuple = ()) -> int:
+        """Delete by an internal indexed predicate inside the caller's transaction."""
+        with self._connection() as connection:
+            cursor = connection.execute(
+                f"DELETE FROM local_documents WHERE collection = ? AND ({predicate})",
+                (collection, *parameters),
+            )
+            return cursor.rowcount
+
+    @_transactional
     def _delete_where(
         self, collection: str, predicate: Callable[[dict[str, Any]], bool]
     ) -> int:
@@ -281,7 +357,7 @@ class SQLiteStore:
         if not rows:
             return 0
         keys = [self._key(row["_id"]) for row in rows]
-        with self._write_lock, self._connect() as connection:
+        with self._write_lock, self._connection() as connection:
             connection.executemany(
                 "DELETE FROM local_documents WHERE collection = ? AND document_key = ?",
                 [(collection, key) for key in keys],
@@ -296,8 +372,9 @@ class SQLiteStore:
         result["id"] = result.pop("_id")
         return result
 
+    @_transactional
     def next_id(self, collection: str) -> int:
-        with self._write_lock, self._connect() as connection:
+        with self._write_lock, self._connection() as connection:
             connection.execute(
                 "INSERT INTO local_counters(collection, value) VALUES (?, 1) "
                 "ON CONFLICT(collection) DO UPDATE SET value = value + 1",
@@ -309,14 +386,15 @@ class SQLiteStore:
         return int(row["value"])
 
     def metadata(self, key: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT payload FROM local_metadata WHERE metadata_key = ?", (key,)
             ).fetchone()
         return self._loads(row["payload"]) if row else None
 
+    @_transactional
     def set_metadata(self, key: str, values: dict[str, Any]) -> None:
-        with self._write_lock, self._connect() as connection:
+        with self._write_lock, self._connection() as connection:
             connection.execute(
                 "INSERT INTO local_metadata(metadata_key, payload) VALUES (?, ?) "
                 "ON CONFLICT(metadata_key) DO UPDATE SET payload = excluded.payload",
@@ -355,11 +433,13 @@ class SQLiteStore:
             for row in self._all("keywords")
         )
 
+    @_transactional
     def create_keyword(self, values: dict[str, Any]) -> dict[str, Any]:
         row = {"_id": self.next_id("keywords"), **deepcopy(values)}
         self._upsert("keywords", row)
         return self.public(row)
 
+    @_transactional
     def update_keyword(
         self, keyword_id: int, values: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -370,6 +450,7 @@ class SQLiteStore:
         self._upsert("keywords", row)
         return self.public(row)
 
+    @_transactional
     def next_session_number(self, keyword_id: int) -> int:
         row = self._get("keywords", keyword_id)
         if row is None:
@@ -378,6 +459,7 @@ class SQLiteStore:
         self._upsert("keywords", row)
         return row["session_count"]
 
+    @_transactional
     def update_channel_checkpoint(
         self,
         keyword_id: int,
@@ -404,6 +486,7 @@ class SQLiteStore:
         row["updated_at"] = scanned_at
         self._upsert("keywords", row)
 
+    @_transactional
     def update_source_checkpoint(
         self,
         keyword_id: int,
@@ -428,6 +511,7 @@ class SQLiteStore:
         row["updated_at"] = updated_at
         self._upsert("keywords", row)
 
+    @_transactional
     def delete_keyword(self, keyword_id: int) -> bool:
         if self._delete_where("keywords", lambda row: row["_id"] == keyword_id) == 0:
             return False
@@ -455,6 +539,7 @@ class SQLiteStore:
             self.delete_item(content_item_id)
         return True
 
+    @_transactional
     def delete_source_data(self, source_id: str) -> dict[str, int]:
         if not source_id or any(character in source_id for character in (".", "$")):
             raise ValueError("Unsafe source ID")
@@ -511,6 +596,7 @@ class SQLiteStore:
             "keywords_reset": keywords_reset,
         }
 
+    @_transactional
     def create_batch(
         self, batch: dict[str, Any], source_runs: list[dict[str, Any]]
     ) -> None:
@@ -523,12 +609,10 @@ class SQLiteStore:
             self._upsert("source_runs", row)
 
     def active_batch(self, keyword_id: int) -> dict[str, Any] | None:
-        rows = self._find(
+        rows = self._select(
             "crawl_batches",
-            lambda row: (
-                row.get("keyword_id") == keyword_id
-                and row.get("state") in {"queued", "running"}
-            ),
+            "json_extract(payload, '$.keyword_id') = ? AND json_extract(payload, '$.state') IN ('queued', 'running')",
+            (keyword_id,),
         )
         rows.sort(key=lambda row: _sort_value(row.get("started_at")), reverse=True)
         return self.public(rows[0]) if rows else None
@@ -542,10 +626,9 @@ class SQLiteStore:
     def batches(
         self, keyword_id: int | None = None, limit: int = 10
     ) -> list[dict[str, Any]]:
-        rows = self._find(
-            "crawl_batches",
-            lambda row: keyword_id is None or row.get("keyword_id") == keyword_id,
-        )
+        rows = (self._all("crawl_batches") if keyword_id is None else self._select(
+            "crawl_batches", "json_extract(payload, '$.keyword_id') = ?", (keyword_id,)
+        ))
         rows.sort(key=lambda row: _sort_value(row.get("started_at")), reverse=True)
         result = []
         for raw in rows[:limit]:
@@ -562,12 +645,14 @@ class SQLiteStore:
             )
         ]
 
+    @_transactional
     def update_batch(self, batch_id: str, values: dict[str, Any]) -> None:
         row = self._get("crawl_batches", batch_id)
         if row:
             row.update(deepcopy(values))
             self._upsert("crawl_batches", row)
 
+    @_transactional
     def prune_sessions(self, keyword_id: int, keep: int = 5) -> list[str]:
         rows = self._find(
             "crawl_batches",
@@ -618,11 +703,12 @@ class SQLiteStore:
     def source_runs(self, batch_id: str) -> list[dict[str, Any]]:
         return [
             self.public(row)
-            for row in self._find(
-                "source_runs", lambda row: row.get("batch_id") == batch_id
+            for row in self._select(
+                "source_runs", "json_extract(payload, '$.batch_id') = ?", (batch_id,)
             )
         ]
 
+    @_transactional
     def update_source_run(
         self,
         source_run_id: str,
@@ -638,18 +724,17 @@ class SQLiteStore:
         self._upsert("source_runs", row)
 
     def item_by_source(self, source_id: str, external_id: str) -> dict[str, Any] | None:
-        rows = self._find(
+        rows = self._select(
             "content_items",
-            lambda row: (
-                row.get("source_id") == source_id
-                and row.get("external_id") == external_id
-            ),
+            "json_extract(payload, '$.source_id') = ? AND json_extract(payload, '$.external_id') = ?",
+            (source_id, external_id), limit=1,
         )
         return self.public(rows[0]) if rows else None
 
     def item(self, content_item_id: int) -> dict[str, Any] | None:
         return self.public(self._get("content_items", content_item_id))
 
+    @_transactional
     def save_item(self, values: dict[str, Any]) -> dict[str, Any]:
         with self._write_lock:
             values = deepcopy(values)
@@ -669,6 +754,7 @@ class SQLiteStore:
             self._upsert("content_items", row)
             return self.public(row)
 
+    @_transactional
     def ingest_content_bundle(
         self,
         item_values: dict[str, Any],
@@ -677,92 +763,27 @@ class SQLiteStore:
         keyword_id: int,
         trend_score_fn: Callable[[dict[str, Any]], float] | None = None,
     ) -> dict[str, Any]:
-        """Atomically persist an item, its metric snapshot, and its keyword match in a single SQLite transaction."""
-        with self._write_lock, self._connect() as connection:
-            values = deepcopy(item_values)
-            content_item_id = values.pop("id", None)
-            if content_item_id is None:
-                existing = self.item_by_source(
-                    str(values.get("source_id") or ""),
-                    str(values.get("external_id") or ""),
-                )
-                if existing:
-                    content_item_id = existing["id"]
-                else:
-                    connection.execute(
-                        "INSERT INTO local_counters(collection, value) VALUES (?, 1) "
-                        "ON CONFLICT(collection) DO UPDATE SET value = value + 1",
-                        ("content_items",),
-                    )
-                    c_row = connection.execute(
-                        "SELECT value FROM local_counters WHERE collection = ?",
-                        ("content_items",),
-                    ).fetchone()
-                    content_item_id = int(c_row["value"])
-
-            item_row = self._get("content_items", content_item_id) or {
-                "_id": content_item_id
-            }
-            item_row.update(values)
-            self._upsert_with(connection, "content_items", item_row["_id"], item_row)
-            saved_item = self.public(item_row)
-
-            connection.execute(
-                "INSERT INTO local_counters(collection, value) VALUES (?, 1) "
-                "ON CONFLICT(collection) DO UPDATE SET value = value + 1",
-                ("metric_snapshots",),
-            )
-            s_row = connection.execute(
-                "SELECT value FROM local_counters WHERE collection = ?",
-                ("metric_snapshots",),
-            ).fetchone()
-            snapshot_id = int(s_row["value"])
-            snap = deepcopy(snapshot_values)
-            snap["_id"] = snapshot_id
-            snap["content_item_id"] = content_item_id
-            self._upsert_with(connection, "metric_snapshots", snapshot_id, snap)
-
-            match_row_data = deepcopy(match_values)
-            if trend_score_fn is not None and "trend_score" not in match_row_data:
-                match_row_data["trend_score"] = trend_score_fn(saved_item)
-
-            existing_match = self.match(content_item_id, keyword_id)
-            if existing_match:
-                match_id = existing_match["id"]
-            else:
-                connection.execute(
-                    "INSERT INTO local_counters(collection, value) VALUES (?, 1) "
-                    "ON CONFLICT(collection) DO UPDATE SET value = value + 1",
-                    ("item_keyword_matches",),
-                )
-                m_row = connection.execute(
-                    "SELECT value FROM local_counters WHERE collection = ?",
-                    ("item_keyword_matches",),
-                ).fetchone()
-                match_id = int(m_row["value"])
-
-            match_row = self._get("item_keyword_matches", match_id) or {
-                "_id": match_id,
-                "content_item_id": content_item_id,
-                "keyword_id": keyword_id,
-            }
-            match_row.update(match_row_data)
-            self._upsert_with(connection, "item_keyword_matches", match_id, match_row)
-
-            return saved_item
+        """Persist the item, snapshot and match on the same transaction connection."""
+        item = self.save_item(item_values)
+        snapshot = {**deepcopy(snapshot_values), "content_item_id": item["id"]}
+        self.add_snapshot(snapshot)
+        match = deepcopy(match_values)
+        if trend_score_fn is not None and "trend_score" not in match:
+            match["trend_score"] = trend_score_fn(item)
+        self.save_match(item["id"], keyword_id, match)
+        return item
 
     def comment_by_source(
         self, source_id: str, external_id: str
     ) -> dict[str, Any] | None:
-        rows = self._find(
+        rows = self._select(
             "comments",
-            lambda row: (
-                row.get("source_id") == source_id
-                and row.get("external_id") == external_id
-            ),
+            "json_extract(payload, '$.source_id') = ? AND json_extract(payload, '$.external_id') = ?",
+            (source_id, external_id), limit=1,
         )
         return self.public(rows[0]) if rows else None
 
+    @_transactional
     def save_comment(self, values: dict[str, Any]) -> dict[str, Any]:
         values = deepcopy(values)
         source_id = str(values.get("source_id") or "").strip()
@@ -821,54 +842,47 @@ class SQLiteStore:
     ) -> list[dict[str, Any]]:
         if not 1 <= limit <= 1000:
             raise ValueError("Comment list limit must be between 1 and 1000")
-        rows = self._find(
+        rows = self._select(
             "comments",
-            lambda row: (
-                row.get("source_id") == source_id
-                and row.get("content_external_id") == content_external_id
-                and (
-                    root_external_id is None
-                    or row.get("root_external_id") == root_external_id
-                )
-            ),
+            "json_extract(payload, '$.source_id') = ? AND json_extract(payload, '$.content_external_id') = ?"
+            + (" AND json_extract(payload, '$.root_external_id') = ?" if root_external_id is not None else ""),
+            (source_id, content_external_id) + ((root_external_id,) if root_external_id is not None else ()),
         )
         rows.sort(key=lambda row: (_sort_value(row.get("published_at")), row["_id"]))
         return [self.public(row) for row in rows[:limit]]
 
+    @_transactional
     def delete_comments_for_content(
         self, source_id: str, content_external_id: str
     ) -> int:
-        return self._delete_where(
+        return self._delete_selected(
             "comments",
-            lambda row: (
-                row.get("source_id") == source_id
-                and row.get("content_external_id") == content_external_id
-            ),
+            "json_extract(payload, '$.source_id') = ? AND json_extract(payload, '$.content_external_id') = ?",
+            (source_id, content_external_id),
         )
 
+    @_transactional
     def delete_item(self, content_item_id: int) -> None:
         item = self._get("content_items", content_item_id)
         if item:
             self.delete_comments_for_content(
                 str(item.get("source_id") or ""), str(item.get("external_id") or "")
             )
-        self._delete_where("content_items", lambda row: row["_id"] == content_item_id)
-        self._delete_where(
+        self._delete_selected("content_items", "document_key = ?", (self._key(content_item_id),))
+        self._delete_selected(
             "item_keyword_matches",
-            lambda row: row.get("content_item_id") == content_item_id,
+            "json_extract(payload, '$.content_item_id') = ?", (content_item_id,),
         )
-        self._delete_where(
+        self._delete_selected(
             "metric_snapshots",
-            lambda row: row.get("content_item_id") == content_item_id,
+            "json_extract(payload, '$.content_item_id') = ?", (content_item_id,),
         )
 
     def match(self, content_item_id: int, keyword_id: int) -> dict[str, Any] | None:
-        rows = self._find(
+        rows = self._select(
             "item_keyword_matches",
-            lambda row: (
-                row.get("content_item_id") == content_item_id
-                and row.get("keyword_id") == keyword_id
-            ),
+            "json_extract(payload, '$.keyword_id') = ? AND json_extract(payload, '$.content_item_id') = ?",
+            (keyword_id, content_item_id), limit=1,
         )
         return self.public(rows[0]) if rows else None
 
@@ -878,6 +892,7 @@ class SQLiteStore:
         item = self.item_by_source(source_id, external_id)
         return bool(item and self.match(item["id"], keyword_id))
 
+    @_transactional
     def save_match(
         self, content_item_id: int, keyword_id: int, values: dict[str, Any]
     ) -> dict[str, Any]:
@@ -894,28 +909,24 @@ class SQLiteStore:
         self._upsert("item_keyword_matches", row)
         return self.public(row)
 
+    @_transactional
     def delete_match(self, content_item_id: int, keyword_id: int) -> None:
-        self._delete_where(
+        self._delete_selected(
             "item_keyword_matches",
-            lambda row: (
-                row.get("content_item_id") == content_item_id
-                and row.get("keyword_id") == keyword_id
-            ),
+            "json_extract(payload, '$.keyword_id') = ? AND json_extract(payload, '$.content_item_id') = ?",
+            (keyword_id, content_item_id),
         )
-        if not any(
-            row.get("content_item_id") == content_item_id
-            for row in self._all("item_keyword_matches")
-        ):
+        if not self.has_matches_for_item(content_item_id):
             self.delete_item(content_item_id)
 
+    @_transactional
     def add_snapshot(self, values: dict[str, Any]) -> None:
-        rows = self._find(
+        rows = self._select(
             "metric_snapshots",
-            lambda row: (
-                row.get("content_item_id") == values["content_item_id"]
-                and row.get("captured_at") == values["captured_at"]
-            ),
+            "json_extract(payload, '$.content_item_id') = ?",
+            (values["content_item_id"],),
         )
+        rows = [row for row in rows if row.get("captured_at") == values["captured_at"]]
         identifier = rows[0]["_id"] if rows else self.next_id("metric_snapshots")
         row = rows[0] if rows else {"_id": identifier}
         row.update(deepcopy(values))
@@ -924,9 +935,9 @@ class SQLiteStore:
     def snapshots(
         self, content_item_id: int, descending: bool = False, limit: int = 0
     ) -> list[dict[str, Any]]:
-        rows = self._find(
+        rows = self._select(
             "metric_snapshots",
-            lambda row: row.get("content_item_id") == content_item_id,
+            "json_extract(payload, '$.content_item_id') = ?", (content_item_id,),
         )
         rows.sort(
             key=lambda row: _sort_value(row.get("captured_at")), reverse=descending
@@ -943,40 +954,66 @@ class SQLiteStore:
         min_relevance: float = 0,
         session_id: str | None = None,
     ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-        matches = self._find(
-            "item_keyword_matches",
-            lambda row: (
-                row.get("keyword_id") == keyword_id
-                and (session_id is None or row.get("session_id") == session_id)
-                and (
-                    row.get("relevance_score", 0) >= min_relevance
-                    if min_relevance > 0
-                    else (row.get("relevance_score", 0) > 0 if positive_only else True)
-                )
-            ),
+        clauses = ["m.collection = 'item_keyword_matches'", "json_extract(m.payload, '$.keyword_id') = ?"]
+        values: list[Any] = [keyword_id]
+        if session_id is not None:
+            clauses.append("json_extract(m.payload, '$.session_id') = ?")
+            values.append(session_id)
+        if min_relevance > 0:
+            clauses.append("COALESCE(json_extract(m.payload, '$.relevance_score'), 0) >= ?")
+            values.append(min_relevance)
+        elif positive_only:
+            clauses.append("COALESCE(json_extract(m.payload, '$.relevance_score'), 0) > 0")
+        if source_id is not None:
+            clauses.append("json_extract(i.payload, '$.source_id') = ?")
+            values.append(source_id)
+        sql = (
+            "SELECT i.payload AS item, m.payload AS matched FROM local_documents m "
+            "JOIN local_documents i ON i.collection = 'content_items' "
+            "AND i.document_key = 'i:' || json_extract(m.payload, '$.content_item_id') "
+            "WHERE " + " AND ".join(clauses)
         )
-        result = []
-        for match in matches:
-            item = self.item(match["content_item_id"])
-            if item and (source_id is None or item.get("source_id") == source_id):
-                result.append((item, self.public(match)))
-        return result
+        with self._connection() as connection:
+            rows = connection.execute(sql, values).fetchall()
+        return [(self.public(self._loads(row["item"])), self.public(self._loads(row["matched"]))) for row in rows]
+
+    def query_items(self, query, *, limit=None, offset=0):
+        return select_items(self, query, limit, offset)
+
+    def item_query_revision(self) -> int:
+        with self._connection() as connection:
+            return connection.execute("SELECT revision FROM local_item_revision WHERE id=1").fetchone()[0]
 
     def source_metric_values(self, source_id: str) -> list[dict[str, int]]:
-        return [
-            row.get("metrics", {})
-            for row in self._find(
-                "content_items", lambda row: row.get("source_id") == source_id
-            )
-        ]
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT json_extract(payload, '$.metrics') FROM local_documents "
+                "WHERE collection = 'content_items' AND json_extract(payload, '$.source_id') = ?",
+                (source_id,),
+            ).fetchall()
+        return [json.loads(row[0]) if row[0] is not None else {} for row in rows]
 
     def source_item_ids(self, source_id: str) -> list[int]:
-        return [
-            row["_id"]
-            for row in self._find(
-                "content_items", lambda row: row.get("source_id") == source_id
+        with self._connection() as connection:
+            return [row[0] for row in connection.execute(
+                "SELECT json_extract(payload, '$._id') FROM local_documents "
+                "WHERE collection = 'content_items' AND json_extract(payload, '$.source_id') = ?",
+                (source_id,),
+            )]
+
+    def source_snapshot_pairs(self, source_id: str) -> list[list[dict[str, Any]]]:
+        from .services.snapshot_pairs import latest_pairs
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT snapshots.payload FROM local_documents AS snapshots "
+                "JOIN local_documents AS items ON items.collection='content_items' "
+                "AND items.document_key='i:' || json_extract(snapshots.payload, '$.content_item_id') "
+                "WHERE snapshots.collection='metric_snapshots' "
+                "AND json_extract(items.payload, '$.source_id')=? "
+                "ORDER BY snapshots.rowid", (source_id,),
             )
-        ]
+            return latest_pairs(self.public(self._loads(row[0])) for row in rows)
 
     def content_item_ids_before(self, cutoff: datetime) -> list[int]:
         return [
@@ -989,6 +1026,7 @@ class SQLiteStore:
             )
         ]
 
+    @_transactional
     def delete_irrelevant_matches(self) -> tuple[int, set[int]]:
         matches = self._find(
             "item_keyword_matches", lambda row: row.get("relevance_score", 0) <= 0
@@ -1001,10 +1039,10 @@ class SQLiteStore:
         return len(matches), candidate_ids
 
     def has_matches_for_item(self, content_item_id: int) -> bool:
-        return any(
-            row.get("content_item_id") == content_item_id
-            for row in self._all("item_keyword_matches")
-        )
+        return bool(self._select(
+            "item_keyword_matches", "json_extract(payload, '$.content_item_id') = ?",
+            (content_item_id,), limit=1,
+        ))
 
     def recent_items(
         self, source_ids: set[str], limit: int = 50

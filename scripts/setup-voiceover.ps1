@@ -1,5 +1,9 @@
-param([ValidateSet('cpu', 'cuda')][string]$Device = 'cpu')
+param(
+    [ValidateSet('cpu', 'cuda')][string]$Device = 'cpu',
+    [ValidateSet('v3turbo', 'v2turbo')][string]$Engine = 'v3turbo'
+)
 $ErrorActionPreference = 'Stop'
+if ($Engine -eq 'v2turbo' -and $Device -ne 'cuda') { throw 'V2 Turbo requires -Device cuda.' }
 $voiceRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/voiceover'
 $voiceEnvironment = if ($Device -eq 'cuda') { '.venv-gpu' } else { '.venv' }
 $voicePython = Join-Path $voiceRoot "$voiceEnvironment/Scripts/python.exe"
@@ -22,5 +26,5 @@ if ($Device -eq 'cuda') {
     & $voicePython (Join-Path $voiceRoot 'check_gpu.py')
     if ($LASTEXITCODE -ne 0) { throw 'CUDA execution check failed.' }
 }
-& $voicePython (Join-Path $voiceRoot 'worker.py') prepare $Device
+& $voicePython (Join-Path $voiceRoot 'worker.py') prepare $Device --engine $Engine
 if ($LASTEXITCODE -ne 0) { throw 'Voice model preparation failed. See output above.' }

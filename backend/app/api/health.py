@@ -8,8 +8,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 from ..config import settings
-from ..mongo import PersistenceStore
 from ..services.runs import utcnow
+from ..storage_protocol import PersistenceStore
 from ..version import APP_VERSION
 
 logger = logging.getLogger("content_bot.health")
