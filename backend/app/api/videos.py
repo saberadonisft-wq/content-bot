@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 from contextlib import suppress
 from datetime import UTC, datetime
+from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, SecretStr
 
 from ..application_services import AppServices, get_services
 from ..config import settings
@@ -21,12 +23,64 @@ from ..services.video_thumbnails import (
 )
 from .media_paths import (
     SUPPORTED_VIDEO_EXTENSIONS,
+    _subtitled_video_path,
     _uploaded_video_path,
-    _validate_local_video_id,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+@router.get("/api/v1/videos/directory")
+def video_directory():
+    return {"path": str(settings.data_dir / "videos" / "upload")}
+
+
+class VideoDownloadRequest(BaseModel):
+    urls: list[str] = Field(min_length=1, max_length=20)
+    quality: Literal["best", "1080", "720", "480"] = "1080"
+    cookie_text: SecretStr | None = Field(default=None, max_length=1_000_000)
+
+
+class VideoDownloadRetryRequest(BaseModel):
+    cookie_text: SecretStr | None = Field(default=None, max_length=1_000_000)
+
+
+@router.get("/api/v1/videos/downloads")
+def list_downloads(services: AppServices = Depends(get_services)):
+    return services.video_downloads.list()
+
+
+@router.post("/api/v1/videos/downloads", status_code=202)
+def create_downloads(request: VideoDownloadRequest, services: AppServices = Depends(get_services)):
+    try:
+        return services.video_downloads.submit(
+            request.urls, request.quality,
+            request.cookie_text.get_secret_value() if request.cookie_text else None,
+        )
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@router.post("/api/v1/videos/downloads/{job_id}/cancel")
+def cancel_download(job_id: str, services: AppServices = Depends(get_services)):
+    record = services.video_downloads.cancel(job_id)
+    if record is None:
+        raise HTTPException(404, "Không tìm thấy lượt tải.")
+    return record
+
+
+@router.post("/api/v1/videos/downloads/{job_id}/retry", status_code=202)
+def retry_download(job_id: str, request: VideoDownloadRetryRequest, services: AppServices = Depends(get_services)):
+    try:
+        record = services.video_downloads.retry(
+            job_id, request.cookie_text.get_secret_value() if request.cookie_text else None,
+        )
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    if record is None:
+        raise HTTPException(404, "Không tìm thấy lượt tải.")
+    return record
 
 
 def _safe_external_url(value: object) -> str:
@@ -54,12 +108,14 @@ def list_videos(services: AppServices = Depends(get_services)):
     output_dir = settings.data_dir / "videos" / "output"
 
     videos: list[VideoLibraryItem] = []
+    downloads = services.video_downloads.metadata()
 
     if upload_dir.exists():
         for path in upload_dir.iterdir():
             if path.is_file() and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:
                 stat = path.stat()
                 video_id = path.stem
+                metadata = downloads.get(video_id, {})
                 videos.append(
                     VideoLibraryItem(
                         id=video_id,
@@ -69,6 +125,11 @@ def list_videos(services: AppServices = Depends(get_services)):
                         created_at=datetime.fromtimestamp(stat.st_ctime, tz=UTC),
                         thumbnail_url=f"/api/v1/videos/{video_id}/thumbnail?type=original",
                         video_url=f"/api/v1/subtitles/video/{video_id}",
+                        title=metadata.get("title"),
+                        source_url=metadata.get("url"),
+                        platform=metadata.get("platform"),
+                        duration=metadata.get("duration"),
+                        downloaded=bool(metadata),
                     )
                 )
 
@@ -80,7 +141,7 @@ def list_videos(services: AppServices = Depends(get_services)):
                 and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
             ):
                 stat = path.stat()
-                # Extract original video_id by stripping "subtitled_" prefix
+                # Preserve the render suffix so each exported version is distinct.
                 video_id = path.stem.removeprefix("subtitled_")
                 videos.append(
                     VideoLibraryItem(
@@ -164,6 +225,8 @@ def list_videos(services: AppServices = Depends(get_services)):
                     thumbnail_url=_safe_external_url(thumb_url),
                     video_url=_safe_external_url(item.get("canonical_url")),
                     metrics=item.get("metrics", {}),
+                    platform=str(source or ""),
+                    source_url=_safe_external_url(item.get("canonical_url")),
                 )
             )
     except Exception:
@@ -182,14 +245,11 @@ def get_video_thumbnail(
     *,
     services: AppServices = Depends(get_services),
 ):
-    _validate_local_video_id(video_id)
     if type not in {"original", "subtitled"}:
         raise HTTPException(status_code=422, detail="Invalid video type")
     if type == "subtitled":
-        video_dir = settings.data_dir / "videos" / "output"
-        video_path = video_dir / f"subtitled_{video_id}.mp4"
+        video_path = _subtitled_video_path(video_id)
     else:
-        video_dir = settings.data_dir / "videos" / "upload"
         # Find the video file with any supported extension
         video_path = _uploaded_video_path(video_id)
 
@@ -237,11 +297,8 @@ def delete_video(
         return
 
     if type == "subtitled":
-        _validate_local_video_id(video_id)
-        video_dir = settings.data_dir / "videos" / "output"
-        video_path = video_dir / f"subtitled_{video_id}.mp4"
+        video_path = _subtitled_video_path(video_id)
     elif type == "original":
-        video_dir = settings.data_dir / "videos" / "upload"
         video_path = _uploaded_video_path(video_id)
     else:
         raise HTTPException(status_code=422, detail="Invalid video type")

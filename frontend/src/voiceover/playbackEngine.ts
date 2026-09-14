@@ -121,6 +121,13 @@ export class VoicePlaybackEngine {
       return;
     }
     const ms = video.currentTime * 1000;
+    const conflict = index.conflictAt(ms);
+    if (conflict && !doc.mix.muted && doc.mix.gain > 0 && !video.paused) {
+      video.pause();
+      this.pauseAudio();
+      this.onError(`Audio chồng nhau trong vùng ${(conflict.start / 1000).toFixed(3)}–${(conflict.end / 1000).toFixed(3)} giây. Chỉnh vùng này hoặc tắt tiếng giọng để xem tiếp.`);
+      return;
+    }
     const nextIndex = index.nextIndex(ms);
     const active = index.active(ms, nextIndex);
     const next = index.clips[nextIndex];

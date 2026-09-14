@@ -18,7 +18,11 @@ import logging
 import os
 import secrets
 import sys
+import threading
+import uuid
+from copy import deepcopy
 from ctypes import wintypes
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +57,14 @@ SUPPORTED_KEYS = (
     "tiktok_redirect_uri",
     "gemini_api_key",
 )
+
+
+def _serialized(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 def _derive_key(password: str, salt: bytes) -> bytes:
@@ -130,11 +142,13 @@ class CredentialVault:
     """Manages master-password-encrypted local credentials."""
 
     def __init__(self, secrets_dir: Path) -> None:
+        self._lock = threading.RLock()
         self.secrets_dir = secrets_dir.resolve()
         self.vault_file = self.secrets_dir / "credentials.enc"
         self.device_unlock_file = self.secrets_dir / "credentials.unlock"
         self._unlocked = False
-        self._cached_credentials: dict[str, str] = {}
+        self._cached_credentials: dict[str, Any] = {}
+        self._gemini_checks: dict[str, dict[str, Any]] = {}
         self._current_key: bytes | None = None
         self._try_auto_unlock()
 
@@ -148,6 +162,7 @@ class CredentialVault:
         """Check if the vault is currently unlocked in memory."""
         return self._unlocked
 
+    @_serialized
     def setup_master_password(
         self,
         master_password: str,
@@ -174,6 +189,7 @@ class CredentialVault:
         self._remember_unlock_key(key)
         return True
 
+    @_serialized
     def unlock(self, master_password: str) -> bool:
         """Unlock the vault with the master password. Returns True on success, raises ValueError on bad password."""
         if not self.is_configured:
@@ -194,6 +210,7 @@ class CredentialVault:
             logger.warning("Failed to unlock credential vault due to data format: %s", err)
             raise ValueError("File Vault bị hỏng hoặc sai định dạng.") from err
 
+    @_serialized
     def lock(self) -> None:
         """Lock the vault and clear credentials from memory."""
         self._unlocked = False
@@ -205,6 +222,7 @@ class CredentialVault:
             logger.warning("Unable to remove the saved device unlock key: %s", err)
         logger.info("Credential vault locked.")
 
+    @_serialized
     def save_credentials(self, new_credentials: dict[str, str]) -> dict[str, Any]:
         """Save/update credentials in the vault."""
         if not self._unlocked or self._current_key is None:
@@ -213,18 +231,23 @@ class CredentialVault:
         payload = json.loads(self.vault_file.read_text(encoding="utf-8"))
         salt = base64.b64decode(payload["kdf"]["salt"])
 
+        updated = deepcopy(self._cached_credentials)
         for k, v in new_credentials.items():
             if k in SUPPORTED_KEYS:
+                if k == "gemini_api_key" and "_gemini_keyring" in updated:
+                    raise ValueError("Hãy quản lý Gemini key trong danh sách Gemini AI.")
                 val = str(v).strip() if v is not None else ""
                 if val:
-                    self._cached_credentials[k] = val
-                elif k in self._cached_credentials and val == "":
+                    updated[k] = val
+                elif k in updated and val == "":
                     # Empty string deletes the key
-                    del self._cached_credentials[k]
+                    del updated[k]
 
-        self._encrypt_and_save(self._current_key, salt, self._cached_credentials)
+        self._encrypt_and_save(self._current_key, salt, updated)
+        self._cached_credentials = updated
         return self.get_status()
 
+    @_serialized
     def change_master_password(self, old_password: str, new_password: str) -> bool:
         """Change the vault master password."""
         self.unlock(old_password)
@@ -259,6 +282,11 @@ class CredentialVault:
             for name, value in raw_creds.items()
             if name in SUPPORTED_KEYS and value is not None and str(value).strip()
         }
+        if "_gemini_keyring" in raw_creds:
+            ring = raw_creds["_gemini_keyring"]
+            if not isinstance(ring, dict) or ring.get("version") != 1 or not isinstance(ring.get("keys"), list):
+                raise ValueError("Invalid Gemini keyring")
+            clean_creds["_gemini_keyring"] = ring
         self._cached_credentials = clean_creds
         self._current_key = key
         self._unlocked = True
@@ -294,14 +322,14 @@ class CredentialVault:
             self._current_key = None
             logger.warning("Credential vault auto-unlock was unavailable: %s", type(err).__name__)
 
-    def _encrypt_and_save(self, key: bytes, salt: bytes, data: dict[str, str]) -> None:
+    def _encrypt_and_save(self, key: bytes, salt: bytes, data: dict[str, Any]) -> None:
         plaintext = json.dumps(data, ensure_ascii=True).encode("utf-8")
         nonce = secrets.token_bytes(_NONCE_SIZE)
         aesgcm = AESGCM(key)
         ciphertext = aesgcm.encrypt(nonce, plaintext, _AAD)
 
         payload = {
-            "version": 1,
+            "version": 2 if "_gemini_keyring" in data else 1,
             "kdf": {
                 "algorithm": "pbkdf2_hmac_sha256",
                 "iterations": _PBKDF2_ITERATIONS,
@@ -315,6 +343,7 @@ class CredentialVault:
         temp_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         temp_file.replace(self.vault_file)
 
+    @_serialized
     def get_credential(self, key: str) -> str | None:
         """Return a Vault credential only while the Vault is unlocked."""
 
@@ -323,6 +352,81 @@ class CredentialVault:
         value = self._cached_credentials.get(key)
         return value.strip() if isinstance(value, str) and value.strip() else None
 
+    @_serialized
+    def gemini_keyring_configured(self) -> bool:
+        # The public format version is also a fail-closed marker while locked.
+        return "_gemini_keyring" in self._cached_credentials or (
+            self.is_configured and self._read_payload().get("version", 1) >= 2
+        )
+
+    @_serialized
+    def gemini_keys(self, environment_key: str | None = None) -> list[dict[str, Any]]:
+        """Internal secret snapshots. Never return these directly through an API."""
+        if self.gemini_keyring_configured():
+            ring = self._cached_credentials.get("_gemini_keyring", {})
+            return deepcopy(ring.get("keys", [])) if self._unlocked else []
+        legacy = self.get_credential("gemini_api_key") or (environment_key or "").strip()
+        return [{"id": "gemini-legacy", "name": "Gemini (cấu hình cũ)", "secret": legacy,
+                 "enabled": True, "project_group": None}] if legacy else []
+
+    @_serialized
+    def gemini_key_status(self, environment_key: str | None = None) -> dict[str, Any]:
+        rows = []
+        for key in self.gemini_keys(environment_key):
+            check = self._gemini_checks.get(key["id"], {})
+            rows.append({k: key[k] for k in ("id", "name", "enabled")} | {
+                "project_group": None,  # Legacy response field; groups are no longer used.
+                "masked_key": "••••••••" + (key["secret"][-4:] if len(key["secret"]) >= 8 else ""),
+                "state": check.get("state", "untested") if key["enabled"] else "disabled",
+                "checked_model": check.get("checked_model"), "checked_at": check.get("checked_at"),
+            })
+        return {"version": 1, "configured": self.gemini_keyring_configured(), "keys": rows}
+
+    @_serialized
+    def edit_gemini_keys(self, *, add: list[str] | None = None, key_id: str | None = None,
+                         changes: dict[str, Any] | None = None, delete: bool = False,
+                         environment_key: str | None = None) -> dict[str, Any]:
+        if not self._unlocked or self._current_key is None:
+            raise ValueError("Vault đang khóa. Vui lòng mở khóa trước.")
+        rows = self.gemini_keys(environment_key)
+        added = duplicates = 0
+        known = {row["secret"] for row in rows}
+        for value in add or []:
+            value = value.strip()
+            if not value:
+                continue
+            if value in known:
+                duplicates += 1
+                continue
+            if any(ch.isspace() for ch in value):
+                raise ValueError("Một key không được chứa khoảng trắng bên trong.")
+            rows.append({"id": "gk-" + uuid.uuid4().hex, "name": f"Gemini {len(rows) + 1}",
+                         "secret": value, "enabled": True})
+            known.add(value)
+            added += 1
+        if key_id is not None:
+            row = next((row for row in rows if row["id"] == key_id), None)
+            if row is None:
+                raise ValueError("Không tìm thấy Gemini key.")
+            if delete:
+                rows.remove(row)
+            else:
+                row.update({k: v for k, v in (changes or {}).items() if k in {"name", "enabled"}})
+        for row in rows:
+            row.pop("project_group", None)
+        updated = deepcopy(self._cached_credentials)
+        updated.pop("gemini_api_key", None)
+        updated["_gemini_keyring"] = {"version": 1, "keys": rows}
+        salt = base64.b64decode(self._read_payload()["kdf"]["salt"])
+        self._encrypt_and_save(self._current_key, salt, updated)
+        self._cached_credentials = updated
+        return self.gemini_key_status(environment_key) | {"added": added, "duplicates": duplicates}
+
+    @_serialized
+    def record_gemini_check(self, key_id: str, *, state: str, model: str, checked_at: str) -> None:
+        self._gemini_checks[key_id] = {"state": state, "checked_model": model, "checked_at": checked_at}
+
+    @_serialized
     def get_status(self) -> dict[str, Any]:
         """Return non-sensitive status of configured credentials."""
         from ..config import settings
@@ -358,6 +462,12 @@ class CredentialVault:
             env_value = getattr(settings, key, None)
             return env_value.strip() if isinstance(env_value, str) and env_value.strip() else None
 
+        if self.gemini_keyring_configured():
+            active = [key for key in self.gemini_keys() if key["enabled"]]
+            configured_keys["gemini_api_key"] = bool(active)
+            vault_configured_keys["gemini_api_key"] = bool(active)
+            credential_sources["gemini_api_key"] = "vault" if active else "none"
+
         return {
             "is_master_password_set": self.is_configured,
             "is_unlocked": self._unlocked,
@@ -381,20 +491,22 @@ class CredentialVault:
                 "tiktok": bool(
                     effective("tiktok_client_key") and effective("tiktok_client_secret")
                 ),
-                "gemini": bool(effective("gemini_api_key")),
+                "gemini": configured_keys["gemini_api_key"],
             },
         }
 
 
 # Global vault singleton initialized to settings.data_dir / secrets
 _vault_instance: CredentialVault | None = None
+_vault_instance_lock = threading.Lock()
 
 
 def get_vault() -> CredentialVault:
     global _vault_instance
-    if _vault_instance is None:
-        from ..config import settings
+    with _vault_instance_lock:
+        if _vault_instance is None:
+            from ..config import settings
 
-        secrets_dir = settings.data_dir / "secrets"
-        _vault_instance = CredentialVault(secrets_dir)
-    return _vault_instance
+            secrets_dir = settings.data_dir / "secrets"
+            _vault_instance = CredentialVault(secrets_dir)
+        return _vault_instance

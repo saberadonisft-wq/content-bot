@@ -10,6 +10,7 @@ from typing import Any
 import imageio_ffmpeg
 
 from .media_probe import probe_media
+from .speech_evidence import valid_speech_evidence
 from .subtitle_timing import (
     SubtitleTimingError,
     cue_times_ms,
@@ -43,7 +44,7 @@ ALLOWED_TIMING_SOURCES = frozenset(
     }
 )
 LANGUAGE_PATTERN = re.compile(r"^[A-Za-z0-9-]{2,32}$")
-MAX_SUBTITLE_CUES = 500
+MAX_SUBTITLE_CUES = 20_000
 MAX_CUE_TEXT_LENGTH = 4000
 MAX_WORDS_PER_CUE = 500
 MAX_WORD_TEXT_LENGTH = 500
@@ -141,6 +142,8 @@ def _parse_json_word(
         "start_ms": start_ms,
         "end_ms": end_ms,
         "confidence": _safe_confidence(raw_word.get("confidence")),
+        **({"alignment_method": raw_word["alignment_method"]} if raw_word.get("alignment_method") in {
+            "asr_observed", "ctc_aligned", "energy_estimated", "interpolated", "manual"} else {}),
     }
 
 
@@ -180,6 +183,8 @@ def _build_cue(
             }
         )
     parsed_words: list[dict[str, Any]] = []
+    valid_speech = (type(speech_start_ms) is int and type(speech_end_ms) is int
+                    and 0 <= speech_start_ms < speech_end_ms)
     for index, raw_word in enumerate(raw_words[:MAX_WORDS_PER_CUE]):
         word = _parse_json_word(
             raw_word,
@@ -197,7 +202,9 @@ def _build_cue(
                     }
                 )
             continue
-        if word["start_ms"] < start_ms or word["end_ms"] > end_ms:
+        in_display = start_ms <= word["start_ms"] < word["end_ms"] <= end_ms
+        in_speech = valid_speech and speech_start_ms <= word["start_ms"] < word["end_ms"] <= speech_end_ms
+        if not in_display and not in_speech:
             if warnings is not None:
                 warnings.append(
                     {
@@ -255,7 +262,7 @@ def _build_cue(
         and not isinstance(speech_start_ms, bool)
         and isinstance(speech_end_ms, int)
         and not isinstance(speech_end_ms, bool)
-        and start_ms <= speech_start_ms < speech_end_ms <= end_ms
+        and 0 <= speech_start_ms < speech_end_ms
     ):
         cue["speech_start_ms"] = speech_start_ms
         cue["speech_end_ms"] = speech_end_ms
@@ -266,7 +273,7 @@ def _build_cue(
             {
                 "code": "invalid_speech_range",
                 "cue_id": cue_id,
-                "message": "Speech timing không hợp lệ hoặc nằm ngoài display timing; đã bỏ qua.",
+                "message": "Speech timing không hợp lệ; đã bỏ qua.",
             }
         )
     if parsed_words:
@@ -360,7 +367,7 @@ def parse_subtitles_v2(
             warnings.append(
                 {
                     "code": "too_many_segments",
-                    "message": "Kết quả có quá 500 segment; chỉ giữ 500 mục đầu.",
+                    "message": f"Kết quả vượt giới hạn {MAX_SUBTITLE_CUES} segment; chỉ giữ trong giới hạn tài nguyên.",
                 }
             )
 
@@ -477,6 +484,22 @@ def parse_subtitles_v2(
                 else None,
                 warnings=warnings,
             )
+            for field, limit in (("source_text", 4000), ("source_language", 32), ("origin_chunk_id", 64), ("origin_model", 128)):
+                if isinstance(item.get(field), str):
+                    cue[field] = item[field][:limit]
+            if item.get("content_source") in {"audio", "screen", "mixed", "unknown"}:
+                cue["content_source"] = item["content_source"]
+            if isinstance(item.get("locked"), bool):
+                cue["locked"] = item["locked"]
+            if media_duration_ms is not None and cue.get("speech_end_ms", 0) > media_duration_ms:
+                cue.pop("speech_start_ms", None)
+                cue.pop("speech_end_ms", None)
+                cue.pop("words", None)
+                warnings.append({"code": "speech_outside_video", "cue_id": cue["id"],
+                                 "message": "Mốc lời nói vượt video; cần căn lại."})
+            evidence = valid_speech_evidence({**cue, "speech_evidence": item.get("speech_evidence")})
+            if evidence:
+                cue["speech_evidence"] = evidence.model_dump()
             cues.append(cue)
 
     if data is None:
@@ -591,6 +614,10 @@ def parse_subtitles_v2(
         "timing_precision_ms": document_precision,
         "segments": cues,
     }
+    if isinstance(data, dict):
+        document["revision"] = _normalize_revision(data.get("revision", 0))
+        if isinstance(data.get("run_id"), str):
+            document["run_id"] = data["run_id"][:64]
     return document, warnings
 
 

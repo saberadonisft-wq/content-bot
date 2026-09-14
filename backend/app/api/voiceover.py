@@ -27,14 +27,23 @@ from ..services.voiceover.packages import (
     export_package,
     import_package,
 )
+from ..services.voiceover.quiet_analysis import analyze_quiet_edges
 from ..services.voiceover.store import read_json, write_json
 
 
 def build_voiceover_router(
     manager: VoiceManager | Callable[[], VoiceManager],
+    *, sync_service_provider=None,
 ) -> APIRouter:
     manager_provider = manager if callable(manager) else lambda: manager
     router = APIRouter(prefix="/api/v1/voiceover", tags=["voiceover"])
+
+    def configure_sync(manager):
+        if sync_service_provider is not None:
+            from ..config import settings
+            from ..services.voiceover.sync_generation import finish_generation_sync
+            manager.sync_runner = lambda active_manager, owner_id, job, persist: finish_generation_sync(
+                active_manager, sync_service_provider(), owner_id, job, persist, settings=settings)
 
     def owner(user=Depends(get_current_user)):
         return str(user["sub"])
@@ -197,9 +206,12 @@ def build_voiceover_router(
     @router.post("/jobs")
     def start_job(request: StartJob, user=Depends(owner)):
         manager = manager_provider()
+        if request.subtitle_document is not None:
+            configure_sync(manager)
         return checked(
             lambda: manager.start(
-                user, request.project_id, request.device, request.clip_ids
+                user, request.project_id, request.device, request.clip_ids,
+                subtitle_document=request.subtitle_document.model_dump(mode='json') if request.subtitle_document else None,
             )
         )
 
@@ -213,7 +225,20 @@ def build_voiceover_router(
         manager = manager_provider()
         if action not in {"pause", "resume", "cancel"}:
             raise HTTPException(404)
+        if action == 'resume':
+            configure_sync(manager)
         return checked(lambda: manager.control(user, job_id, action))
+
+    @router.get("/assets/{asset_id}/quiet-analysis")
+    def quiet_analysis(asset_id: str, user=Depends(owner)):
+        store = manager_provider().store
+
+        def analyze():
+            meta = read_json(store.path(user, "assets", asset_id))
+            return analyze_quiet_edges(store.path(user, "assets", asset_id, ".wav"),
+                expected_checksum=meta["checksum"], cache_dir=store.owner_root(user) / "quiet-analysis")
+
+        return checked(analyze)
 
     @router.get("/assets/{asset_id}/peaks")
     def peaks(

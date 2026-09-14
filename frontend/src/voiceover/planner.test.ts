@@ -37,6 +37,17 @@ describe('voice planning', () => {
     expect(restored.clips[0].spoken_text).toBe('A lít tới.');
     expect(syncVoiceCues(restored, [cue('a', 2000, 4000, 'Alice tới đây.')])).toBe(restored);
   });
+  it('keeps legacy timing and wording when source subtitles change', () => {
+    const [planned] = planVoiceClips([cue('a', 1000, 2000, 'Bản cũ')]);
+    const legacy = { ...planned, offset_ms: 157, rate: 1.85, sync: undefined };
+    const doc: VoiceDocument = { schema_version: 1, project_id: 'a'.repeat(20), video_fingerprint: 'v', revision: 1,
+      clips: [legacy], profile: DEFAULT_PROFILE, pronunciation: {},
+      mix: { enabled: true, muted: false, gain: 1, original_gain: 1, mode: 'mix' } };
+    const result = syncVoiceCues(doc, [cue('a', 1500, 2500, 'Bản mới')]);
+    expect(result.clips[0]).toMatchObject({ start_ms: 1000, end_ms: 2000, offset_ms: 157,
+      rate: 1.85, spoken_text: 'Bản cũ', source_text: 'Bản mới' });
+    expect(doc.clips[0]).toEqual(legacy);
+  });
 });
 
 describe('repairing grouped narration', () => {

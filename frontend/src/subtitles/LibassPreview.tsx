@@ -39,17 +39,23 @@ export function LibassPreview({
   useEffect(() => {
     latestTrackRef.current = assContent;
     const renderer = rendererRef.current;
-    if (!renderer || !assContent) return;
+    if (!renderer) return;
+    let disposed = false;
+    onReadyChange(false);
     void renderer.ready
       .then(async () => {
-        await renderer.renderer.setTrack(assContent);
+        if (disposed || rendererRef.current !== renderer) return;
+        await renderer.renderer.setTrack(assContent ?? EMPTY_ASS_TRACK);
+        if (disposed || rendererRef.current !== renderer) return;
         await renderer.resize(true);
-        onReadyChange(true);
+        if (!disposed && rendererRef.current === renderer) onReadyChange(Boolean(assContent));
       })
       .catch((error: unknown) => {
+        if (disposed || rendererRef.current !== renderer) return;
         console.warn("Không thể cập nhật track libass preview", error);
         onReadyChange(false);
       });
+    return () => { disposed = true; };
   }, [assContent, onReadyChange]);
 
   useEffect(() => {
@@ -57,11 +63,12 @@ export function LibassPreview({
 
     let disposed = false;
     let renderer: JASSUB | null = null;
+    let canvas: HTMLCanvasElement | null = null;
 
     void import("jassub")
       .then(async ({ default: JASSUBRenderer }) => {
         if (disposed) return;
-        const canvas = document.createElement("canvas");
+        canvas = document.createElement("canvas");
         canvas.className = "JASSUB";
         canvas.style.position = "absolute";
         canvas.style.pointerEvents = "none";
@@ -85,13 +92,13 @@ export function LibassPreview({
         await renderer.ready;
         if (disposed) return;
         const latestTrack = latestTrackRef.current;
-        if (latestTrack) {
-          await renderer.renderer.setTrack(latestTrack);
-        }
+        await renderer.renderer.setTrack(latestTrack ?? EMPTY_ASS_TRACK);
+        if (disposed) return;
         await renderer.resize(true);
-        onReadyChange(true);
+        if (!disposed) onReadyChange(Boolean(latestTrackRef.current));
       })
       .catch((error: unknown) => {
+        if (disposed) return;
         console.warn("Không thể khởi tạo libass preview", error);
         onReadyChange(false);
       });
@@ -100,6 +107,8 @@ export function LibassPreview({
       disposed = true;
       onReadyChange(false);
       if (rendererRef.current === renderer) rendererRef.current = null;
+      // Remove old pixels immediately; destroying the worker is asynchronous.
+      canvas?.remove();
       if (renderer) void renderer.destroy().catch(() => undefined);
     };
   }, [enabled, host, onReadyChange, video]);

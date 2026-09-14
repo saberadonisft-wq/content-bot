@@ -1,3 +1,5 @@
+import { responseErrorMessage } from './errors';
+
 export const API_BASE =
   import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
 
@@ -28,14 +30,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    const detail = body.detail;
-    throw new Error(
-      typeof detail === "string"
-        ? detail
-        : typeof detail?.message === "string"
-          ? detail.message
-          : `Request failed (${response.status})`,
-    );
+    throw new Error(responseErrorMessage(body.detail, response.status));
   }
   return response.status === 204 ? (undefined as T) : response.json();
 }

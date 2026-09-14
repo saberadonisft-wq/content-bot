@@ -80,7 +80,7 @@ class Settings(BaseSettings):
         ),
     )
     content_bot_gemini_chunk_seconds: int = Field(
-        180,
+        120,
         validation_alias=AliasChoices(
             "CONTENT_BOT_GEMINI_CHUNK_SECONDS", "CONTENT_BOT_GEMINI_CLI_CHUNK_SECONDS"
         ),
@@ -91,6 +91,15 @@ class Settings(BaseSettings):
             "CONTENT_BOT_GEMINI_MAX_INPUT_MB", "CONTENT_BOT_GEMINI_CLI_MAX_INPUT_MB"
         ),
     )
+    # Accepted for existing .env files, but key count now controls generation concurrency.
+    content_bot_gemini_max_concurrent: int = Field(default=0, ge=0)
+    content_bot_gemini_group_concurrent: int = Field(default=0, ge=0)
+    content_bot_gemini_compression_concurrent: int = Field(default=2, ge=1, le=4)
+    content_bot_gemini_max_chunk_seconds: int = Field(default=600, ge=120, le=1800)
+    content_bot_gemini_min_pause_ms: int = Field(default=800, ge=100, le=10000)
+    content_bot_gemini_context_seconds: float = Field(default=2, ge=0, le=10)
+    content_bot_gemini_checkpoint_retention_days: int = Field(default=7, ge=1, le=365)
+    content_bot_gemini_checkpoint_max_mb: int = Field(default=2048, ge=64, le=65536)
     content_bot_gemini_max_retries: int = Field(
         5,
         validation_alias=AliasChoices(

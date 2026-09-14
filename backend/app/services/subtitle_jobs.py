@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-JobKind = Literal["alignment", "generation", "render"]
+JobKind = Literal["alignment", "generation", "render", "review"]
 JobState = Literal["queued", "running", "succeeded", "failed", "canceled"]
 JobRunner = Callable[["SubtitleJobContext"], dict[str, Any]]
 
@@ -49,6 +49,7 @@ class SubtitleJobRecord:
     finished_at: str | None = None
     error: str | None = None
     result: dict[str, Any] | None = None
+    details: dict[str, Any] = field(default_factory=dict)
 
     def snapshot(self) -> dict[str, Any]:
         return deepcopy(self.__dict__)
@@ -73,9 +74,14 @@ class SubtitleJobContext:
         if self.cancel_event.is_set():
             raise SubtitleJobCanceled("Job was canceled")
 
+    def update_details(self, details: dict[str, Any]) -> None:
+        self.raise_if_canceled()
+        self._manager._update_details(self.job_id, details)
+
 
 class SubtitleJobManager:
-    def __init__(self, job_dir: Path, *, max_workers: int = 1, max_pending: int = 32, max_cached: int = 128) -> None:
+    def __init__(self, job_dir: Path, *, max_workers: int = 1, max_pending: int = 32, max_cached: int = 128,
+                 recoverable_kinds: tuple[JobKind, ...] = ()) -> None:
         self.job_dir = job_dir
         self._lock = threading.RLock()
         self._records: dict[str, SubtitleJobRecord] = {}
@@ -86,6 +92,9 @@ class SubtitleJobManager:
         self._max_pending = max(1, max_pending)
         self._max_cached = max(0, max_cached)
         self._accepting = True
+        self._recoverable_kinds = recoverable_kinds
+        self._suspending: set[str] = set()
+        self._recovery_queue: dict[str, tuple[SubtitleJobRecord, JobRunner]] = {}
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, max_workers),
             thread_name_prefix="subtitle-job",
@@ -175,7 +184,57 @@ class SubtitleJobManager:
             self._futures.pop(job_id, None)
             self._cancel_events.pop(job_id, None)
             self._last_persist_at.pop(job_id, None)
+            self._suspending.discard(job_id)
+            self._drain_recovery()
             self._trim_records()
+
+    def recover_interrupted(self, runner_factory: Callable[[dict[str, Any]], JobRunner]) -> None:
+        """Restore the latest attempt per input, keeping its ID and checkpoint binding.
+
+        Factories only construct runners; validation and media I/O run in workers.
+        Older interrupted attempts superseded by a retry must never run again.
+        """
+        with self._lock:
+            if not self._accepting:
+                return
+            latest: dict[tuple[JobKind, str], SubtitleJobRecord] = {}
+            for path in self.job_dir.glob("*.json"):
+                record = self._read_record(path.stem)
+                if not record or record.kind not in self._recoverable_kinds:
+                    continue
+                key = (record.kind, record.dedupe_key)
+                if key not in latest or record.created_at > latest[key].created_at:
+                    latest[key] = record
+            for record in sorted(latest.values(), key=lambda item: item.created_at):
+                if record.phase != "interrupted" or record.cancel_requested:
+                    continue
+                if record.id in self._futures or record.id in self._recovery_queue:
+                    continue
+                runner = runner_factory(record.snapshot())
+                record.state = "queued"
+                record.phase = "resuming"
+                record.message = "Đang tự tiếp tục các đoạn còn thiếu sau khi API khởi động lại"
+                record.error = None
+                record.finished_at = None
+                record.updated_at = _now_iso()
+                self._records[record.id] = record
+                self._dedupe[(record.kind, record.dedupe_key)] = record.id
+                self._write_record(record)
+                self._recovery_queue[record.id] = (record, runner)
+            self._drain_recovery()
+
+    def _drain_recovery(self) -> None:
+        while self._accepting and self._recovery_queue and len(self._futures) < self._max_pending:
+            job_id = next(iter(self._recovery_queue))
+            record, runner = self._recovery_queue.pop(job_id)
+            if record.cancel_requested:
+                self._finish_canceled(record)
+                continue
+            cancel_event = threading.Event()
+            self._cancel_events[job_id] = cancel_event
+            future = self._executor.submit(self._execute, job_id, runner, cancel_event)
+            self._futures[job_id] = future
+            future.add_done_callback(lambda finished, identifier=job_id: self._retire(identifier, finished))
 
     def _write_record(self, record: SubtitleJobRecord) -> None:
         self.job_dir.mkdir(parents=True, exist_ok=True)
@@ -253,6 +312,9 @@ class SubtitleJobManager:
         except Exception as exc:
             with self._lock:
                 record = self._records[job_id]
+                if job_id in self._suspending and not record.cancel_requested:
+                    self._finish_canceled(record)
+                    return
                 record.state = "failed"
                 record.phase = "failed"
                 record.message = "Xử lý thất bại"
@@ -276,6 +338,16 @@ class SubtitleJobManager:
             self._write_dedupe(record)
 
     def _finish_canceled(self, record: SubtitleJobRecord) -> None:
+        if record.id in self._suspending and not record.cancel_requested:
+            record.state = "queued"
+            record.phase = "interrupted"
+            record.message = "Sẽ tự tiếp tục các đoạn còn thiếu khi API khởi động lại"
+            record.error = None
+            record.finished_at = None
+            record.updated_at = _now_iso()
+            self._write_record(record)
+            self._dedupe.pop((record.kind, record.dedupe_key), None)
+            return
         record.state = "canceled"
         record.phase = "canceled"
         record.message = "Đã hủy"
@@ -304,6 +376,12 @@ class SubtitleJobManager:
             if time.monotonic() - last_persist >= 0.2:
                 self._write_record(record)
 
+    def _update_details(self, job_id: str, details: dict[str, Any]) -> None:
+        with self._lock:
+            record = self._records[job_id]
+            if record.state == "running" and not record.cancel_requested:
+                record.details = deepcopy(details)
+
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             record = self._records.get(job_id) or self._read_record(job_id)
@@ -323,6 +401,10 @@ class SubtitleJobManager:
             if cancel_event:
                 cancel_event.set()
             future = self._futures.get(job_id)
+            if job_id in self._recovery_queue:
+                self._recovery_queue.pop(job_id)
+                self._finish_canceled(record)
+                return record.snapshot()
             if record.state == "queued" and future and future.cancel():
                 return record.snapshot()  # The done callback persists cancellation.
             else:
@@ -338,9 +420,15 @@ class SubtitleJobManager:
             self._accepting = False
             for job_id, record in list(self._records.items()):
                 if record.state in {"queued", "running"}:
+                    if record.kind in self._recoverable_kinds and not record.cancel_requested:
+                        self._suspending.add(job_id)
+                        # Persist before signaling workers, including a forced exit
+                        # while an external API request is still winding down.
+                        self._finish_canceled(record)
                     cancel_event = self._cancel_events.get(job_id)
                     if cancel_event:
                         cancel_event.set()
+            self._recovery_queue.clear()
             futures = list(self._futures.values())
             for future in futures:
                 future.cancel()

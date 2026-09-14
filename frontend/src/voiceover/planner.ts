@@ -1,6 +1,7 @@
 import type { SubtitleCueV2 } from '../subtitles/types';
 import type { VoiceClip, VoiceDocument } from './types';
-import { voiceClipEnd, voiceClipStart } from './types';
+import { currentAlignment, voiceClipEnd, voiceClipStart } from './types';
+import { AUTO_RATE_LIMIT, automaticSync, refreshTiming, windowIssues } from './timing';
 
 export function voiceClipsInRange(clips: readonly VoiceClip[], startMs: number, endMs: number): string[] {
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs < 0 || endMs <= startMs) return [];
@@ -15,7 +16,7 @@ export function planVoiceClips(cues: readonly SubtitleCueV2[]): VoiceClip[] {
     return { id: `v-${crypto.randomUUID()}`, source_cue_ids: [cue.id], source_text: text,
       spoken_text: text, start_ms: cue.start_ms, end_ms: cue.end_ms,
       offset_ms: 0, rate: 1.08, gain: 1, asset_id: null, generation_hash: null, duration_ms: 0,
-      status: 'missing', error: null };
+      status: 'missing', error: null, sync: automaticSync() };
   });
 }
 
@@ -49,6 +50,11 @@ export function syncVoiceCues(doc: VoiceDocument, cues: readonly SubtitleCueV2[]
   const clips = doc.clips.map(clip => {
     if (!clip.source_cue_ids.length) return clip;
     const source = clip.source_cue_ids.map(id => index.get(id));
+    if (clip.sync?.alignment && (source.length !== 1 || !source[0]
+        || clip.sync.alignment.source_signature !== sourceSignature(source[0]))) {
+      clip = { ...clip, sync: { ...clip.sync, alignment: null } };
+      changed = true;
+    }
     if (source.some(c => !c)) {
       if (clip.error === 'Phụ đề liên kết đã bị xóa hoặc tách. Cần duyệt lại đoạn giọng.') return clip;
       changed = true;
@@ -56,45 +62,51 @@ export function syncVoiceCues(doc: VoiceDocument, cues: readonly SubtitleCueV2[]
     }
     const rows = source as SubtitleCueV2[];
     const text = rows.map(c => c.text.trim()).join(' ');
-    const start = Math.min(...rows.map(c => c.start_ms));
-    const end = Math.max(...rows.map(c => c.end_ms));
+    const locked = !clip.sync || clip.sync.timing_locked;
+    const start = locked ? clip.start_ms : Math.min(...rows.map(c => c.start_ms));
+    const end = locked ? clip.end_ms : Math.max(...rows.map(c => c.end_ms));
     const restored = clip.error === 'Phụ đề liên kết đã bị xóa hoặc tách. Cần duyệt lại đoạn giọng.';
     if (text === clip.source_text && start === clip.start_ms && end === clip.end_ms && !restored) return clip;
     changed = true;
-    const spoken = clip.spoken_text === clip.source_text ? text : clip.spoken_text;
+    const spoken = clip.sync && !clip.sync.text_locked && clip.spoken_text === clip.source_text ? text : clip.spoken_text;
     return { ...clip, source_text: text, spoken_text: spoken, start_ms: start, end_ms: end,
       error: restored ? null : clip.error,
       offset_ms: Math.max(-start, clip.offset_ms),
       status: spoken !== clip.spoken_text && clip.asset_id ? 'stale' as const : clip.status };
   });
-  return changed ? { ...doc, clips } : doc;
+  return changed ? { ...doc, clips: refreshTiming(clips) } : doc;
+}
+
+export function sourceSignature(cue: SubtitleCueV2): string {
+  return JSON.stringify([cue.id, cue.start_ms, cue.end_ms, cue.text, cue.source_text ?? null,
+    cue.secondary_text ?? null, cue.source_language ?? null, cue.revision ?? null]);
 }
 
 export function calculateFitRate(clip: VoiceClip): number {
-  const windowMs = clip.end_ms - clip.start_ms;
+  if (currentAlignment(clip)) return clip.rate;
+  const windowMs = clip.end_ms - voiceClipStart(clip);
   if (!clip.duration_ms || windowMs <= 0) return clip.rate;
   const needed = clip.duration_ms / windowMs;
   const rate = Math.ceil(needed * 100) / 100;
-  return Math.max(0.5, Math.min(2.0, rate));
+  return Math.max(clip.rate, Math.min(AUTO_RATE_LIMIT, rate));
 }
 
 export function autoFitVoiceClips(clips: readonly VoiceClip[]): VoiceClip[] {
-  return clips.map(clip => {
-    if (!clip.duration_ms) return clip;
-    const windowMs = clip.end_ms - clip.start_ms;
-    if (windowMs <= 0) return clip;
-    if (clip.status === 'overflow' || (clip.duration_ms / clip.rate > windowMs + 2)) {
+  return refreshTiming(clips.map(clip => {
+    if (!clip.duration_ms || !clip.sync || clip.sync.timing_locked || clip.sync.timing_origin !== 'automatic'
+      || clip.status === 'stale' || clip.rate > AUTO_RATE_LIMIT) return clip;
+    const windowMs = clip.end_ms - voiceClipStart(clip);
+    if (windowMs <= 0 || voiceClipStart(clip) < clip.start_ms - 2) return clip;
+    if (windowIssues(clip).includes('ends_late')) {
       const fitRate = calculateFitRate(clip);
-      const isFit = (clip.duration_ms / fitRate) <= windowMs + 2;
       return {
         ...clip,
         rate: fitRate,
-        offset_ms: 0,
-        status: isFit && clip.status === 'overflow' ? 'ready' : clip.status,
+        sync: { ...clip.sync },
       };
     }
     return clip;
-  });
+  }));
 }
 
 export function rippleShiftVoiceClips(clips: readonly VoiceClip[], gapMs = 60): VoiceClip[] {
@@ -115,11 +127,9 @@ export function rippleShiftVoiceClips(clips: readonly VoiceClip[], gapMs = 60): 
   });
 }
 
-export function smartResolveVoiceOverlaps(clips: readonly VoiceClip[], gapMs = 60): VoiceClip[] {
-  // First auto-fit any overflowing clips to their cue windows
-  const fitted = autoFitVoiceClips(clips);
-  // Then ensure chronological spacing without collisions
-  return rippleShiftVoiceClips(fitted, gapMs);
+export function smartResolveVoiceOverlaps(clips: readonly VoiceClip[]): VoiceClip[] {
+  // Source-synchronous fitting never moves the next utterance.
+  return autoFitVoiceClips(clips);
 }
 
 export function resetVoiceOffsets(clips: readonly VoiceClip[]): VoiceClip[] {
@@ -130,18 +140,15 @@ export function countVoiceOverlaps(clips: readonly VoiceClip[]): { overflowCount
   let overflowCount = 0;
   let overlapCount = 0;
   const sorted = [...clips].sort((a, b) => voiceClipStart(a) - voiceClipStart(b));
+  let maximumEnd = -Infinity;
   for (let i = 0; i < sorted.length; i++) {
     const clip = sorted[i];
-    if (clip.status === 'overflow' || (clip.duration_ms > 0 && (clip.duration_ms / clip.rate > (clip.end_ms - clip.start_ms) + 2))) {
+    if (windowIssues(clip).length) {
       overflowCount++;
     }
-    if (i > 0) {
-      const prev = sorted[i - 1];
-      const prevEnd = voiceClipEnd(prev);
-      const currStart = voiceClipStart(clip);
-      if (currStart < prevEnd - 2) {
-        overlapCount++;
-      }
+    if (clip.asset_id && clip.duration_ms && clip.status !== 'stale') {
+      if (voiceClipStart(clip) < maximumEnd - 2) overlapCount++;
+      maximumEnd = Math.max(maximumEnd, voiceClipEnd(clip));
     }
   }
   return { overflowCount, overlapCount };

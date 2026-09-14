@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {"id":"offset-overflow","start_ms":84500,"end_ms":85800,"duration_ms":2400,"rate":1.85,"offset_ms":157,"expected_end":85954.2972972973,"issues":["ends_late"]},
+    {"id":"early","start_ms":1000,"end_ms":3000,"duration_ms":500,"rate":1,"offset_ms":-100,"expected_end":1400,"issues":["starts_early"]},
+    {"id":"late-short","start_ms":1000,"end_ms":2000,"duration_ms":400,"rate":1,"offset_ms":800,"expected_end":2200,"issues":["ends_late"]},
+    {"id":"inside","start_ms":1000,"end_ms":2000,"duration_ms":400,"rate":1,"offset_ms":100,"expected_end":1500,"issues":[]},
+    {"id":"boundary","start_ms":1000,"end_ms":2000,"duration_ms":1000,"rate":1,"offset_ms":2,"expected_end":2002,"issues":[]},
+    {"id":"short-natural","start_ms":0,"end_ms":1500,"duration_ms":400,"rate":1,"offset_ms":0,"expected_end":400,"issues":[]}
+  ],
+  "nested": [
+    {"id":"long","start_ms":0,"end_ms":5000,"duration_ms":5000},
+    {"id":"short","start_ms":1000,"end_ms":1200,"duration_ms":200},
+    {"id":"later","start_ms":2000,"end_ms":2300,"duration_ms":300}
+  ],
+  "nested_overlap_intervals": 2
+}

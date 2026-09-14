@@ -47,7 +47,7 @@ def test_preview_ass_uses_percentage_anchor_and_output_aspect(
                 }
             ],
         },
-        options={"font_size": 14, "pos_x": 25, "pos_y": 75},
+        options={"font_size": 14, "pos_x": 25, "pos_y": 75, "spacing": 1.5},
     )
 
     response = subtitles_api.preview_subtitle_timeline_v2_endpoint(request)
@@ -57,6 +57,8 @@ def test_preview_ass_uses_percentage_anchor_and_output_aspect(
     assert "PlayResX: 1280" in response.ass
     assert "PlayResY: 720" in response.ass
     assert "Style: Default,Arimo,21.0" in response.ass
+    style = next(line for line in response.ass.splitlines() if line.startswith('Style: Default,'))
+    assert float(style.split(',')[13]) == 1.5
     assert r"\pos(320,540)" in response.ass
 
 
@@ -111,6 +113,7 @@ def test_render_endpoint_submits_progress_and_attachable_result(
 
     def fake_render(*_args, **kwargs):
         received.update(kwargs)
+        received['options'] = _args[3]
         kwargs["progress"](65, "encoding", "Đang mã hóa video")
         return {
             "video_id": "a" * 12,
@@ -142,7 +145,7 @@ def test_render_endpoint_submits_progress_and_attachable_result(
                 }
             ],
         },
-        options={"encoder": "software"},
+        options={"encoder": "software", "spacing": 1.5},
         overlay={
             "overlay_id": "b" * 64,
             "x": 14,
@@ -190,6 +193,7 @@ def test_render_endpoint_submits_progress_and_attachable_result(
     assert attached.result is not None
     assert attached.result["duration_ms"] == 5000
     assert received["overlay_path"] == overlay_path
+    assert received['options']['spacing'] == 1.5
     assert received["overlay"] == {
         "overlay_id": "b" * 64,
         "x": 14.0,

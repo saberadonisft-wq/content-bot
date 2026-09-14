@@ -5,6 +5,7 @@ export class PlaybackIndex {
   readonly clips: readonly VoiceClip[];
   private readonly starts: number[];
   private readonly maximumEnds: number[];
+  private readonly conflicts: { start: number; end: number }[] = [];
 
   constructor(clips: readonly VoiceClip[]) {
     this.clips = clips.filter(clip => clip.asset_id && clip.status !== 'stale')
@@ -12,6 +13,16 @@ export class PlaybackIndex {
     this.starts = this.clips.map(voiceClipStart);
     let maximum = -Infinity;
     this.maximumEnds = this.clips.map(clip => (maximum = Math.max(maximum, voiceClipEnd(clip))));
+    let group: { start: number; end: number; count: number } | null = null;
+    for (const clip of this.clips) {
+      const start = voiceClipStart(clip), end = voiceClipEnd(clip);
+      if (group && start < group.end - 2) { group.end = Math.max(group.end, end); group.count++; }
+      else {
+        if (group && group.count > 1) this.conflicts.push(group);
+        group = { start, end, count: 1 };
+      }
+    }
+    if (group && group.count > 1) this.conflicts.push(group);
   }
 
   nextIndex(ms: number): number {
@@ -25,10 +36,21 @@ export class PlaybackIndex {
   }
 
   active(ms: number, nextIndex = this.nextIndex(ms)): VoiceClip | null {
-    // Preserve the existing preview policy: latest started clip wins; an earlier
-    // overlapping clip is not resumed when that latest clip ends.
+    // Block the whole conflicting region rather than silently truncating speech.
+    if (this.conflictAt(ms)) return null;
     const candidate = this.clips[nextIndex - 1];
     return candidate && ms < voiceClipEnd(candidate) ? candidate : null;
+  }
+
+  conflictAt(ms: number): { start: number; end: number } | null {
+    let lo = 0, hi = this.conflicts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.conflicts[mid].start <= ms) lo = mid + 1;
+      else hi = mid;
+    }
+    const region = this.conflicts[lo - 1];
+    return region && ms < region.end ? region : null;
   }
 
   windowAssets(ms: number, nextIndex = this.nextIndex(ms), maximum = 24): string[] {

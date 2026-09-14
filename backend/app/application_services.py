@@ -18,7 +18,7 @@ from .mongo import create_store
 from .services.channel_scans import CHANNEL_SCANNERS
 from .services.connectors import SourceConnector, default_connectors
 from .services.crawler_login import CrawlerLoginManager
-from .services.credential_resolver import credential
+from .services.credential_resolver import credential, gemini_credentials
 from .services.gemini_subtitles import GeminiSubtitleService, GeminiSubtitleSettings
 from .services.http_pool import close_http_pools
 from .services.live_wall import LiveWallManager
@@ -26,6 +26,7 @@ from .services.runs import EventBus, RunManager, utcnow
 from .services.subtitle_jobs import SubtitleJobManager
 from .services.tiktok_oauth import TikTokOAuthService
 from .services.video_thumbnails import VideoThumbnails
+from .services.video_downloads import VideoDownloadManager
 from .services.voiceover.manager import VoiceManager
 from .services.voiceover.store import VoiceStore
 from .storage_protocol import PersistenceStore
@@ -47,6 +48,7 @@ class AppServices:
     gemini_subtitle_service: GeminiSubtitleService
     voiceover_manager: VoiceManager
     video_thumbnails: VideoThumbnails
+    video_downloads: VideoDownloadManager
     scheduler_task: asyncio.Task | None = field(default=None, init=False)
     _closed: bool = field(default=False, init=False)
 
@@ -82,7 +84,8 @@ class AppServices:
                 max_workers=settings.content_bot_subtitle_job_concurrency,
             ),
             gemini_subtitle_jobs=SubtitleJobManager(
-                settings.data_dir / "gemini-subtitle-jobs", max_workers=1
+                settings.data_dir / "gemini-subtitle-jobs", max_workers=1,
+                recoverable_kinds=("generation",),
             ),
             gemini_subtitle_service=GeminiSubtitleService(
                 GeminiSubtitleSettings(
@@ -93,19 +96,34 @@ class AppServices:
                     max_input_mb=settings.content_bot_gemini_max_input_mb,
                     max_retries=settings.content_bot_gemini_max_retries,
                     retry_base_seconds=settings.content_bot_gemini_retry_base_seconds,
+                    max_concurrent=settings.content_bot_gemini_max_concurrent,
+                    group_concurrent=settings.content_bot_gemini_group_concurrent,
+                    compression_concurrent=settings.content_bot_gemini_compression_concurrent,
+                    max_chunk_seconds=settings.content_bot_gemini_max_chunk_seconds,
+                    min_pause_ms=settings.content_bot_gemini_min_pause_ms,
+                    context_seconds=settings.content_bot_gemini_context_seconds,
+                    checkpoint_retention_days=settings.content_bot_gemini_checkpoint_retention_days,
+                    checkpoint_max_mb=settings.content_bot_gemini_checkpoint_max_mb,
                 ),
                 api_key_provider=lambda: credential("gemini_api_key"),
+                keyring_provider=gemini_credentials,
             ),
             voiceover_manager=VoiceManager(VoiceStore(settings.data_dir / "voiceover")),
             video_thumbnails=VideoThumbnails(
                 timeout_seconds=settings.content_bot_thumbnail_timeout_seconds
             ),
+            video_downloads=VideoDownloadManager(settings.data_dir / "videos"),
         )
 
     async def start(self, *, scheduler: bool = True) -> None:
         self.run_manager.store = self.store
         settings.data_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self.video_downloads.start)
         await asyncio.to_thread(self.store.initialize)
+        # Import after application construction: the API and startup share the
+        # same persisted generation recipe and checkpoint validation.
+        from .api.subtitles import recover_gemini_generation_jobs
+        await asyncio.to_thread(recover_gemini_generation_jobs, self)
         if not self.store.is_available:
             logger.warning(
                 "%s storage is unavailable; scheduler is disabled",
@@ -152,6 +170,7 @@ class AppServices:
             self.subtitle_jobs,
             self.gemini_subtitle_jobs,
             self.voiceover_manager,
+            self.video_downloads,
         ):
             try:
                 manager.stop_accepting()
@@ -190,6 +209,7 @@ class AppServices:
                 )
             ),
             close(asyncio.to_thread(self.video_thumbnails.shutdown)),
+            close(asyncio.to_thread(self.video_downloads.shutdown, timeout_seconds=timeout_seconds)),
             close(asyncio.wait_for(self.live_wall_manager.shutdown(), timeout_seconds)),
             close(
                 asyncio.wait_for(self.crawler_login_manager.shutdown(), timeout_seconds)

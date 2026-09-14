@@ -405,6 +405,24 @@ def asset(store, doc):
     return meta
 
 
+def test_offset_overflow_is_detected_on_attach_save_and_export(tmp_path):
+    store = VoiceStore(tmp_path)
+    doc = document()
+    doc.clips[0].end_ms = 1500
+    doc.clips[0].offset_ms = 100
+    doc = store.save_document('user', doc)
+    store.attach('user', doc.project_id, 'one', asset(store, doc))
+    doc = store.get_document('user', doc.project_id)
+    assert doc.clips[0].status == 'overflow'
+    assert 'ends_late' in doc.clips[0].sync.issues
+    assert doc.clips[0].offset_ms == 100 and doc.clips[0].rate == 1
+    doc.clips[0].status = 'ready'
+    doc = store.save_document('user', doc)
+    assert doc.clips[0].status == 'overflow'
+    with pytest.raises(ValueError, match='độ dịch'):
+        verify_document(store, 'user', doc, 3000)
+
+
 def test_late_generation_does_not_overwrite_edited_text(tmp_path):
     store = VoiceStore(tmp_path)
     doc = store.save_document("user", document())

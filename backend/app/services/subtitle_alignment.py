@@ -11,10 +11,11 @@ import sys
 import threading
 import time
 import unicodedata
+import uuid
 from array import array
 from collections.abc import Callable, Iterable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from itertools import pairwise
 from pathlib import Path
@@ -22,8 +23,12 @@ from typing import Any, Literal
 
 import imageio_ffmpeg
 
-ALIGNMENT_CACHE_VERSION = 1
-ALIGNMENT_ALGORITHM_VERSION = "2026-08-alignment-10ms-v2"
+from .speech_evidence import SpeechEvidence, audio_identity, transcript_hash
+
+ALIGNMENT_CACHE_VERSION = 4
+ALIGNMENT_ALGORITHM_VERSION = "2026-09-source-evidence-v7"
+# Recognition is independent of the rules that match a cue to observed words.
+ASR_OBSERVATION_VERSION = "2026-09-source-evidence-v6"
 PCM_SAMPLE_RATE = 16_000
 ENERGY_FRAME_MS = 10
 ALIGNMENT_PRECISION_MS = 10
@@ -78,6 +83,9 @@ class AlignmentSettings:
     whisper_model_dir: Path | None = None
     whisper_allow_download: bool = False
     cpu_threads: int = 4
+    source_language: str | None = None
+    max_shift_ms: int = 1000
+    preserve_display: bool = False
 
 
 def _quantize_alignment_ms(value: float) -> int:
@@ -123,24 +131,16 @@ def _canonical_cache_payload(
     settings: AlignmentSettings,
     cue_ids: set[str] | None,
 ) -> dict[str, Any]:
-    segments = []
-    for cue in document.get("segments", []):
-        segments.append(
-            {
-                "id": cue.get("id"),
-                "start_ms": cue.get("start_ms"),
-                "end_ms": cue.get("end_ms"),
-                "text": cue.get("text"),
-                "timing_source": cue.get("timing_source"),
-                "revision": cue.get("revision", 0),
-            }
-        )
+    segments = deepcopy(document.get("segments", []))
     return {
         "version": ALIGNMENT_ALGORITHM_VERSION,
         "audio_hash": media.get("audio_hash") or media.get("fingerprint"),
         "duration_ms": media.get("duration_ms"),
         "segments": segments,
-        "cue_ids": sorted(cue_ids) if cue_ids else None,
+        "cue_ids": sorted(cue_ids) if cue_ids is not None else None,
+        "document_revision": document.get("revision", 0),
+        "run_id": document.get("run_id"),
+        "document_language": document.get("language"),
         "settings": {
             "engine": settings.engine,
             "lead_in_ms": settings.lead_in_ms,
@@ -151,6 +151,9 @@ def _canonical_cache_payload(
             "whisper_model": settings.whisper_model,
             "whisper_device": settings.whisper_device,
             "whisper_compute_type": settings.whisper_compute_type,
+            "source_language": settings.source_language,
+            "max_shift_ms": settings.max_shift_ms,
+            "preserve_display": settings.preserve_display,
         },
     }
 
@@ -175,10 +178,14 @@ def _normalized_word(value: str) -> str:
     return "".join(character for character in normalized if character.isalnum())
 
 
+def alignment_transcript(cue: dict[str, Any]) -> str:
+    return str(cue.get("source_text") or cue.get("secondary_text") or cue.get("text") or "")
+
+
 def transcript_tokens(cue: dict[str, Any]) -> list[TranscriptToken]:
     cue_id = str(cue["id"])
     tokens: list[TranscriptToken] = []
-    for index, match in enumerate(_TOKEN_RE.finditer(str(cue.get("text", "")))):
+    for index, match in enumerate(_TOKEN_RE.finditer(alignment_transcript(cue))):
         text = match.group(0)
         normalized = _normalized_word(text)
         if normalized:
@@ -300,10 +307,12 @@ def _extract_pcm_window(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-copyts", "-start_at_zero",
         "-ss",
         f"{window.start_ms / 1000:.3f}",
         "-i",
         str(video_path.resolve()),
+        "-af", f"asetpts=PTS-{window.start_ms / 1000:.3f}/TB,aresample=async=1:first_pts=0",
         "-t",
         f"{max(1, window.end_ms - window.start_ms) / 1000:.3f}",
         "-vn",
@@ -462,6 +471,7 @@ def _words_for_range(
                 "start_ms": start,
                 "end_ms": end,
                 "confidence": round(confidence, 4),
+                "alignment_method": "energy_estimated",
             }
         )
         previous_end = end
@@ -548,6 +558,7 @@ def _align_energy_window(
                 "start_ms": speech_start,
                 "end_ms": speech_end,
                 "timing_source": "forced_alignment",
+                "alignment_method": "energy_estimated",
                 "timing_precision_ms": ALIGNMENT_PRECISION_MS,
                 "confidence": round(confidence, 4),
                 "needs_review": confidence < 0.6,
@@ -581,13 +592,15 @@ def _transcribe_pcm(
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     segments, _ = model.transcribe(
         audio,
-        language="vi",
+        language=settings.source_language,
         task="transcribe",
         beam_size=1,
         word_timestamps=True,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 160, "speech_pad_ms": 80},
-        initial_prompt=cue_text[:2000],
+        # Treat the source transcript as a hypothesis to compare after recognition.
+        # Supplying it as previous dialogue can bias ASR or make it skip that line.
+        initial_prompt=None,
         condition_on_previous_text=False,
         temperature=0,
     )
@@ -613,19 +626,41 @@ def _transcribe_pcm(
     return observed
 
 
+def _resolve_whisper_model_path(settings: AlignmentSettings) -> str:
+    from faster_whisper.utils import download_model
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    download_root = str(settings.whisper_model_dir) if settings.whisper_model_dir else None
+    model = settings.whisper_model
+    if not settings.whisper_allow_download and not Path(model).is_dir():
+        try:
+            model = download_model(model, cache_dir=download_root, local_files_only=True)
+        except LocalEntryNotFoundError:
+            if download_root is None:
+                raise
+            # Reuse a model already installed in the user's shared cache; no copy/download.
+            model = download_model(model, local_files_only=True)
+    return model
+
+
+def _whisper_model_signature(path: str) -> dict:
+    folder = Path(path)
+    files = [folder / name for name in ('model.bin', 'config.json', 'tokenizer.json', 'preprocessor_config.json')]
+    files.extend(folder.glob('vocabulary.*'))
+    return {'path': str(folder.resolve()), 'files': [
+        (item.name, item.stat().st_size, item.stat().st_mtime_ns) for item in files if item.is_file()]}
+
+
 def _load_whisper_model(settings: AlignmentSettings) -> Any:
     from faster_whisper import WhisperModel
 
-    download_root = str(settings.whisper_model_dir) if settings.whisper_model_dir else None
-    if settings.whisper_model_dir:
-        settings.whisper_model_dir.mkdir(parents=True, exist_ok=True)
     return WhisperModel(
-        settings.whisper_model,
+        _resolve_whisper_model_path(settings),
         device=settings.whisper_device,
         compute_type=settings.whisper_compute_type,
         cpu_threads=max(1, settings.cpu_threads),
         num_workers=1,
-        download_root=download_root,
+        download_root=str(settings.whisper_model_dir) if settings.whisper_model_dir else None,
         local_files_only=not settings.whisper_allow_download,
     )
 
@@ -677,16 +712,82 @@ def _interpolated_word_timings(
                 "start_ms": start,
                 "end_ms": end,
                 "confidence": round(max(0.0, min(1.0, confidences[index])), 4),
+                "alignment_method": "asr_observed" if index in matched else "interpolated",
             }
         )
         previous_end = end
     return words
 
 
+def _align_cjk_source_spans(cues: list[dict[str, Any]], observed: list[ObservedWord]):
+    """Use character correspondence to locate original ASR word spans, without
+    inventing sub-word timestamps for languages without whitespace segmentation.
+    """
+    expected = []
+    for cue in cues:
+        for index, char in enumerate(_normalized_word(alignment_transcript(cue))):
+            expected.append(TranscriptToken(cue["id"], index, char, char))
+    expanded, original_indexes = [], []
+    for index, word in enumerate(observed):
+        for char in _normalized_word(word.text):
+            expanded.append(ObservedWord(char, word.start_ms, word.end_ms, word.confidence))
+            original_indexes.append(index)
+    if len(expected) * len(expanded) > 1_000_000:
+        return {c["id"]: {**c, "needs_review": True} for c in cues}, [{"code": "alignment_window_too_complex", "message": "Vùng căn chứa quá nhiều ký tự; giữ timing để kiểm tra theo phạm vi nhỏ hơn."}]
+    mapping = match_transcript_words(expected, expanded)
+    owners: dict[int, set[str]] = {}
+    word_units: dict[int, set[int]] = {}
+    for index, original_index in enumerate(original_indexes):
+        word_units.setdefault(original_index, set()).add(index)
+    for index, (matched, _) in mapping.items():
+        owners.setdefault(original_indexes[matched], set()).add(expected[index].cue_id)
+    aligned, warnings = {}, []
+    for cue in cues:
+        indexes = [index for index, token in enumerate(expected) if token.cue_id == cue["id"]]
+        matched = [mapping[index][0] for index in indexes if index in mapping]
+        enough = bool(indexes) and len(matched) == len(indexes)
+        shared = any(len(owners[original_indexes[index]]) > 1 for index in matched)
+        contiguous = bool(matched) and matched == list(range(matched[0], matched[-1] + 1))
+        complete_words = bool(matched) and all(word_units[original_indexes[index]] <= set(matched)
+                                             for index in matched)
+        phrase = ''.join(expected[index].normalized for index in indexes)
+        observed_text = ''.join(word.text for word in expanded)
+        occurrences = []
+        cursor = observed_text.find(phrase) if phrase else -1
+        while cursor >= 0:
+            final = cursor + len(phrase) - 1
+            if (cursor == min(word_units[original_indexes[cursor]])
+                    and final == max(word_units[original_indexes[final]])):
+                occurrences.append(cursor)
+            cursor = observed_text.find(phrase, cursor + 1)
+        ambiguous = len(occurrences) > 1
+        confidence = min((expanded[index].confidence for index in matched), default=0)
+        if not enough or shared or not contiguous or not complete_words or ambiguous or confidence < 0.65:
+            aligned[cue["id"]] = {**cue, "needs_review": True}
+            warnings.append({"code": "source_alignment_uncertain", "cue_id": cue["id"],
+                             "message": "ASR chưa khớp đầy đủ lời gốc hoặc dùng chung biên từ giữa các cue; giữ timing cũ.",
+                             "diagnostics": {"matched_units": len(matched), "expected_units": len(indexes),
+                                 "minimum_confidence": confidence, "shared_word_boundary": shared,
+                                 "contiguous_match": contiguous, "complete_word_boundaries": complete_words,
+                                 "ambiguous_occurrence": ambiguous,
+                                 "observed_text": "".join(word.text for word in observed)}})
+            continue
+        start = min(expanded[index].start_ms for index in matched)
+        end = max(expanded[index].end_ms for index in matched)
+        aligned[cue["id"]] = {**cue, "start_ms": start, "end_ms": end,
+                              "speech_start_ms": start, "speech_end_ms": end, "words": None,
+                              "timing_source": "forced_alignment", "timing_precision_ms": ALIGNMENT_PRECISION_MS,
+                              "alignment_method": "asr_observed",
+                              "confidence": confidence, "needs_review": False}
+    return aligned, warnings
+
+
 def _align_whisper_window(
     cues: list[dict[str, Any]],
     observed: list[ObservedWord],
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    if any(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", alignment_transcript(cue)) for cue in cues):
+        return _align_cjk_source_spans(cues, observed)
     expected = [token for cue in cues for token in transcript_tokens(cue)]
     mapping = match_transcript_words(expected, observed)
     by_cue: dict[str, list[tuple[int, TranscriptToken]]] = {}
@@ -705,7 +806,7 @@ def _align_whisper_window(
                 observed_index, similarity = mapping[global_index]
                 local_matches[local_index] = (observed[observed_index], similarity)
         match_ratio = len(local_matches) / max(1, len(local_tokens))
-        if not local_matches:
+        if not local_tokens or len(local_matches) != len(local_tokens):
             unchanged = deepcopy(cue)
             unchanged["needs_review"] = True
             unchanged["confidence"] = min(float(cue.get("confidence") or 1), 0.1)
@@ -714,7 +815,7 @@ def _align_whisper_window(
                 {
                     "code": "transcript_not_matched",
                     "cue_id": cue_id,
-                    "message": "ASR không ghép được từ nào với transcript; giữ timing cũ.",
+                    "message": "ASR chưa ghép đầy đủ lời gốc; giữ timing cũ.",
                 }
             )
             continue
@@ -733,6 +834,7 @@ def _align_whisper_window(
                 "start_ms": speech_start,
                 "end_ms": speech_end,
                 "words": words,
+                "alignment_method": "asr_observed",
                 "timing_source": "forced_alignment",
                 "timing_precision_ms": ALIGNMENT_PRECISION_MS,
                 "confidence": round(confidence, 4),
@@ -775,8 +877,8 @@ def apply_display_padding(
     for left, right in pairwise(ordered):
         if left["end_ms"] <= right["start_ms"]:
             continue
-        left_speech_end = int(left.get("speech_end_ms", left["end_ms"]))
-        right_speech_start = int(right.get("speech_start_ms", right["start_ms"]))
+        left_speech_end = int(left.get("speech_end_ms") if left.get("speech_end_ms") is not None else left["end_ms"])
+        right_speech_start = int(right.get("speech_start_ms") if right.get("speech_start_ms") is not None else right["start_ms"])
         if left_speech_end <= right_speech_start:
             boundary = _quantize_alignment_ms(
                 (left_speech_end + right_speech_start) // 2
@@ -804,7 +906,71 @@ def align_subtitle_document(
     if not media.get("has_audio"):
         raise SubtitleAlignmentError("Video has no audio track")
     duration_ms = int(media["duration_ms"])
+    _check_canceled(cancel_event)
+    resolved_engine = _resolve_engine(settings.engine)
+    source_cues = [deepcopy(cue) for cue in document.get("segments", [])]
+    ordered_all = sorted(
+        source_cues,
+        key=lambda cue: (cue["start_ms"], cue["end_ms"], cue["id"]),
+    )
+    selected: list[dict[str, Any]] = []
+    skipped_manual: list[str] = []
+    skipped_evidence: list[str] = []
+    skipped_long: list[str] = []
+    for cue in ordered_all:
+        cue_id = str(cue["id"])
+        if cue_ids is not None and cue_id not in cue_ids:
+            continue
+        if cue.get("locked") or (cue.get("timing_source") == "manual" and not settings.force_manual):
+            skipped_manual.append(cue_id)
+            continue
+        if resolved_engine == "energy" and cue.get("content_source") in {"screen", "mixed"}:
+            skipped_evidence.append(cue_id)
+            continue
+        if cue.get("origin_chunk_id") and not (cue.get("source_text") or cue.get("secondary_text")):
+            skipped_evidence.append(cue_id)
+            continue
+        window_start = max(0, int(cue["start_ms"]) - settings.window_padding_ms)
+        window_end = min(duration_ms, int(cue["end_ms"]) + settings.window_padding_ms)
+        if window_end - window_start > settings.max_window_ms:
+            skipped_long.append(cue_id)
+            continue
+        selected.append(cue)
+
+    warnings: list[dict[str, Any]] = [
+        {
+            "code": "manual_timing_locked",
+            "cue_id": cue_id,
+            "message": "Cue chỉnh tay được khóa và không bị alignment ghi đè.",
+        }
+        for cue_id in skipped_manual
+    ]
+    warnings.extend({"code": "alignment_source_unverified", "cue_id": cue_id,
+                     "message": "Chưa có lời gốc hoặc bằng chứng phù hợp với engine căn audio; giữ timing hiện tại."}
+                    for cue_id in skipped_evidence)
+    warnings.extend({"code": "alignment_window_limit", "cue_id": cue_id,
+                     "message": "Cue vượt độ dài cửa sổ căn cho phép; giữ timing và chia cue trước khi căn lại."}
+                    for cue_id in skipped_long)
+    if not selected:
+        result = {
+            "document": deepcopy(document),
+            "warnings": warnings,
+            "engine": resolved_engine,
+            "cache_hit": False,
+            "aligned_cue_count": 0,
+        }
+        _emit(progress, 100, "complete", "Không có cue cần căn chỉnh")
+        return result
+
+    model_signature = None
+    model_settings = settings
+    if cache_dir and resolved_engine == 'faster_whisper' and not settings.whisper_allow_download:
+        model_path = _resolve_whisper_model_path(settings)
+        model_signature = _whisper_model_signature(model_path)
+        model_settings = replace(settings, whisper_model=model_path)
     cache_key = alignment_cache_key(document, media, settings, cue_ids)
+    if model_signature:
+        cache_key = hashlib.sha256((cache_key + json.dumps(model_signature, sort_keys=True)).encode()).hexdigest()
     cache_path = cache_dir / f"{cache_key}.json" if cache_dir else None
     if cache_path and cache_path.exists():
         try:
@@ -817,56 +983,26 @@ def align_subtitle_document(
         except (OSError, json.JSONDecodeError, KeyError, AttributeError):
             pass
 
-    _check_canceled(cancel_event)
-    resolved_engine = _resolve_engine(settings.engine)
-    source_cues = [deepcopy(cue) for cue in document.get("segments", [])]
-    ordered_all = sorted(
-        source_cues,
-        key=lambda cue: (cue["start_ms"], cue["end_ms"], cue["id"]),
-    )
-    selected: list[dict[str, Any]] = []
-    skipped_manual: list[str] = []
-    for cue in ordered_all:
-        cue_id = str(cue["id"])
-        if cue_ids and cue_id not in cue_ids:
-            continue
-        if cue.get("timing_source") == "manual" and not settings.force_manual:
-            skipped_manual.append(cue_id)
-            continue
-        selected.append(cue)
-
-    warnings: list[dict[str, Any]] = [
-        {
-            "code": "manual_timing_locked",
-            "cue_id": cue_id,
-            "message": "Cue chỉnh tay được khóa và không bị alignment ghi đè.",
-        }
-        for cue_id in skipped_manual
-    ]
-    if not selected:
-        result = {
-            "document": deepcopy(document),
-            "warnings": warnings,
-            "engine": resolved_engine,
-            "cache_hit": False,
-            "aligned_cue_count": 0,
-        }
-        _emit(progress, 100, "complete", "Không có cue cần căn chỉnh")
-        return result
-
-    windows = build_audio_windows(
-        selected,
-        duration_ms,
-        padding_ms=settings.window_padding_ms,
-        max_window_ms=settings.max_window_ms,
-    )
+    language_groups: dict[str | None, list[dict[str, Any]]] = {}
+    for cue in selected:
+        language = cue.get("source_language") or settings.source_language
+        if not language and not (cue.get("source_text") or cue.get("secondary_text")):
+            language = document.get("language")
+        language = str(language).lower().split("-")[0] if language and language != "unknown" else None
+        if language and not re.fullmatch(r"[a-z]{2,3}", language):
+            language = None
+        language_groups.setdefault(language, []).append(cue)
+    windows = []
+    window_languages = {}
+    for language, group in language_groups.items():
+        for window in build_audio_windows(group, duration_ms, padding_ms=settings.window_padding_ms, max_window_ms=settings.max_window_ms):
+            windows.append(window)
+            window_languages[window] = language
+    windows.sort(key=lambda window: window.start_ms)
     cue_by_id = {str(cue["id"]): cue for cue in selected}
     aligned_by_id: dict[str, dict[str, Any]] = {}
+    source_observations = []
     whisper_model: Any | None = None
-    if resolved_engine == "faster_whisper":
-        _emit(progress, 2, "model", "Đang nạp mô hình word timing")
-        whisper_model = _load_whisper_model(settings)
-
     try:
         for index, window in enumerate(windows):
             _check_canceled(cancel_event)
@@ -885,14 +1021,49 @@ def align_subtitle_document(
             )
             window_cues = [cue_by_id[cue_id] for cue_id in window.cue_ids]
             if resolved_engine == "faster_whisper":
-                observed = _transcribe_pcm(
-                    pcm,
-                    window,
-                    " ".join(str(cue.get("text", "")) for cue in window_cues),
-                    settings,
-                    whisper_model,
-                )
-                aligned, window_warnings = _align_whisper_window(window_cues, observed)
+                try:
+                    observed_path = None
+                    observed = None
+                    if cache_dir and model_signature:
+                        observation_key = hashlib.sha256(json.dumps({
+                            'version': ASR_OBSERVATION_VERSION, 'model': model_signature,
+                            'pcm_sha256': hashlib.sha256(pcm).hexdigest(),
+                            'start_ms': window.start_ms, 'end_ms': window.end_ms,
+                            'language': window_languages[window], 'device': settings.whisper_device,
+                            'compute_type': settings.whisper_compute_type,
+                        }, sort_keys=True).encode()).hexdigest()
+                        observed_path = cache_dir / 'observations' / f'{observation_key}.json'
+                        try:
+                            rows = json.loads(observed_path.read_text(encoding='utf-8'))
+                            candidate = [ObservedWord(**row) for row in rows]
+                            if all(window.start_ms <= word.start_ms < word.end_ms <= window.end_ms
+                                   and math.isfinite(word.confidence) and 0 <= word.confidence <= 1
+                                   and isinstance(word.text, str) for word in candidate):
+                                observed = candidate
+                        except (OSError, ValueError, TypeError):
+                            pass
+                    observation_hit = observed is not None
+                    if observed is None:
+                        if whisper_model is None:
+                            _emit(progress, window_percent, 'model', 'Đang nạp mô hình word timing')
+                            whisper_model = _load_whisper_model(model_settings)
+                        observed = _transcribe_pcm(
+                            pcm, window, " ".join(alignment_transcript(cue) for cue in window_cues),
+                            replace(settings, source_language=window_languages[window]), whisper_model)
+                        _check_canceled(cancel_event)
+                        if observed_path:
+                            observed_path.parent.mkdir(parents=True, exist_ok=True)
+                            temporary = observed_path.with_suffix(f'.{uuid.uuid4().hex}.part')
+                            temporary.write_text(json.dumps([word.__dict__ for word in observed], ensure_ascii=False), encoding='utf-8')
+                            temporary.replace(observed_path)
+                    source_observations.append({"start_ms": window.start_ms, "end_ms": window.end_ms,
+                        "cue_ids": list(window.cue_ids), "language": window_languages[window],
+                        "cache_hit": observation_hit,
+                        "words": [word.__dict__ for word in observed]})
+                    aligned, window_warnings = _align_whisper_window(window_cues, observed)
+                except ValueError:
+                    aligned = {cue["id"]: {**cue, "needs_review": True} for cue in window_cues}
+                    window_warnings = [{"code": "alignment_language_unsupported", "message": "ASR không hỗ trợ ngôn ngữ hoặc đầu vào vùng này; giữ timing cũ."}]
             else:
                 aligned, window_warnings = _align_energy_window(
                     window_cues,
@@ -910,33 +1081,65 @@ def align_subtitle_document(
             gc.collect()
 
     _check_canceled(cancel_event)
-    merged = [aligned_by_id.get(str(cue["id"]), cue) for cue in source_cues]
+    merged = [deepcopy(aligned_by_id.get(str(cue["id"]), cue)) for cue in source_cues]
     merged = apply_display_padding(
         merged,
         duration_ms,
         lead_in_ms=settings.lead_in_ms,
         tail_ms=settings.tail_ms,
     )
+    padded_by_id = {cue["id"]: cue for cue in merged}
+    # Padding must not change locked/unselected cues, including their existing speech bounds.
+    successful_ids = {cue_id for cue_id, cue in aligned_by_id.items()
+                      if cue.get("timing_source") == "forced_alignment" and not cue.get("needs_review")}
+    merged = []
+    for original in source_cues:
+        cue_id = str(original["id"])
+        if cue_id in successful_ids:
+            aligned = padded_by_id[cue_id]
+            if max(abs(aligned["speech_start_ms"] - original["start_ms"]), abs(aligned["speech_end_ms"] - original["end_ms"])) > settings.max_shift_ms:
+                merged.append({**original, "needs_review": True})
+                successful_ids.remove(cue_id)
+                warnings.append({"code": "alignment_shift_limit", "cue_id": cue_id, "message": "Đề xuất timing vượt mức dịch chuyển cho phép; giữ timing cũ."})
+                continue
+            aligned["speech_evidence"] = SpeechEvidence(
+                method=aligned.pop("alignment_method", "energy_estimated"),
+                audio_identity=audio_identity(media), transcript_sha256=transcript_hash(original),
+                start_ms=aligned["speech_start_ms"], end_ms=aligned["speech_end_ms"],
+                algorithm=ALIGNMENT_ALGORITHM_VERSION,
+                transcript_complete=resolved_engine == "faster_whisper",
+            ).model_dump()
+            # Screen text timing is independent of when the source line is spoken.
+            if settings.preserve_display or original.get("content_source") in {"screen", "mixed"}:
+                for field in ("start_ms", "end_ms", "timing_source", "timing_precision_ms"):
+                    aligned[field] = original.get(field, aligned.get(field))
+            aligned["revision"] = int(original.get("revision", 0)) + 1
+            merged.append(aligned)
+        else:
+            unchanged = deepcopy(original)
+            if cue_id in aligned_by_id and aligned_by_id[cue_id].get("needs_review"):
+                unchanged["needs_review"] = True
+            merged.append(unchanged)
     next_document = deepcopy(document)
     next_document["segments"] = merged
-    if aligned_by_id:
-        next_document["timing_source"] = "forced_alignment"
-        next_document["timing_precision_ms"] = ALIGNMENT_PRECISION_MS
+    if successful_ids:
+        next_document["revision"] = int(document.get("revision", 0)) + 1
+        if not settings.preserve_display and any(cue["id"] in successful_ids
+                and cue.get("content_source") not in {"screen", "mixed"} for cue in source_cues):
+            next_document["timing_source"] = "forced_alignment"
+            next_document["timing_precision_ms"] = ALIGNMENT_PRECISION_MS
     result = {
         "document": next_document,
         "warnings": warnings,
         "engine": resolved_engine,
         "cache_hit": False,
-        "aligned_cue_count": sum(
-            1
-            for cue in aligned_by_id.values()
-            if cue.get("timing_source") == "forced_alignment"
-        ),
+        "aligned_cue_count": len(successful_ids),
+        "source_observations": source_observations,
     }
     if cache_path:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"cache_version": ALIGNMENT_CACHE_VERSION, "result": result}
-        temporary = cache_path.with_suffix(".json.part")
+        temporary = cache_path.with_suffix(f".{uuid.uuid4().hex}.part")
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",

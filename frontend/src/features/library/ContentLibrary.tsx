@@ -51,12 +51,12 @@ export function ContentLibrary({
       <section className="page-head content-library-head">
         <div>
           <p className="eyebrow">Kho nội dung</p>
-          <h1>Nguồn &amp; Video</h1>
+          <h1>{tab === "videos" ? "Tải & quản lý video" : "Nguồn & Video"}</h1>
           <p className="subtle">
-            Quản lý kênh thu thập, kết nối nền tảng và toàn bộ video trong cùng một nơi.
+            {tab === "videos" ? "Dán link, tải video về máy và lưu vào thư viện của bạn." : "Quản lý kênh thu thập, kết nối nền tảng và toàn bộ video trong cùng một nơi."}
           </p>
         </div>
-        {selected && <span className="library-topic-context">Chủ đề: {selected.name}</span>}
+        {selected && tab !== "videos" && <span className="library-topic-context">Chủ đề: {selected.name}</span>}
       </section>
       <section
         id={`library-panel-${tab}`}

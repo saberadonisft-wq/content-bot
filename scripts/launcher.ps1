@@ -2,7 +2,7 @@
 
 <##
     Foreground Content Bot process launcher.
-    Use the "Content Bot: Start" VS Code task to run Auth Server, backend and frontend together.
+    Use "Content Bot: Start" to open the desktop app, or "Content Bot: Web Services" for browser development.
 ##>
 
 param(

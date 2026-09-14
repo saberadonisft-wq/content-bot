@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import array
+import math
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from ..subtitle_render import SubtitleRenderCanceled, _effective_video_segments
 from .audio import audio_metadata
 from .models import VoiceDocument
 from .store import VoiceStore, digest, generation_hash, read_json
+from .timing import file_interval, window_issues
 
 SAMPLE_RATE = 48000
 
@@ -65,9 +67,16 @@ def map_voice_document(doc, options, duration):
             start = clip.start_ms + clip.offset_ms
             if lower <= start < upper:
                 mapped_start = round((offset + start - lower) / speed)
+                mapped_end = mapped_start + round((clip.end_ms - clip.start_ms) / speed)
+                sync = clip.sync.model_copy(deep=True)
+                if sync.alignment:
+                    # Source proof was validated before mapping. This private mix timeline
+                    # contains file extents; subtitle display timing is handled separately.
+                    mapped_end = max(mapped_end, mapped_start + math.ceil(sync.alignment.output_duration_ms / speed))
+                    sync.alignment = None
                 mapped.append(clip.model_copy(update={
                     'start_ms': mapped_start, 'offset_ms': 0,
-                    'end_ms': mapped_start + round((clip.end_ms - clip.start_ms) / speed),
+                    'end_ms': mapped_end, 'sync': sync,
                     'rate': clip.rate * speed,
                 }))
         offset += upper - lower
@@ -172,6 +181,7 @@ def verify_document(
     store: VoiceStore, owner: str, doc: VoiceDocument, duration_ms: int,
     cancel: threading.Event | None = None,
 ):
+    store.validate_alignments(owner, doc)
     last_end = 0
     for clip in sorted(doc.clips, key=lambda c: c.start_ms + c.offset_ms):
         if cancel and cancel.is_set():
@@ -194,15 +204,14 @@ def verify_document(
             )
         if clip.error:
             raise ValueError(clip.error)
-        start = clip.start_ms + clip.offset_ms
-        end = start + meta["duration_ms"] / clip.rate
+        start, end = file_interval(clip)
         if start < last_end - 2 or end > duration_ms + 2:
             raise ValueError(
                 "Các đoạn giọng chồng nhau hoặc vượt video. Chỉnh mốc/tốc độ trước khi xuất."
             )
-        if meta["duration_ms"] / clip.rate > clip.end_ms - clip.start_ms + 2:
+        if window_issues(clip):
             raise ValueError(
-                "Có đoạn giọng vượt khung phụ đề. Chỉnh lời đọc hoặc tốc độ trước khi xuất."
+                "Có đoạn giọng lệch khỏi khung phụ đề (kể cả độ dịch). Chỉnh mốc hoặc xác minh vùng nói trước khi xuất."
             )
         last_end = end
 
@@ -262,13 +271,15 @@ def compose_voice(
 
             for clip in sorted(doc.clips, key=lambda c: c.start_ms + c.offset_ms):
                 source = store.path(owner, "assets", clip.asset_id, ".wav")
+                asset_meta = read_json(store.path(owner, 'assets', clip.asset_id))
+                fade = '' if asset_meta.get('processing') else ',afade=t=in:d=0.003'
                 converted = tmp / "clip.wav"
                 ffmpeg(
                     [
                         "-i",
                         str(source),
                         "-af",
-                        tempo_filter(clip.rate) + f"volume={clip.gain},afade=t=in:d=0.003",
+                        tempo_filter(clip.rate) + f"volume={clip.gain}" + fade,
                         "-ar",
                         str(SAMPLE_RATE),
                         "-ac",

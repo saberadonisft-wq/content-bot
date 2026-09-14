@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+
+from ...schemas import SubtitleDocumentV2
 
 MODEL_ID = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
 MODEL_REVISION = "8b7e9cffb4b41918cb638b9f62f0a751184d14a6"
@@ -35,6 +37,36 @@ class VoiceProfile(Model):
         return self
 
 
+class VoiceAlignment(Model):
+    proof_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    original_asset_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    clip_signature: str = Field(max_length=64000)
+    source_signature: str = Field(max_length=64000)
+    source_start_ms: int = Field(ge=0)
+    source_end_ms: int = Field(gt=0)
+    allowed_end_ms: int = Field(gt=0)
+    speech_head_ms: float = Field(ge=0)
+    speech_tail_ms: float = Field(gt=0)
+    output_duration_ms: float = Field(gt=0)
+
+    @model_validator(mode='after')
+    def bounds(self):
+        if (not self.source_start_ms < self.source_end_ms <= self.allowed_end_ms
+                or not self.speech_head_ms < self.speech_tail_ms <= self.output_duration_ms):
+            raise ValueError('Bằng chứng căn giọng có biên không hợp lệ.')
+        return self
+
+
+class VoiceSync(Model):
+    # Legacy adjustments have unknown provenance and must not be overwritten.
+    timing_origin: Literal["manual", "automatic", "legacy_unknown"] = "legacy_unknown"
+    timing_locked: bool = True
+    text_locked: bool = True
+    state: Literal["unverified", "aligned", "needs_review"] = "unverified"
+    issues: list[Literal["source_unverified", "missing_audio", "starts_early", "ends_late", "overlap"]] = Field(default_factory=list)
+    alignment: VoiceAlignment | None = None
+
+
 class VoiceClip(Model):
     id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
     source_cue_ids: list[str] = Field(default_factory=list, max_length=100)
@@ -50,6 +82,7 @@ class VoiceClip(Model):
     duration_ms: int = Field(default=0, ge=0)
     status: Literal["missing", "ready", "stale", "overflow", "failed"] = "missing"
     error: str | None = Field(default=None, max_length=1000)
+    sync: VoiceSync = Field(default_factory=VoiceSync)
 
     @model_validator(mode="after")
     def timing(self):
@@ -67,7 +100,8 @@ class MixOptions(Model):
 
 
 class VoiceDocument(Model):
-    schema_version: Literal[1] = 1
+    _migrated_from_v1: bool = PrivateAttr(default=False)
+    schema_version: Literal[2] = 2
     project_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
     video_fingerprint: str = Field(min_length=1, max_length=128)
     revision: int = Field(default=0, ge=0)
@@ -75,6 +109,18 @@ class VoiceDocument(Model):
     clips: list[VoiceClip] = Field(default_factory=list, max_length=20000)
     mix: MixOptions = Field(default_factory=MixOptions)
     pronunciation: dict[str, str] = Field(default_factory=dict, max_length=500)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def migrate_v1(cls, value, handler):
+        migrated = isinstance(value, dict) and value.get("schema_version") == 1
+        if migrated:
+            value = {**value, "schema_version": 2, "clips": [
+                {**clip, "sync": VoiceSync().model_dump()} for clip in value.get("clips", [])
+            ]}
+        result = handler(value)
+        result._migrated_from_v1 = migrated
+        return result
 
     @model_validator(mode="after")
     def unique(self):
@@ -91,6 +137,7 @@ class StartJob(Model):
     project_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
     clip_ids: list[str] | None = Field(default=None, max_length=20000)
     device: Literal["cpu", "cuda"] = "cpu"
+    subtitle_document: SubtitleDocumentV2 | None = None
 
 
 class PreviewRequest(Model):

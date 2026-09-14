@@ -9,6 +9,8 @@ function voiceClipLabel(clip: VoiceClip, job?: VoiceJob | null): string {
     if (job.current_clip_id === clip.id) return 'Đang tạo';
     if (clip.status !== 'ready') return 'Đang chờ';
   }
+  if (clip.sync?.issues.includes('overlap')) return 'Chồng audio';
+  if (clip.status === 'ready' && clip.sync?.state !== 'aligned') return 'Có giọng · chưa xác minh';
   return VOICE_STATUS_LABELS[clip.status];
 }
 

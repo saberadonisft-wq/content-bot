@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const http = require("node:http");
 const path = require("node:path");
+const { pickProjectVideo } = require("./video-picker.cjs");
 
 
 
@@ -487,6 +488,12 @@ function createMainWindow() {
 ipcMain.handle("content-bot:desktop-environment", (event) => {
   assertTrustedSender(event);
   return { available: true, platform: process.platform, version: app.getVersion() };
+});
+ipcMain.handle("content-bot:desktop-pick-project-video", async (event, payload) => {
+  assertTrustedSender(event);
+  return pickProjectVideo(payload, {
+    showOpenDialog: (options) => dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), options),
+  });
 });
 ipcMain.handle("content-bot:desktop-live-wall-sync", (event, payload) => {
   assertTrustedSender(event);

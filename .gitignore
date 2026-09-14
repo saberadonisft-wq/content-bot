@@ -30,7 +30,11 @@ runtimes/voiceover/runtime-status.json
 runtimes/voiceover/runtime-status-v2turbo.json
 runtimes/voiceover/probe-v2turbo.wav
 runtimes/voiceover/probe.wav
+runtimes/voiceover/.worker.lock
+runtimes/voiceover/performance-profile.json
 temp_repo/
 test.jpg
 frontend/vite.config.d.ts
 frontend/vite.config.js
+build/
+backend/build/

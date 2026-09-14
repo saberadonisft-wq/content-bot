@@ -1,0 +1,84 @@
+.gemini-chunk-details > summary {
+  cursor: pointer;
+  padding-block: 4px;
+}
+
+.gemini-chunk-list {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  margin: 8px 0 0;
+  padding: 0 8px 0 0;
+  list-style: none;
+}
+
+.gemini-chunk-row {
+  --chunk-color: var(--color-accent);
+  display: grid;
+  gap: 6px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.gemini-chunk-row:first-child { padding-top: 4px; }
+.gemini-chunk-row:last-child { border-bottom: 0; }
+.gemini-chunk-row.is-complete { --chunk-color: var(--signal); }
+.gemini-chunk-row.is-waiting { --chunk-color: var(--warning); }
+.gemini-chunk-row.is-failed { --chunk-color: var(--danger); }
+.gemini-chunk-row.is-queued,
+.gemini-chunk-row.is-stopped { --chunk-color: var(--color-muted); }
+
+.gemini-chunk-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.gemini-chunk-status {
+  color: var(--chunk-color);
+  font-weight: 600;
+}
+
+.gemini-chunk-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--color-paper-3);
+}
+
+.gemini-chunk-track > span {
+  display: block;
+  height: 100%;
+  background: var(--chunk-color);
+  border-radius: inherit;
+}
+
+.is-queued > .gemini-chunk-track > span { width: 0; }
+.is-stopped > .gemini-chunk-track > span { opacity: 0.35; }
+.is-failed > .gemini-chunk-track > span { opacity: 0.7; }
+.is-active > .gemini-chunk-track > span,
+.is-waiting > .gemini-chunk-track > span {
+  width: 35%;
+  animation: gemini-chunk-working 1.8s ease-in-out infinite alternate;
+}
+
+.gemini-chunk-meta,
+.gemini-chunk-message {
+  overflow-wrap: anywhere;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.gemini-chunk-message { color: var(--chunk-color); }
+
+@keyframes gemini-chunk-working {
+  from { transform: translateX(0); }
+  to { transform: translateX(185%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gemini-chunk-track > span { animation: none !important; }
+}

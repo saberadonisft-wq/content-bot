@@ -15,6 +15,51 @@ from app.sqlite_store import SQLiteStore
 NOW = datetime(2026, 9, 12, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("legacy_triggers", [False, True])
+@pytest.mark.parametrize("existing_document", [False, True])
+def test_queued_item_can_be_upserted_after_schema_reopen(
+    tmp_path, legacy_triggers, existing_document
+):
+    store = SQLiteStore(tmp_path / "queued-item.db")
+    store.initialize()
+    if legacy_triggers:
+        with store._connection() as connection:
+            for event in ("insert", "update"):
+                connection.execute(f"DROP TRIGGER item_query_{event}")
+                connection.execute(f"""
+                    CREATE TRIGGER item_query_{event} AFTER {event} ON local_documents
+                    WHEN NEW.collection = 'content_items'
+                    BEGIN INSERT OR IGNORE INTO local_item_dirty VALUES (NEW.document_key); END
+                """)
+    original = {"_id": 1, "source_id": "web", "external_id": "1", "title": "Amazing game"}
+    with store._connection() as connection:
+        if existing_document:
+            connection.execute(
+                "INSERT INTO local_documents VALUES ('content_items', 'i:1', ?)",
+                (store._dumps(original),),
+            )
+        connection.execute("INSERT OR IGNORE INTO local_item_dirty VALUES ('i:1')")
+
+    reopened = SQLiteStore(store.path)
+    reopened.initialize()
+    reopened.initialize()
+    with reopened._connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM local_item_dirty").fetchone()[0] == 1
+        # Repeated writes before the read model is refreshed must remain valid.
+        for title in ("Amazing patch", "Terrible crash bug"):
+            connection.execute(
+                "INSERT INTO local_documents VALUES ('content_items', 'i:1', ?) "
+                "ON CONFLICT(collection, document_key) DO UPDATE SET payload=excluded.payload",
+                (store._dumps({**original, "title": title}),),
+            )
+        assert connection.execute("SELECT COUNT(*) FROM local_item_dirty").fetchone()[0] == 1
+    reopened.save_item({"id": 1, "metrics": {"view_count": 10}})
+    assert reopened.item(1)["title"] == "Terrible crash bug"
+    with reopened._connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM local_item_dirty").fetchone()[0] == 0
+        assert connection.execute("SELECT sentiment FROM local_item_analysis WHERE document_key='i:1'").fetchone()[0] == "negative"
+
+
 @pytest.fixture(params=["sqlite", "mongo"])
 def query_store(request, tmp_path, mongo_store):
     store = (

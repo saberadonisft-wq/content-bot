@@ -7,11 +7,12 @@ import {
   calculateFitRate,
   countVoiceOverlaps,
   resetVoiceOffsets,
-  rippleShiftVoiceClips,
   smartResolveVoiceOverlaps,
   voiceClipsInRange,
 } from './planner';
 import { DEFAULT_PROFILE, VOICE_STATUS_LABELS, type VoiceDocument, type VoiceJob, type VoiceProfile } from './types';
+import { legacySync, SYNC_ISSUE_LABELS } from './timing';
+import { VoiceSyncPanel } from './VoiceSyncPanel';
 
 function describeVoiceDocument(doc: VoiceDocument | null): string {
   if (!doc) return 'Chưa có lời đọc';
@@ -158,26 +159,20 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
         </span>
       </div>
       <p style={{ margin: 0, fontSize: 12, lineHeight: 1.4 }}>
-        Các đoạn đè lên nhau hoặc vượt khung phụ đề gây giật tiếng khi phát và bị chặn khi xuất video. Chọn cách xử lý tự động:
+        Kiểm tra đã tính cả độ lệch. Vùng chồng sẽ tạm dừng xem trước để tránh mất lời. Fit nhẹ giữ nguyên mốc câu sau và bỏ qua mốc đang khóa.
       </p>
       <div className="voice-actions" style={{ marginTop: 2 }}>
         <button type="button" className="studio-secondary-button"
-          title="Tự động tăng tốc độ cho các đoạn vượt để nằm vừa khung phụ đề, hết đè nhau"
+          title="Thử tốc độ tối đa 1,15× cho mốc tự động chưa khóa; giữ nguyên các câu còn không vừa"
           disabled={working || voice.busy || Boolean(running)}
           onClick={() => voice.edit(d => ({ ...d, clips: autoFitVoiceClips(d.clips) }))}>
-          <Zap size={14} /> Tự động tăng tốc vừa khung
+          <Zap size={14} /> Fit nhẹ, giữ mốc
         </button>
         <button type="button"
-          title="Dịch mốc bắt đầu của các câu sau để các câu nối tiếp tuần tự, không bị nói đè lên nhau"
-          disabled={working || voice.busy || Boolean(running)}
-          onClick={() => voice.edit(d => ({ ...d, clips: rippleShiftVoiceClips(d.clips) }))}>
-          Dịch mốc tránh đè
-        </button>
-        <button type="button"
-          title="Tăng tốc vừa phải kết hợp dịch mốc vào khoảng lặng để giọng đọc tự nhiên và không đè nhau"
+          title="Kiểm tra lại và fit nhẹ; không dịch các câu sau"
           disabled={working || voice.busy || Boolean(running)}
           onClick={() => voice.edit(d => ({ ...d, clips: smartResolveVoiceOverlaps(d.clips) }))}>
-          <Sparkles size={14} /> Tối ưu thông minh
+          <Sparkles size={14} /> Kiểm tra và fit nhẹ
         </button>
       </div>
     </div>}
@@ -277,6 +272,7 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
       {previewUrl && <audio controls src={previewUrl} preload="metadata" aria-label="Nghe giọng đã tạo" />}
     </details>
     {doc && <>
+      <VoiceSyncPanel key={doc.project_id} voice={voice} />
       <small role="status">{{ saved: 'Đã lưu lời đọc', dirty: 'Có thay đổi chưa lưu', saving: 'Đang lưu…', error: 'Chưa lưu được. Kiểm tra thông báo lỗi.' }[voice.saveState]}</small>
       <details><summary>Tạo giọng theo khoảng thời gian</summary>
         <div className="voice-fields">
@@ -293,7 +289,9 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
         <button type="button" onClick={() => voice.history('undo')}>Hoàn tác</button>
         <button type="button" onClick={() => voice.history('redo')}>Làm lại</button>
       </div>
-      {job && <div className="voice-job" role="status"><progress value={job.completed} max={Math.max(1, job.total)} />
+      {job && <div className="voice-job" role="status"><progress
+        value={job.phase === 'sync' ? job.sync_progress ?? 0 : job.completed}
+        max={job.phase === 'sync' ? 100 : Math.max(1, job.total)} />
         <span>{job.completed}/{job.total} đoạn · {job.message}</span>
         {job.eta_seconds !== null && running && <small>Còn khoảng {Math.ceil(job.eta_seconds / 60)} phút</small>}
         <div className="voice-actions">{running ? <>
@@ -306,8 +304,17 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
         const neededRate = selected.duration_ms && (selected.end_ms - selected.start_ms > 0)
           ? calculateFitRate(selected)
           : null;
-        const canFit = Boolean(neededRate && Math.abs(neededRate - selected.rate) > 0.005);
+        const canFit = Boolean(selected.sync && !selected.sync.timing_locked
+          && selected.sync.timing_origin === 'automatic' && neededRate && Math.abs(neededRate - selected.rate) > 0.005);
         return <fieldset><legend>Đoạn đang chọn · {VOICE_STATUS_LABELS[selected.status]}</legend>
+        <small>{(selected.sync?.issues ?? ['source_unverified']).map(issue => SYNC_ISSUE_LABELS[issue]).join(' · ')}</small>
+        <label><input type="checkbox" checked={selected.sync?.timing_locked ?? true}
+          onChange={e => voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id
+            ? { ...c, sync: { ...(c.sync ?? legacySync()), timing_locked: e.target.checked,
+              timing_origin: e.target.checked ? 'manual' : 'automatic' } } : c) }))} />Giữ mốc và tốc độ đã chỉnh</label>
+        <label><input type="checkbox" checked={selected.sync?.text_locked ?? true}
+          onChange={e => voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id
+            ? { ...c, sync: { ...(c.sync ?? legacySync()), text_locked: e.target.checked } } : c) }))} />Giữ nguyên lời đọc đã chỉnh</label>
         <label>Lời đọc<textarea rows={5} value={selected.spoken_text} maxLength={8000} onChange={e => voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id ? { ...c, spoken_text: e.target.value, status: c.asset_id ? 'stale' : 'missing' } : c) }))} /></label>
         <div className="voice-fields"><label>Tốc độ<input type="number" min={0.5} max={2} step={0.01} value={selected.rate} onChange={e => {
           const rate = Number(e.target.value); if (rate >= 0.5 && rate <= 2) voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id ? { ...c, rate } : c) }));
@@ -318,17 +325,14 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
         <label>Âm lượng đoạn<input type="range" min={0} max={2} step={0.05} value={selected.gain} onChange={e => voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id ? { ...c, gain: Number(e.target.value) } : c) }))} /></label>
         {selected.error && <p className="voice-error">{selected.error}</p>}
         {selected.status === 'overflow' && neededRate && <small style={{ color: '#b54708', display: 'block' }}>
-          Đoạn này đang vượt khung phụ đề. Cần tốc độ tối thiểu {neededRate}x để nằm gọn trong phụ đề.
+          Đoạn này đang lệch khỏi khung phụ đề. Fit nhẹ không bảo đảm đủ chỗ; cần kiểm tra cả độ lệch và lời đọc.
         </small>}
         <div className="voice-actions">
           <button type="button" disabled={!selected.asset_id || working} onClick={listenSelected}>Nghe riêng</button>
           <button type="button" disabled={!engineReady || !engineDevices.includes(voice.device) || Boolean(running) || voice.busy} onClick={() => void voice.run([selected.id])}>Tạo đoạn này</button>
-          {canFit && <button type="button" title={`Tự động đặt tốc độ thành ${neededRate}x để vừa khung phụ đề`} onClick={() => voice.edit(d => ({ ...d,
-            clips: d.clips.map(c => c.id === selected.id ? {
-              ...c, rate: neededRate!, offset_ms: 0,
-              status: (c.duration_ms / neededRate! <= (c.end_ms - c.start_ms) + 2 && c.status === 'overflow') ? 'ready' : c.status,
-            } : c),
-          }))}><Zap size={14} /> Vừa khung phụ đề ({neededRate}x)</button>}
+          {canFit && <button type="button" title="Fit nhẹ và giữ nguyên offset" onClick={() => voice.edit(d => ({ ...d,
+            clips: d.clips.map(c => c.id === selected.id ? autoFitVoiceClips([c])[0] : c),
+          }))}><Zap size={14} /> Thử fit nhẹ ({neededRate}x)</button>}
           <button type="button" disabled={selected.offset_ms === 0} onClick={() => voice.edit(d => ({ ...d,
             clips: d.clips.map(c => c.id === selected.id ? { ...c, offset_ms: 0 } : c),
           }))}>Về mốc phụ đề</button>
@@ -337,19 +341,15 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
       </fieldset>;
       })()}
       <details><summary>Căn chỉnh & xử lý chồng lấn ({doc.clips.length} đoạn)</summary>
-        <p>Tối ưu tốc độ hoặc dịch mốc để tránh các đoạn giọng nói đè lên nhau.</p>
+        <p>Fit nhẹ giữ nguyên mốc câu sau. Các mốc đang khóa và đoạn chưa vừa cần kiểm tra riêng.</p>
         <div className="voice-actions">
           <button type="button" disabled={working || voice.busy || Boolean(running)}
             onClick={() => voice.edit(d => ({ ...d, clips: autoFitVoiceClips(d.clips) }))}>
-            <Zap size={14} /> Tăng tốc vừa khung tất cả
-          </button>
-          <button type="button" disabled={working || voice.busy || Boolean(running)}
-            onClick={() => voice.edit(d => ({ ...d, clips: rippleShiftVoiceClips(d.clips) }))}>
-            Dịch mốc tránh đè tất cả
+            <Zap size={14} /> Fit nhẹ các mốc chưa khóa
           </button>
           <button type="button" disabled={working || voice.busy || Boolean(running)}
             onClick={() => voice.edit(d => ({ ...d, clips: smartResolveVoiceOverlaps(d.clips) }))}>
-            <Sparkles size={14} /> Tối ưu thông minh
+            <Sparkles size={14} /> Kiểm tra và fit nhẹ
           </button>
           <button type="button" disabled={working || voice.busy || Boolean(running) || !doc.clips.some(c => c.offset_ms !== 0)}
             onClick={() => voice.edit(d => ({ ...d, clips: resetVoiceOffsets(d.clips) }))}>

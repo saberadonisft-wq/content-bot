@@ -102,6 +102,8 @@ def test_energy_alignment_refines_speech_boundary_at_ten_ms_resolution() -> None
     assert result["speech_end_ms"] == 1230
     assert result["timing_precision_ms"] == 10
     assert result["timing_source"] == "forced_alignment"
+    assert result["alignment_method"] == "energy_estimated"
+    assert all(w['alignment_method'] == 'energy_estimated' for w in result['words'])
     assert result["words"][0]["start_ms"] >= result["speech_start_ms"]
     assert result["words"][-1]["end_ms"] == result["speech_end_ms"]
 

@@ -604,6 +604,7 @@ export function PreviewStage({
           <div
             ref={onLibassHostElementChange}
             className="preview-libass-host"
+            style={{ visibility: libassActive ? "visible" : "hidden" }}
             aria-hidden="true"
           />
 

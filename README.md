@@ -11,16 +11,19 @@ Local-first game social-listening workbench. It discovers public game content by
 
 ## Run locally
 
-On Windows with Python 3.11+ and Node.js 20+, open the repository in VS Code, run **Tasks: Run Task**, then choose **Content Bot: Start**. VS Code starts both services at the same time in separate foreground terminals:
+On Windows with Python 3.11+ and Node.js 20+, open the repository in VS Code, run **Tasks: Run Task**, then choose **Content Bot: Start**. This launches the desktop development app: it starts or reuses Auth Server, backend and frontend, then opens the Electron window. Stop it with `Ctrl+C` in its task terminal or close the app window. Services that were already running remain available.
+
+For browser development, choose **Content Bot: Web Services**, then open `http://127.0.0.1:5173`. This task starts the three services in separate foreground terminals:
 
 - **Content Bot: Backend** — FastAPI/Uvicorn at `http://127.0.0.1:8000`.
 - **Content Bot: Frontend** — Vite at `http://127.0.0.1:5173`.
+- **Content Bot: Auth Server** — authentication at `http://127.0.0.1:8080`.
 
-Both processes remain attached to their VS Code terminals, so logs and startup failures are visible immediately. Terminate the compound task, or press `Ctrl+C` in each terminal, to stop them. No API process is launched in the background. To run only one service outside VS Code, use `./scripts/launcher.ps1 -Action backend` or `./scripts/launcher.ps1 -Action frontend`; missing local dependencies are installed on first use. Game news and Steam reviews work without a key. Copy `backend/.env.example` to `backend/.env` only when you want to add options such as `YOUTUBE_API_KEY`.
+The web service processes remain attached to their VS Code terminals, so logs and startup failures are visible immediately. Terminate the compound task, or press `Ctrl+C` in each terminal, to stop them. To run only one service outside VS Code, use `./scripts/launcher.ps1 -Action backend` or `./scripts/launcher.ps1 -Action frontend`; missing local dependencies are installed on first use. Game news and Steam reviews work without a key. Copy `backend/.env.example` to `backend/.env` only when you want to add options such as `YOUTUBE_API_KEY`.
 
 ### Desktop development mode
 
-To display signed-in social pages directly inside Live Wall cards, run **Tasks: Run Task → Content Bot: Desktop Dev**, or:
+**Content Bot: Start** uses **Content Bot: Desktop Dev**, which supports signed-in social pages directly inside Live Wall cards. You can also launch it with:
 
 ```powershell
 .\scripts\launcher.ps1 -Action desktop
@@ -36,7 +39,9 @@ Your local configuration file is [`backend/.env`](backend/.env). It is ignored b
 
 ## Gemini subtitle generation
 
-Subtitle Studio sends a video through the official Gemini REST API, asks Gemini to use audio, visible captions and scene context, then imports the returned Vietnamese cues directly into the timeline. The worker uses a Gemini API key and never requires a globally installed CLI.
+Subtitle Studio sends video through the Gemini REST API to produce Vietnamese subtitles using speech, visible text and scene context. Source text and language are kept separately for review and optional audio alignment. Video without audio can still be processed for visible text.
+
+Generation prompt version 11 allows a sentence or a clause per cue; a complete sentence is not required. Splitting at commas is allowed when it preserves the original subtitles’ content, context, order and timing. Do not merge original cues just to complete a sentence or split mechanically at every comma. When original subtitles are visible, Gemini must translate their content in context and follow their appearance/disappearance times; audio helps interpret the text, with discrepancies flagged for review. Blocks containing multiple sentences must be split using observed boundaries within the original block. The prompt also requires checking all overlaps and uncovered gaps before returning JSON, preserving valid silence and avoiding evenly divided or invented timestamps. The copied JSON prompt follows the same rules. Prompt changes invalidate generation caches and chunk checkpoints, so a new generation uses the updated instructions. Context comes from neighboring original subtitles and audio; users do not need to supply character names or relationships. Optional notes can supplement the translation, but no character profiling stage is required. These are model instructions, not a guarantee of subtitle accuracy.
 
 Configure a key from Google AI Studio in `backend/.env`:
 
@@ -46,9 +51,25 @@ GEMINI_API_KEY=your-google-ai-studio-key
 CONTENT_BOT_GEMINI_MODEL=gemini-3.6-flash
 ```
 
-Restart Content Bot after editing `.env`. Because Gemini accepts at most 20 MB per attached local file, Content Bot automatically creates a temporary MP4 proxy below 19 MB. Videos longer than three minutes are processed in sequential chunks and their timestamps are joined automatically. Temporary proxy files are removed after success, failure or cancellation.
+Restart Content Bot after editing `.env`. In **Settings → Gemini AI**, unlock the Credential Vault to import multiple keys (one per line), name them and enable/disable them. Generation uses all enabled keys automatically, with one active segment per key and fair rotation between available keys. Project groups are no longer used or required. Once the key list has been saved, an empty, disabled or locked list does not fall back to the old environment key.
 
-Set `CONTENT_BOT_GEMINI_MODEL` and the timeout/retry fields in `backend/.env` when needed. Failed Gemini requests retry every 3 seconds by default (`CONTENT_BOT_GEMINI_RETRY_BASE_SECONDS=3`), unless Gemini returns a longer `Retry-After` value. The old `CONTENT_BOT_GEMINI_CLI_*` names are accepted for one release with a deprecation warning; `CONTENT_BOT_GEMINI_CLI_PATH` has no effect. Quota, service availability and data handling follow the configured Google project/key.
+The pinned Silero VAD finds pauses near a two-minute target. A segment can extend past the target to avoid cutting speech; a resource limit produces an explicit error if no suitable pause is found. Segments include neighboring context and keep timestamps on the original video timeline. The application creates proxies below 19 MiB as its own resource policy and uploads them through the Files API. Twelve enabled keys allow twelve simultaneous segments when enough segments and eligible keys are available; proxy compression remains limited to two processes. Worker count is set from enabled keys at run start, while the dispatcher checks key availability before assigning each segment. Temporary proxies are cleaned up; completed segment checkpoints can be reused after a failure or cancellation with **Tiếp tục các đoạn còn thiếu**. Cache retention defaults to seven days and 2 GiB.
+
+Generation HTTP 503 immediately moves down the supported `gemini-3.8-flash` → `gemini-3.7-flash` → `gemini-3.6-flash` chain, starting at the selected model. Model availability and permissions still depend on the key. File API errors do not switch models. Quota responses pause the affected key/model according to retry instructions within a bounded deadline; other keys remain eligible until they receive their own errors. The default remains `gemini-3.6-flash`; unrelated model families are never silently substituted.
+
+If chunks remain incomplete after temporary errors, generation automatically performs up to three recovery rounds in the same job. Only incomplete eligible chunks are retried; completed checkpoints are preserved. With the default retry settings, recovery waits 5, 10 and 20 seconds and displays a countdown; the configured retry base can lengthen these waits, capped at 60 seconds. Overloaded models become eligible again after the wait, while unsupported models, invalid keys, denied permissions and daily quota restrictions remain blocked. Cancel also interrupts the recovery wait. Each recovery round has bounded per-chunk request/deadline budgets; setting `CONTENT_BOT_GEMINI_MAX_RETRIES=0` disables recovery. **Tiếp tục các đoạn còn thiếu** remains available after persistent errors exhaust recovery or after cancellation.
+
+**Tạo lại phụ đề** generates a new version and saves the existing document. Open **Phiên bản phụ đề** to compare and explicitly select the version to use. **Căn lại thời gian** supports all cues, flagged cues, the selected cue or a time range. It uses original-language text, respects locks and retains uncertain timing. Additional ASR alignment is optional and requires a locally available model; millisecond precision does not imply equivalent timing accuracy.
+
+**Kiểm tra sửa chữa bằng AI** runs one combined review when you click **Sửa bằng AI**. Select the whole video, a time range or a group of cues. Every reviewed clip is checked for content errors, overly long subtitles and abnormal timing together, using the video, original text, translation and ten seconds of surrounding media context. Before sending media, the local scan flags cues containing two or more sentences, including short cues, and supplies sentence counts plus exact intervals for every overlap and uncovered gap. Gaps include the beginning/end of the video and the entire middle of long empty intervals; silence is a candidate for inspection, not proof of missing speech. No separate scan or review tabs are needed. Enabled API keys process clips in parallel, with checkpoint resume.
+
+Gemini proposes content corrections, shorter cues and timing changes in one result list. A cue that is both long and mistimed can be split and repositioned in the same proposal. Each cue appears in at most one proposal per clip, and edits stay within the selected scope. Pure timing changes preserve wording; readability splits conserve translated/source words and produce cues of at most one sentence, 84 characters, six seconds and two lines. Locked cues are context only. Inspect before/after text, timestamps and evidence, then apply individual proposals or all valid proposals, skip, or undo. New edits to affected cues or context cause conflicts instead of being overwritten. Sentence counts use punctuation heuristics with exceptions for decimals, common abbreviations and ellipses; results still need human review. Existing review records remain available; newly started combined reviews use prompt version 5.
+
+Invalid proposals are rejected individually with warnings, preserving valid suggestions without repeating the entire Gemini request. Mixed groups containing unauthorized cues are rejected as a whole. Progress shows completed/active/failed clips, elapsed time and the current upload, analysis or retry step. Partial results and warnings remain visible after a job failure. Resume retries only unfinished clips. Three consecutive clip failures stop new work while already running clips finish saving; combined review allows up to 120 seconds per generation response within a 300-second clip budget.
+
+Advanced generation settings expose pause/segment targets, optional alignment and shared terminology. Concurrency follows enabled key count; legacy `max_concurrent`, `CONTENT_BOT_GEMINI_MAX_CONCURRENT` and `CONTENT_BOT_GEMINI_GROUP_CONCURRENT` values are accepted but ignored. Per-segment progress includes key names, actual models and wait/error reasons. Timeout, retry and cache defaults are documented in `backend/.env.example`. Legacy `CONTENT_BOT_GEMINI_CLI_*` configuration remains accepted with a deprecation warning; `CONTENT_BOT_GEMINI_CLI_PATH` has no effect.
+
+See the [Gemini pipeline handoff and acceptance checklist](docs/GEMINI_SUBTITLE_PIPELINE_ACCEPTANCE.md) for verified behavior, sample artifacts and the pending real API/multiple-key/video acceptance steps.
 
 If a scan or setup step is unclear, inspect the **Content Bot: Backend** terminal. The API also exposes `/api/v1/health` and `/api/v1/ready`; credential values are never written to terminal output.
 
@@ -58,7 +79,7 @@ SQLite is the default application database. Topics, crawler runs, collected cont
 
 The auth-server remains independent and is responsible for users, login and authorization. Its own database or fallback configuration does not gate creation of topics in the main Content Bot API.
 
-API credentials entered in Settings are encrypted in the local Credential Vault. When the Vault is locked, new operations fall back to matching `.env` values. Database paths and connection strings are startup configuration, not Vault credentials.
+API credentials entered in Settings are encrypted in the local Credential Vault. Legacy credentials may fall back to matching `.env` values while locked; a saved Gemini key list is authoritative and disables that fallback. Database paths and connection strings are startup configuration, not Vault credentials.
 
 For a legacy deployment that deliberately keeps application data in MongoDB, set `CONTENT_BOT_STORAGE_BACKEND=mongodb`, `MONGODB_URI`, and optionally `MONGODB_DATABASE` in `backend/.env`, then restart the backend. SQLite remains the recommended desktop/local mode.
 
@@ -151,6 +172,12 @@ For a no-login smoke test, create the keyword `Hades II`, select **Bluesky**, **
 .\scripts\launcher.ps1 -Action desktop
 
 ## Refactoring verification
+
+Local voice generation runs one model worker at a time, including across backend restarts. Pausing keeps completed WAV/checkpoint pairs; continuing recovers valid audio from interrupted runs before generating missing clips. On Windows, cancellation stops the entire worker process tree. A supervised worker exits within approximately 30 seconds of losing its backend heartbeat; standalone Kaggle packages do not require this heartbeat.
+
+Voice workers use pure ONNX on CPU (no PyTorch import), with one inter-op thread and ONNX idle spinning disabled. GPU v3 workers support small batches while keeping a separate WAV/checkpoint for every subtitle; a failed batch is split and the smaller batch limit is retained for that run. CPU and v2 stay sequential. Batch sampling can produce different waveforms, so compare pronunciation and missing/repeated words when evaluating quality.
+
+Machine-specific settings are read from the ignored `runtimes/voiceover/performance-profile.json` when its SDK/model revision matches. Without a profile, defaults are four CPU threads, two GPU-support CPU threads, and GPU batches of two. `CONTENT_BOT_VOICE_THREADS` (1–8) and `CONTENT_BOT_VOICE_BATCH_SIZE` (1–4) override these settings for the worker process. `CONTENT_BOT_VOICE_PROFILE` can point to another profile. These settings do not change the model, sample rate, temperature, repetition penalty, or subtitle boundaries. See [measured balance on the i5-13420H / RTX 4050](docs/VOICEOVER_HARDWARE_BALANCE.md) for the selected local settings and measurement limits.
 
 Module ownership and local verification commands are documented in [Module boundaries](docs/MODULE_BOUNDARIES.md). The [refactoring acceptance report](docs/REFACTOR_ACCEPTANCE.md) tracks measured results and remaining checks against the [original review](docs/REFACTOR_REVIEW_2026-09-12.md).
 

@@ -4,6 +4,7 @@ import { VoiceApiError, voiceRequest } from './api';
 import { DEFAULT_PROFILE, type VoiceDocument, type VoiceJob, type VoiceStatus } from './types';
 import { planVoiceClips, splitGroupedVoiceClips, syncVoiceCues } from './planner';
 import { mergeVoiceDocument } from './merge';
+import { legacySync, refreshTiming } from './timing';
 
 export function useVoiceover(project: string | null, fingerprint: string | undefined, cues: readonly SubtitleCueV2[]) {
   const [document, setState] = useState<VoiceDocument | null>(null);
@@ -26,6 +27,9 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
   const projectRef = useRef(project);
   const undo = useRef<VoiceDocument[]>([]);
   const redo = useRef<VoiceDocument[]>([]);
+  const syncSource = useRef<{ project: string; cues: readonly SubtitleCueV2[]; signature: string } | null>(null);
+  const syncCanceled = useRef<string | null>(null);
+  const syncUndoJob = useRef<string | null>(null);
   const replace = useCallback((doc: VoiceDocument | null) => { current.current = doc; setState(doc); }, []);
   const acceptServerDocument = useCallback((doc: VoiceDocument | null) => {
     if (!doc || doc.project_id !== projectRef.current) return;
@@ -46,7 +50,24 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
   const edit = useCallback((fn: (doc: VoiceDocument) => VoiceDocument) => {
     if (!current.current) return;
     undo.current = [...undo.current.slice(-29), current.current]; redo.current = [];
-    dirty.current = true; setSaveState('dirty'); replace(fn(current.current));
+    const previous = current.current;
+    const edited = fn(previous);
+    const prior = new Map(previous.clips.map(c => [c.id, c]));
+    const generationChanged = JSON.stringify([edited.profile, edited.pronunciation])
+      !== JSON.stringify([previous.profile, previous.pronunciation]);
+    const clips = edited.clips.map(clip => {
+      if (generationChanged && clip.sync?.alignment) clip = { ...clip, sync: { ...clip.sync, alignment: null } };
+      const old = prior.get(clip.id);
+      if (!old) return clip;
+      const timingChanged = ['start_ms', 'end_ms', 'offset_ms', 'rate'].some(key =>
+        clip[key as keyof typeof clip] !== old[key as keyof typeof old]);
+      const textChanged = clip.spoken_text !== old.spoken_text;
+      if (!textChanged && (!timingChanged || clip.sync !== old.sync)) return clip;
+      return { ...clip, sync: { ...(clip.sync ?? legacySync()),
+        ...(timingChanged ? { timing_origin: 'manual' as const, timing_locked: true } : {}),
+        ...(textChanged ? { text_locked: true } : {}) } };
+    });
+    dirty.current = true; setSaveState('dirty'); replace({ ...edited, schema_version: 2, clips: refreshTiming(clips) });
   }, [replace]);
   const refreshStatus = useCallback(async () => {
     try { setStatus(await voiceRequest<VoiceStatus>('/status')); }
@@ -167,7 +188,13 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
         const doc = await voiceRequest<VoiceDocument>(`/projects/${job.project_id}`);
         if (disposed || projectRef.current !== job.project_id) return;
         setJob(next);
-        if (!dirty.current && !saving.current) { baseline.current = doc; replace(doc); }
+        if (!dirty.current && !saving.current) {
+          if (current.current && next.sync_result?.applied && syncUndoJob.current !== next.id
+            && current.current.clips.some((clip, index) => clip.asset_id !== doc.clips[index]?.asset_id)) {
+            undo.current = [...undo.current.slice(-29), current.current]; redo.current = []; syncUndoJob.current = next.id;
+          }
+          baseline.current = doc; replace(doc);
+        }
         if (['queued', 'running'].includes(next.state)) timer = setTimeout(poll, 1200);
       } catch (e) { if (!disposed) { setError(String(e)); timer = setTimeout(poll, 3000); } }
     };
@@ -175,12 +202,33 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
     return () => { disposed = true; clearTimeout(timer); };
   }, [job, replace]);
 
+  useEffect(() => {
+    if (!job || !['queued', 'running'].includes(job.state) || job.project_id !== project || syncCanceled.current === job.id) return;
+    const previous = syncSource.current;
+    if (!previous || previous.project !== project) {
+      if (project) syncSource.current = { project, cues, signature: JSON.stringify(cues) };
+      return;
+    }
+    const changedSource = previous.cues !== cues && previous.signature !== JSON.stringify(cues);
+    if (changedSource || (job.phase === 'sync' && dirty.current)) {
+      syncCanceled.current = job.id;
+      void voiceRequest(`/jobs/${job.id}/cancel`, { method: 'POST' }).catch(e => {
+        syncCanceled.current = null; setError(String(e));
+      });
+    }
+  }, [job, project, cues, document]);
+
   const run = async (ids?: string[]) => {
     setBusy(true); setError('');
     try {
       if (!status?.ready || !status.devices.includes(device)) throw new Error('Thiết bị tạo giọng chưa sẵn sàng. Kiểm tra lại bộ tạo giọng.');
       const doc = await save();
-      const nextJob = await voiceRequest<VoiceJob>('/jobs', { method: 'POST', body: JSON.stringify({ project_id: doc.project_id, device, clip_ids: ids ?? null }) });
+      syncSource.current = { project: doc.project_id, cues, signature: JSON.stringify(cues) };
+      syncCanceled.current = null;
+      const nextJob = await voiceRequest<VoiceJob>('/jobs', { method: 'POST', body: JSON.stringify({
+        project_id: doc.project_id, device, clip_ids: ids ?? null,
+        subtitle_document: { schema_version: 2, language: 'vi', timebase: 'milliseconds', segments: cues },
+      }) });
       if (projectRef.current === doc.project_id) setJob(nextJob);
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   };
@@ -189,7 +237,7 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
     const prior = current.current?.project_id === project ? current.current : null;
     const existingIds = new Set(prior?.clips.flatMap(c => c.source_cue_ids));
     const added = planVoiceClips(cues.filter(c => !existingIds.has(c.id)));
-    const doc: VoiceDocument = prior ?? { schema_version: 1, project_id: project, video_fingerprint: fingerprint,
+    const doc: VoiceDocument = prior ?? { schema_version: 2, project_id: project, video_fingerprint: fingerprint,
       revision: 0, profile: DEFAULT_PROFILE, clips: [], pronunciation: {},
       mix: { enabled: true, muted: false, gain: 1, original_gain: 0.25, mode: 'duck' } };
     dirty.current = true; setSaveState('dirty'); replace({ ...doc, clips: [...doc.clips, ...added].sort((a, b) => a.start_ms - b.start_ms) });
@@ -220,7 +268,13 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
     if (next && current.current) { to.current.push(current.current); dirty.current = true;
       setSaveState('dirty'); replace({ ...next, revision: current.current.revision }); }
   };
+  const acceptSyncResult = (doc: VoiceDocument) => {
+    if (doc.project_id !== projectRef.current) return;
+    if (current.current) { undo.current = [...undo.current.slice(-29), current.current]; redo.current = []; }
+    acceptServerDocument(doc);
+  };
   return { document: document?.project_id === project ? document : null, status, job, error, setError,
+    sourceCues: cues, acceptSyncResult,
     conflict, resolveConflict,
     selectedId, setSelectedId, device, setDevice, busy, loading: !project || loadedProject !== project,
     retryLoad: () => { setError(''); setLoadAttempt(value => value + 1); },

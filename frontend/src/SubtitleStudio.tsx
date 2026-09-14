@@ -1,5 +1,10 @@
 import { useSubtitleImport } from "./subtitles/useSubtitleImport";
+import { GeminiReviewPanel } from "./subtitles/GeminiReviewPanel";
+import { SubtitleVersionsPanel } from "./subtitles/SubtitleVersionsPanel";
+import { GeminiAdvancedOptions } from "./subtitles/GeminiAdvancedOptions";
+import { GeminiChunkProgress } from "./subtitles/GeminiChunkProgress";
 import { useRenderedVideoDownload } from "./subtitles/useRenderedVideoDownload";
+import type { DesktopSelectedVideo } from "./desktopLiveWall";
 import {
 AlignCenter,
 AlignLeft,
@@ -36,6 +41,8 @@ type GeminiSubtitleJob,
 type MediaMetadata,
 type SubtitleBurnOptions,
 type SubtitleCueV2,
+type GeminiSubtitleOptions,
+type SubtitleAlignmentOptions,
 type SubtitleJob,
 type SubtitleRenderJob,
 type SubtitleWarning
@@ -159,7 +166,8 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const overlayObjectUrlRef = useRef<string | null>(null);
   const [activeTab, setActiveTab] = useState<StudioTab>("transcript");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [videoFile, setVideoFile] = useState<Pick<File, "name" | "size" | "lastModified"> | null>(null);
+  const [pickingVideo, setPickingVideo] = useState(false);
   const [projectName, setProjectName] = useState(
     initialDraft?.projectName ?? "Dự án chưa đặt tên",
   );
@@ -177,10 +185,10 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const [rawText, setRawText] = useState(initialDraft?.rawText ?? "");
   const {
     cues,
-    commit: commitCues,
+    commit: commitCueHistory,
     reset: resetCues,
-    undo,
-    redo,
+    undo: undoHistory,
+    redo: redoHistory,
     canUndo,
     canRedo,
   } = useSubtitleHistory(initialDraft?.cues ?? []);
@@ -191,9 +199,10 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const [activePositionCueId, setActivePositionCueId] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<SubtitleWarning[]>([]);
   const [activeGeminiJobId, setActiveGeminiJobId] = useState<string | null>(
-    initialDraft?.activeGeminiJobId ?? null,
+    initialDraft?.activeGeminiJobId ?? initialDraft?.lastGeminiJobId ?? null,
   );
   const [generationJob, setGenerationJob] = useState<GeminiSubtitleJob | null>(null);
+  const generationPollErrorRef = useRef<string | null>(null);
   const [geminiStatus, setGeminiStatus] = useState<GeminiApiStatus | null>(null);
   const [geminiModels, setGeminiModels] = useState<GeminiModel[]>([]);
   const [geminiModelsError, setGeminiModelsError] = useState<string | null>(null);
@@ -201,6 +210,11 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const [geminiModelsReload, setGeminiModelsReload] = useState(0);
   const [geminiModel, setGeminiModel] = useState("");
   const [geminiBilingual, setGeminiBilingual] = useState(true);
+  const [geminiAdvanced, setGeminiAdvanced] = useState<GeminiSubtitleOptions>({ alignment_mode: "off", chunk_policy: { target_ms: 120000, max_chunk_ms: 600000, min_pause_ms: 800, context_ms: 2000 } });
+  const [alignmentEngine, setAlignmentEngine] = useState<SubtitleAlignmentOptions["engine"]>("auto");
+  const [alignmentScope, setAlignmentScope] = useState("review");
+  const [alignmentStart, setAlignmentStart] = useState(0);
+  const [alignmentEnd, setAlignmentEnd] = useState(120);
   const [activeAlignmentJobId, setActiveAlignmentJobId] = useState<string | null>(
     initialDraft?.activeAlignmentJobId ?? null,
   );
@@ -217,7 +231,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     content: string;
   } | null>(null);
   const liveAssContent =
-    videoId && liveAssTrack?.videoId === videoId ? liveAssTrack.content : null;
+    videoId && cues.length > 0 && liveAssTrack?.videoId === videoId ? liveAssTrack.content : null;
   const [overlayId, setOverlayId] = useState<string | null>(
     initialDraft?.overlayId ?? null,
   );
@@ -250,13 +264,23 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const [overlayUploading, setOverlayUploading] = useState(false);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const sortedCues = useMemo(() => sortCues(cues), [cues]);
+  const [documentMeta, setDocumentMeta] = useState<{ revision: number; run_id: string | null }>(initialDraft?.documentMeta ?? { revision: 0, run_id: null });
+  const commitCues = useCallback((...args: Parameters<typeof commitCueHistory>) => {
+    commitCueHistory(...args);
+    setDocumentMeta(meta => ({ ...meta, revision: meta.revision + 1 }));
+  }, [commitCueHistory]);
+  const undo = useCallback(() => { undoHistory(); setDocumentMeta(meta => ({ ...meta, revision: meta.revision + 1 })); }, [undoHistory]);
+  const redo = useCallback(() => { redoHistory(); setDocumentMeta(meta => ({ ...meta, revision: meta.revision + 1 })); }, [redoHistory]);
   const voice = useVoiceover(videoId, mediaMetadata?.fingerprint, sortedCues);
   const subtitleDocument = useMemo(
-    () => createSubtitleDocument(sortedCues),
-    [sortedCues],
+    () => ({ ...createSubtitleDocument(sortedCues), ...documentMeta }),
+    [sortedCues, documentMeta],
   );
+  const alignmentSnapshotRef = useRef<typeof subtitleDocument | null>(null);
+  const generationSnapshotRef = useRef<typeof subtitleDocument | null>(null);
   const renderOptions = useMemo(
     () => createRenderOptions(options, videoClips),
     [options, videoClips],
@@ -304,7 +328,9 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
           renderOptions,
           controller.signal,
         )
-        .then((result) => setLiveAssTrack({ videoId, content: result.ass }))
+        .then((result) => {
+          if (!controller.signal.aborted) setLiveAssTrack({ videoId, content: result.ass });
+        })
         .catch((previewError: unknown) => {
           if (
             !controller.signal.aborted &&
@@ -330,11 +356,12 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
       !alignmentRunning,
   );
   const generationRunning = Boolean(activeGeminiJobId) ||
+    (generationJob?.phase === "interrupted" && !generationJob.cancel_requested) ||
     generationJob?.state === "queued" ||
     generationJob?.state === "running";
   const canGenerate = Boolean(
     videoId &&
-      mediaMetadata?.has_audio &&
+      mediaMetadata &&
       geminiStatus?.authenticated &&
       (geminiModel || geminiStatus?.model) &&
       !generationRunning,
@@ -460,7 +487,12 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
           const result = job.result;
           if (result) {
             const nextCues = sortCues(result.document.segments);
-            resetCues(nextCues);
+            if (subtitleDocument === alignmentSnapshotRef.current) {
+              commitCues(nextCues);
+              setDocumentMeta({ revision: result.document.revision ?? 0, run_id: result.document.run_id ?? null });
+            } else {
+              setNotice("Đã lưu kết quả căn trong Phiên bản phụ đề. Bản đang chỉnh được giữ vì đã thay đổi hoặc phiên làm việc được khôi phục.");
+            }
             setWarnings(result.warnings);
             setSelectedCueId((current) =>
               current && nextCues.some((cue) => cue.id === current)
@@ -490,18 +522,34 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   });
 
   useJobPolling({
-    jobId: activeGeminiJobId,
+    jobId: activeGeminiJobId ?? (generationJob?.phase === "interrupted" && !generationJob.cancel_requested ? generationJob.id : null),
     fetchJob: api.geminiSubtitleJob,
     interval: 1000, retryDelay: 2000,
+    isTerminal: job => ["succeeded", "failed", "canceled"].includes(job.state) &&
+      !(job.phase === "interrupted" && !job.cancel_requested),
     onJob: (job) => {
         setGenerationJob(job);
+        if (job.phase === "interrupted" && !job.cancel_requested) {
+          setError(current => current === job.error ? null : current);
+          return;
+        }
+        const interruptedError = generationJob?.phase === "interrupted" ? generationJob.error : null;
+        if (interruptedError) setError(current => current === interruptedError ? null : current);
+        const connectionError = generationPollErrorRef.current;
+        if (connectionError) {
+          setError(current => current === connectionError ? null : current);
+          generationPollErrorRef.current = null;
+        }
         if (job.state === "succeeded") {
           if (job.result) {
             const nextCues = sortCues(job.result.document.segments);
-            resetCues(nextCues);
-            setRawText(job.result.srt);
-            setWarnings(job.result.warnings);
-            setSelectedCueId(nextCues[0]?.id ?? null);
+            if (cues.length === 0 && subtitleDocument === generationSnapshotRef.current) {
+              setDocumentMeta({ revision: job.result.document.revision ?? 0, run_id: job.result.document.run_id ?? null });
+              commitCues(nextCues);
+              setRawText(job.result.srt);
+              setWarnings(job.result.warnings);
+              setSelectedCueId(nextCues[0]?.id ?? null);
+            }
           }
           setActiveGeminiJobId(null);
           return;
@@ -516,12 +564,12 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         }
     },
     onError: (pollError) => {
-        setError(
-          getErrorMessage(
-            pollError,
-            "Mất kết nối khi đọc tiến độ Gemini API; đang thử lại.",
-          ),
+        const message = getErrorMessage(
+          pollError,
+          "Mất kết nối khi đọc tiến độ Gemini API; đang thử lại.",
         );
+        generationPollErrorRef.current = message;
+        setError(message);
     },
   });
 
@@ -565,8 +613,10 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         mediaDurationMs,
         rawText,
         cues,
+        documentMeta,
         selectedCueId,
         activeGeminiJobId,
+        lastGeminiJobId: generationJob?.id ?? (initialDraft?.videoId === videoId ? initialDraft?.lastGeminiJobId : null) ?? null,
         activeAlignmentJobId,
         activeRenderJobId,
         options,
@@ -577,9 +627,13 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         videoClips,
       }), [
     activeGeminiJobId,
+    generationJob?.id,
+    initialDraft?.lastGeminiJobId,
+    initialDraft?.videoId,
     activeAlignmentJobId,
     activeRenderJobId,
     cues,
+    documentMeta,
     mediaDurationMs,
     options,
     overlayId,
@@ -620,7 +674,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     [mediaMetadata],
   );
 
-  const handleFileChange = async (file: File) => {
+  const handleFileChange = async (file: File | DesktopSelectedVideo) => {
     if (voice.document) {
       try { await voice.save(); }
       catch (saveError) {
@@ -633,6 +687,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     uploadControllerRef.current = controller;
     setVideoFile(file);
     setVideoId(null);
+    setLiveAssTrack(null);
     setProjectName(file.name);
     setUploading(true);
     setError(null);
@@ -649,6 +704,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     setActiveRenderJobId(null);
     setRenderJob(null);
     resetCues([]);
+    setDocumentMeta({ revision: 0, run_id: null });
     setVideoClips([]);
     setSelectedVideoClipId(null);
     setLastDeletedVideoClip(null);
@@ -657,7 +713,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     setSelectedMaskId(null);
     setWarnings([]);
     try {
-      const result = await api.uploadSubtitleVideo(file, controller.signal);
+      const result = "upload" in file ? file.upload : await api.uploadSubtitleVideo(file, controller.signal);
       if (controller.signal.aborted) return;
       setVideoId(result.video_id);
       setMediaMetadata(result.media);
@@ -673,6 +729,19 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     } finally {
       if (!controller.signal.aborted) setUploading(false);
     }
+  };
+
+  const handleChooseProjectVideo = async () => {
+    const choose = window.contentBotDesktop?.pickProjectVideo;
+    if (!choose || pickingVideo || uploading) return;
+    setPickingVideo(true);
+    setError(null);
+    try {
+      const selected = await choose({ apiBase: API_BASE, accessToken: localStorage.getItem("content_bot_access_token") ?? undefined });
+      if (selected) await handleFileChange(selected);
+    } catch (error) {
+      setError(getErrorMessage(error, "Không mở được thư mục video dự án."));
+    } finally { setPickingVideo(false); }
   };
 
   const handleOverlayChange = async (file: File) => {
@@ -752,22 +821,26 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   });
 
   const handleGenerateWithGemini = async () => {
-    if (!videoId || !mediaMetadata?.has_audio) {
-      setError("Hãy tải video có audio trước khi chạy Gemini.");
+    if (!videoId || !mediaMetadata) {
+      setError("Hãy tải video trước khi chạy Gemini.");
       return;
     }
     generationControllerRef.current?.abort();
     const controller = new AbortController();
     generationControllerRef.current = controller;
+    generationSnapshotRef.current = subtitleDocument;
     setError(null);
     try {
       const job = await api.generateSubtitlesWithGemini(
         videoId,
         {
+          ...geminiAdvanced,
           bilingual: geminiBilingual,
           model: geminiModel || geminiStatus?.model || undefined,
         },
         controller.signal,
+        subtitleDocument,
+        cues.length > 0,
       );
       if (controller.signal.aborted) return;
       setGenerationJob(job);
@@ -821,26 +894,18 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
       alignmentControllerRef.current = controller;
       setError(null);
       try {
-        const timingSources = new Set(sortedCues.map((cue) => cue.timing_source));
-        const document = {
-          schema_version: 2 as const,
-          language: "vi",
-          timebase: "milliseconds" as const,
-          timing_source:
-            timingSources.size === 1
-              ? sortedCues[0]?.timing_source ?? "gemini_estimate"
-              : ("gemini_estimate" as const),
-          timing_precision_ms: Math.max(
-            1,
-            ...sortedCues.map((cue) => cue.timing_precision_ms),
-          ),
-          segments: sortedCues,
-        };
+        const document = subtitleDocument;
+        alignmentSnapshotRef.current = document;
+        const selectedIds = cueIds ?? (alignmentScope === "all" ? undefined : sortedCues.filter(cue =>
+          alignmentScope === "selected" ? cue.id === selectedCueId : alignmentScope === "range"
+            ? cue.start_ms >= alignmentStart * 1000 && cue.end_ms <= alignmentEnd * 1000
+            : cue.needs_review).map(cue => cue.id));
+        if (selectedIds?.length === 0) { setError("Không có cue trong phạm vi căn đã chọn."); return; }
         const job = await api.alignSubtitleDocument(
           videoId,
           document,
-          { engine: "auto" },
-          cueIds,
+          { engine: alignmentEngine },
+          selectedIds,
           controller.signal,
         );
         if (controller.signal.aborted) return;
@@ -854,7 +919,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         }
       }
     },
-    [mediaMetadata, sortedCues, videoId],
+    [mediaMetadata, sortedCues, videoId, subtitleDocument, alignmentScope, alignmentStart, alignmentEnd, selectedCueId, alignmentEngine],
   );
 
   const handleCancelAlignment = async () => {
@@ -1126,10 +1191,10 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         overlayNeedsUpload={overlayNeedsUpload}
       />
 
-      {error && (
-        <div className="subtitle-studio-error" role="alert">
-          <span>{error}</span>
-          <button type="button" onClick={() => setError(null)} aria-label="Đóng thông báo lỗi"><X size={16} /></button>
+      {(error || notice) && (
+        <div className={`subtitle-studio-error${error ? "" : " is-notice"}`} role={error ? "alert" : "status"}>
+          <span>{error || notice}</span>
+          <button type="button" onClick={() => { setError(null); setNotice(null); }} aria-label="Đóng thông báo"><X size={16} /></button>
         </div>
       )}
 
@@ -1163,19 +1228,25 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                 <h2>Tệp dự án</h2>
                 <p>Video gốc và ảnh phủ được tải một lần, sau đó tái sử dụng trong preview.</p>
               </div>
-              <label className={`studio-file-drop ${uploading ? "is-loading" : ""}`}>
+              <label className={`studio-file-drop ${uploading || pickingVideo ? "is-loading" : ""}`}>
                 <input
                   type="file"
-                  accept="video/*"
-                  disabled={uploading}
+                  accept=".mp4,.webm,.mkv"
+                  disabled={uploading || pickingVideo}
+                  onClick={(event) => {
+                    if (window.contentBotDesktop?.pickProjectVideo) {
+                      event.preventDefault();
+                      void handleChooseProjectVideo();
+                    }
+                  }}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
                     if (file) void handleFileChange(file);
                   }}
                 />
-                {uploading ? <LoaderCircle className="spin" size={22} /> : <Upload size={22} />}
-                <strong>{uploading ? "Đang tải video" : videoFile?.name ?? "Chọn video"}</strong>
-                <span>MP4, MOV hoặc WebM</span>
+                {uploading || pickingVideo ? <LoaderCircle className="spin" size={22} /> : <Upload size={22} />}
+                <strong>{pickingVideo ? "Đang chọn video" : uploading ? "Đang tải video" : videoFile?.name ?? "Chọn video"}</strong>
+                <span>MP4, WebM hoặc MKV</span>
               </label>
               <label className={`studio-file-drop is-compact ${overlayUploading ? "is-loading" : ""}`}>
                 <input
@@ -1261,7 +1332,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                       onClick={() => void handleGenerateWithGemini()}
                     >
                       <Sparkles size={17} />
-                      Tạo phụ đề
+                      {cues.length ? "Tạo lại phụ đề" : "Tạo phụ đề"}
                     </button>
                   )}
                 </div>
@@ -1318,6 +1389,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                     )}
                   </div>
                 </div>
+                <GeminiAdvancedOptions value={geminiAdvanced} disabled={generationRunning} onChange={setGeminiAdvanced} />
                 {!videoId && <small>Hãy tải video trước để bật Gemini.</small>}
                 {geminiStatus && !geminiStatus.authenticated && (
                   <small role="alert" className="subtitle-generation-warn">
@@ -1344,7 +1416,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                   </small>
                 )}
                 {videoId && mediaMetadata && !mediaMetadata.has_audio && (
-                  <small role="alert">Video không có audio để tạo phụ đề.</small>
+                  <small>Video không có audio; Gemini vẫn có thể đọc chữ trên hình.</small>
                 )}
                 {generationJob && (
                   <div
@@ -1356,12 +1428,26 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                       <strong>{generationJob.progress}%</strong>
                     </div>
                     <progress max={100} value={generationJob.progress} />
+                    {generationRunning && !generationJob.cancel_requested && (
+                      <small>Nếu API khởi động lại, tác vụ sẽ tự tiếp tục các đoạn còn thiếu.</small>
+                    )}
+                    {!generationRunning && (generationJob.state === "failed" || generationJob.state === "canceled") && <button type="button" className="studio-secondary-button" onClick={async () => {
+                      generationControllerRef.current?.abort();
+                      const controller = new AbortController();
+                      generationControllerRef.current = controller;
+                      generationSnapshotRef.current = null;
+                      try { const job = await api.resumeGeminiSubtitleJob(generationJob.id, controller.signal); if (!controller.signal.aborted) { setGenerationJob(job); setActiveGeminiJobId(job.id); } }
+                      catch (error) { if (!controller.signal.aborted) setError(getErrorMessage(error, "Không thể tiếp tục tác vụ.")); }
+                    }}>Tiếp tục các đoạn còn thiếu</button>}
+                    <GeminiChunkProgress job={generationJob} />
                     {generationJob.cancel_requested && generationRunning && (
                       <small>Đang dừng tiến trình Gemini an toàn.</small>
                     )}
                     {generationJob.state === "succeeded" && generationJob.result && (
                       <small>
-                        {generationJob.result.segment_count} cue · {generationJob.result.chunk_count} lượt Gemini
+                        {generationJob.result.version_id && "Đã lưu bản mới trong Phiên bản phụ đề. "}
+                        {generationJob.result.segment_count} cue · {generationJob.result.chunk_count} đoạn
+                        {generationJob.result.actual_models?.length ? ` · Model thực tế: ${generationJob.result.actual_models.join(", ")}` : ""}
                         {generationJob.result.processing_seconds
                           ? ` · ${Math.round(generationJob.result.processing_seconds)} giây xử lý`
                           : ""}
@@ -1370,6 +1456,12 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                   </div>
                 )}
               </section>
+              {videoId && <SubtitleVersionsPanel key={`versions-${videoId}`} videoId={videoId} document={subtitleDocument} reloadKey={`${generationJob?.result?.version_id ?? ""}:${alignmentJob?.result?.version_id ?? ""}`}
+                onDocument={document => { commitCues(document.segments); setDocumentMeta({ revision: document.revision ?? 0, run_id: document.run_id ?? null }); }} />}
+              {videoId && sortedCues.length > 0 && <GeminiReviewPanel key={videoId} videoId={videoId} document={subtitleDocument}
+                durationMs={mediaDurationMs} selectedCueId={selectedCueId} initialModel={geminiModel || geminiStatus?.model || "gemini-3.6-flash"}
+                onDocument={document => { commitCues(document.segments); setDocumentMeta({ revision: document.revision ?? 0, run_id: document.run_id ?? null }); }}
+                onSeek={ms => workspaceRef.current?.seekTo(ms)} />}
               <div className="subtitle-manual-divider"><span>Hoặc nhập phụ đề thủ công</span></div>
               <button
                 type="button"
@@ -1405,7 +1497,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                       <strong>Căn timing theo audio</strong>
                       <span>
                         {mediaMetadata?.has_audio
-                          ? "Cue thủ công được khóa; cache theo audio + transcript."
+                          ? "Căn theo lời gốc; giữ cue khóa và timing chưa đủ bằng chứng."
                           : "Video này không có audio để căn tự động."}
                       </span>
                     </div>
@@ -1427,10 +1519,17 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                         onClick={() => void handleAlign()}
                       >
                         <AudioLines size={16} />
-                        Căn tất cả
+                        Căn lại thời gian
                       </button>
                     )}
                   </div>
+                  <label>Phạm vi căn <select value={alignmentScope} disabled={alignmentRunning} onChange={e => setAlignmentScope(e.target.value)}>
+                    <option value="review">Cue cần kiểm tra</option><option value="selected">Cue đang chọn</option><option value="range">Khoảng thời gian</option><option value="all">Tất cả</option>
+                  </select></label>
+                  {alignmentScope === "range" && <div><label>Từ giây <input type="number" min={0} value={alignmentStart} onChange={e => setAlignmentStart(Number(e.target.value))} /></label><label>Đến giây <input type="number" min={alignmentStart} value={alignmentEnd} onChange={e => setAlignmentEnd(Number(e.target.value))} /></label></div>}
+                  <label>Phương pháp căn <select value={alignmentEngine} disabled={alignmentRunning} onChange={e => setAlignmentEngine(e.target.value as SubtitleAlignmentOptions["engine"])}>
+                    <option value="auto">Theo thiết lập máy</option><option value="faster_whisper">ASR theo lời gốc</option><option value="energy">Biên năng lượng audio</option>
+                  </select></label>
                   {alignmentJob && (
                     <div
                       className={`subtitle-job-progress state-${alignmentJob.state}`}
@@ -1459,7 +1558,13 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                   <summary>{warnings.length} cảnh báo timing</summary>
                   <ul>
                     {warnings.slice(0, 12).map((warning, index) => (
-                      <li key={`${warning.code}-${warning.cue_id ?? index}`}>{warning.message}</li>
+                      <li key={`${warning.code}-${warning.cue_id ?? index}`}>{warning.message}
+                        {(warning.start_ms != null || warning.cue_id || warning.cue_ids?.length) && <button type="button" className="studio-inline-link" onClick={() => {
+                          const cue = sortedCues.find(cue => cue.id === (warning.cue_id ?? warning.cue_ids?.[0]));
+                          workspaceRef.current?.seekTo(warning.start_ms ?? cue?.start_ms ?? 0);
+                          if (cue) setSelectedCueId(cue.id);
+                        }}>Xem đoạn này</button>}
+                      </li>
                     ))}
                   </ul>
                 </details>
@@ -1478,6 +1583,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                   onMergeNext={handleMergeCue}
                   onChange={handleCueChange}
                   onAlignCue={(cueId) => void handleAlign([cueId])}
+                  onToggleLock={cueId => commitCues(current => current.map(cue => cue.id === cueId ? { ...cue, locked: !cue.locked, revision: cue.revision + 1 } : cue))}
                 />
               )}
             </div>

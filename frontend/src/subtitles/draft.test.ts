@@ -10,6 +10,31 @@ const options = {
 } as SubtitleBurnOptions;
 
 describe("subtitle draft migration", () => {
+  it('preserves independent speech bounds and their provenance across restart', () => {
+    const evidence = { method: 'asr_observed', audio_identity: 'a'.repeat(64), transcript_sha256: 'b'.repeat(64),
+      start_ms: 800, end_ms: 2100, algorithm: 'pilot', transcript_complete: true };
+    const draft = normalizeSavedDraft({ cues: [{ id: 'a', start_ms: 1000, end_ms: 2000, text: 'Xin chào',
+      speech_start_ms: 800, speech_end_ms: 2100, speech_evidence: evidence,
+      words: [{ id: 'w', text: 'Hello', start_ms: 800, end_ms: 1200, alignment_method: 'asr_observed' }],
+    }] }, options);
+    expect(draft?.cues[0].speech_evidence).toEqual(evidence);
+    expect(draft?.cues[0].words?.[0]).toMatchObject({ start_ms: 800, alignment_method: 'asr_observed' });
+    const broken = normalizeSavedDraft({ cues: [{ ...draft!.cues[0], speech_end_ms: null }] }, options);
+    expect(broken?.cues[0].speech_start_ms).toBeNull();
+    expect(broken?.cues[0].speech_evidence).toBeNull();
+    expect(broken?.cues[0].words).toEqual([]);
+  });
+  it("keeps source transcript, locks, timing and revision across restart", () => {
+    const draft = normalizeSavedDraft({ documentMeta: { revision: 4, run_id: "run1" }, cues: [{
+      id: "c1", start_ms: 1000, end_ms: 2000, text: "Xin chào", source_text: "你好", source_language: "zh",
+      origin_chunk_id: "chunk1", origin_model: "gemini-3.6-flash", locked: true, content_source: "audio",
+      speech_start_ms: 1100, speech_end_ms: 1900,
+      words: [{ id: "word1", text: "你好", start_ms: 1100, end_ms: 1900 }],
+    }] }, options);
+    expect(draft?.documentMeta).toEqual({ revision: 4, run_id: "run1" });
+    expect(draft?.cues[0]).toMatchObject({ source_text: "你好", source_language: "zh", locked: true, origin_chunk_id: "chunk1", speech_start_ms: 1100 });
+    expect(draft?.cues[0].words).toHaveLength(1);
+  });
   it("migrates legacy seconds while dropping corrupt cues and duplicate IDs", () => {
     const draft = normalizeSavedDraft(
       {

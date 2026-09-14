@@ -10,6 +10,14 @@ export const TIMING_SOURCE_LABELS: Record<SubtitleTimingSource, string> = {
   imported_vtt: "Imported VTT",
 };
 
+export const speechEvidenceLabel = (cue: SubtitleCueV2): string => {
+  const method = cue.speech_evidence?.method;
+  if (!method) return cue.timing_source === 'forced_alignment' ? 'Mốc căn cũ · chưa rõ phương pháp' : '';
+  return { asr_observed: 'Mốc lời từ ASR', ctc_aligned: 'Mốc lời căn âm học',
+    energy_estimated: 'Mốc lời ước lượng từ năng lượng', interpolated: 'Mốc lời nội suy',
+    manual: 'Mốc lời chỉnh tay' }[method];
+};
+
 const newCueId = () => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `cue-${crypto.randomUUID()}`;
@@ -37,6 +45,7 @@ const manualCue = (cue: SubtitleCueV2, revision: number): SubtitleCueV2 => ({
   ...cue,
   speech_start_ms: null,
   speech_end_ms: null,
+  speech_evidence: null,
   words: null,
   timing_source: "manual",
   timing_precision_ms: 1,
@@ -103,6 +112,7 @@ export const updateCueById = (
         ? {
             speech_start_ms: null,
             speech_end_ms: null,
+            speech_evidence: null,
             words: null,
             confidence: null,
             needs_review: false,

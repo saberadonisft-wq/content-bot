@@ -5,6 +5,7 @@ const GOOGLE_AUTH_CHANNEL = "content-bot:desktop-google-auth-result";
 
 contextBridge.exposeInMainWorld("contentBotDesktop", {
   environment: () => ipcRenderer.invoke("content-bot:desktop-environment"),
+  pickProjectVideo: (payload) => ipcRenderer.invoke("content-bot:desktop-pick-project-video", payload),
   syncLiveWall: (payload) => ipcRenderer.invoke("content-bot:desktop-live-wall-sync", payload),
   closeLiveWall: () => ipcRenderer.invoke("content-bot:desktop-live-wall-close"),
   reloadLiveWallView: (channelId) =>

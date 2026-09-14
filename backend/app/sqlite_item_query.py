@@ -19,7 +19,10 @@ SCHEMA_KEY = "local-item-query-v1"
 
 def initialize_item_query(connection):
     # Executed before the initialization transaction begins (executescript commits).
+    # Replace old triggers atomically. An outer UPSERT overrides a trigger's
+    # INSERT OR IGNORE conflict policy, so avoid the duplicate insert altogether.
     connection.executescript("""
+        BEGIN IMMEDIATE;
         CREATE TABLE IF NOT EXISTS local_item_analysis (
             document_key TEXT PRIMARY KEY,
             fingerprint TEXT NOT NULL,
@@ -43,18 +46,23 @@ def initialize_item_query(connection):
         CREATE TRIGGER IF NOT EXISTS item_revision_delete AFTER DELETE ON local_documents
         WHEN OLD.collection IN ('content_items', 'item_keyword_matches')
         BEGIN UPDATE local_item_revision SET revision=revision+1 WHERE id=1; END;
-        CREATE TRIGGER IF NOT EXISTS item_query_insert AFTER INSERT ON local_documents
+        DROP TRIGGER IF EXISTS item_query_insert;
+        DROP TRIGGER IF EXISTS item_query_update;
+        CREATE TRIGGER item_query_insert AFTER INSERT ON local_documents
         WHEN NEW.collection = 'content_items'
-        BEGIN INSERT OR IGNORE INTO local_item_dirty VALUES (NEW.document_key); END;
-        CREATE TRIGGER IF NOT EXISTS item_query_update AFTER UPDATE ON local_documents
+          AND NOT EXISTS (SELECT 1 FROM local_item_dirty WHERE document_key = NEW.document_key)
+        BEGIN INSERT INTO local_item_dirty VALUES (NEW.document_key); END;
+        CREATE TRIGGER item_query_update AFTER UPDATE ON local_documents
         WHEN NEW.collection = 'content_items'
-        BEGIN INSERT OR IGNORE INTO local_item_dirty VALUES (NEW.document_key); END;
+          AND NOT EXISTS (SELECT 1 FROM local_item_dirty WHERE document_key = NEW.document_key)
+        BEGIN INSERT INTO local_item_dirty VALUES (NEW.document_key); END;
         CREATE TRIGGER IF NOT EXISTS item_query_delete AFTER DELETE ON local_documents
         WHEN OLD.collection = 'content_items'
         BEGIN
             DELETE FROM local_item_analysis WHERE document_key = OLD.document_key;
             DELETE FROM local_item_dirty WHERE document_key = OLD.document_key;
         END;
+        COMMIT;
     """)
 
 

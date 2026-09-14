@@ -6,12 +6,18 @@ export type SubtitleTimingSource =
   | "imported_srt"
   | "imported_vtt";
 
+export type AlignmentMethod = 'asr_observed' | 'ctc_aligned' | 'energy_estimated' | 'interpolated' | 'manual';
+export type SpeechEvidence = {
+  method: AlignmentMethod; audio_identity: string | null; transcript_sha256: string;
+  start_ms: number; end_ms: number; algorithm: string; transcript_complete: boolean;
+};
 export type SubtitleWordV2 = {
   id: string;
   text: string;
   start_ms: number;
   end_ms: number;
   confidence?: number | null;
+  alignment_method?: AlignmentMethod | null;
 };
 
 export type SubtitlePosition = { x: number; y: number };
@@ -23,8 +29,15 @@ export type SubtitleCueV2 = {
   end_ms: number;
   speech_start_ms?: number | null;
   speech_end_ms?: number | null;
+  speech_evidence?: SpeechEvidence | null;
   text: string;
   secondary_text?: string | null;
+  source_text?: string | null;
+  source_language?: string | null;
+  content_source?: "audio" | "screen" | "mixed" | "unknown";
+  origin_chunk_id?: string | null;
+  origin_model?: string | null;
+  locked?: boolean;
   words?: SubtitleWordV2[] | null;
   timing_source: SubtitleTimingSource;
   timing_precision_ms: number;
@@ -35,6 +48,8 @@ export type SubtitleCueV2 = {
 
 export type SubtitleDocumentV2 = {
   schema_version: 2;
+  revision?: number;
+  run_id?: string | null;
   language: string;
   timebase: "milliseconds";
   timing_source: SubtitleTimingSource;
@@ -48,6 +63,9 @@ export type SubtitleWarning = {
   cue_id?: string | null;
   related_cue_id?: string | null;
   delta_ms?: number | null;
+  start_ms?: number;
+  end_ms?: number;
+  cue_ids?: string[];
 };
 
 export type SubtitleParseResultV2 = {

@@ -4,7 +4,6 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
-  ClipboardList,
   Camera,
   Eye,
   EyeOff,
@@ -28,6 +27,7 @@ import {
   X,
 } from "lucide-react";
 import { api, CredentialStatus } from "./api";
+import { GeminiKeySettings } from "./GeminiKeySettings";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -958,55 +958,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
                 )}
 
                 {/* TAB: GEMINI AI */}
-                {activeTab === "gemini" && (
-                  <div className="space-y-4">
-                    <div className="p-4 bg-slate-800/40 border border-slate-700/60 rounded-xl space-y-3">
-                      <div className="cb-settings-card-head flex items-center justify-between">
-                        <h4 className="text-sm font-semibold text-white flex items-center gap-2">
-                          <Sparkles className="w-4 h-4 text-purple-400" /> Google Gemini AI — Tạo phụ đề tự động
-                        </h4>
-                        {status.configured_keys.gemini_api_key && (
-                          <span className="text-xs text-emerald-400 font-mono">
-                            Đã lưu: {status.masked_keys.gemini_api_key}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-xs text-slate-400 space-y-1">
-                        <p>
-                          Dùng <strong className="text-slate-200">model Gemini đã chọn trong Subtitle Studio</strong> để xem video và tạo phụ đề tiếng Việt — <strong className="text-emerald-400">không cần cài thêm phần mềm</strong>.
-                        </p>
-                        <p>
-                          Hạn mức phụ thuộc project và model. Ứng dụng sẽ hiển thị riêng lỗi quota, dịch vụ, timeout và kết nối.
-                        </p>
-                      </div>
-                      <div className="text-xs text-slate-300 space-y-1 bg-slate-900/50 rounded-lg p-3">
-                        <p className="font-semibold text-slate-200 mb-1 flex items-center gap-2">
-                          <ClipboardList className="w-4 h-4" /> Cách lấy API key miễn phí:
-                        </p>
-                        <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
-                          <li>Vào <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">aistudio.google.com/apikey</a></li>
-                          <li>Nhấn <strong className="text-slate-300">Create API key</strong> → chọn project</li>
-                          <li>Copy key dán vào ô bên dưới → nhấn Lưu</li>
-                        </ol>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-300 mb-1">
-                          Gemini API Key
-                        </label>
-                        <input
-                          type="password"
-                          value={creds.gemini_api_key}
-                          onChange={(e) => setCreds({ ...creds, gemini_api_key: e.target.value })}
-                          placeholder={status.masked_keys.gemini_api_key || "AIzaSy..."}
-                          className="w-full px-3 py-2 bg-slate-900/90 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono"
-                        />
-                        <p className="text-xs text-slate-500 mt-1">
-                          Key được lưu mã hóa trong Credential Vault trên máy bạn, không gửi đi đâu.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {activeTab === "gemini" && <GeminiKeySettings onChanged={async () => { setStatus(await api.getCredentialStatus()); }} />}
 
                 {/* TAB: SECURITY / CHANGE PASSWORD */}
                 {activeTab === "security" && (

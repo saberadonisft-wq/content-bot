@@ -440,17 +440,18 @@ export const SubtitleWorkspace = forwardRef<
         onDurationChange={handleDurationChange}
       />
       <LibassPreview
+        key={originalVideoUrl ?? "empty"}
         video={videoElement}
         host={libassHost}
-        assContent={liveAssContent}
-        enabled={effectivePreviewMode === "live"}
+        assContent={cues.length ? liveAssContent : null}
+        enabled={effectivePreviewMode === "live" && cues.length > 0 && Boolean(liveAssContent)}
         onReadyChange={setLibassReady}
       />
       <PreviewStage
         videoElement={videoElement}
         videoUrl={activeVideoUrl}
         previewMode={effectivePreviewMode}
-        libassActive={Boolean(liveAssContent) && libassReady}
+        libassActive={effectivePreviewMode === "live" && cues.length > 0 && Boolean(liveAssContent) && libassReady}
         onLibassHostElementChange={setLibassHost}
         cues={cues}
         selectedCueId={selectedCueId}

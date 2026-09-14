@@ -403,9 +403,13 @@ export type SubtitleAlignmentOptions = {
   window_padding_ms?: number;
   max_window_ms?: number;
   force_manual?: boolean;
+  preserve_display?: boolean;
+  source_language?: string | null;
+  max_shift_ms?: number;
 };
 
 export type SubtitleAlignmentResult = {
+  version_id?: string;
   document: SubtitleParseResultV2["document"];
   warnings: SubtitleParseResultV2["warnings"];
   engine: "energy" | "faster_whisper";
@@ -414,8 +418,13 @@ export type SubtitleAlignmentResult = {
 };
 
 export type GeminiSubtitleOptions = {
+  max_concurrent?: number;
   bilingual?: boolean;
   model?: string;
+  shared_context?: string;
+  chunk_policy?: { target_ms: number; max_chunk_ms: number; min_pause_ms: number; context_ms: number };
+  alignment_mode?: "off" | "review" | "all";
+  alignment_engine?: "energy" | "faster_whisper";
 };
 
 export type GeminiModel = {
@@ -449,16 +458,22 @@ export type GeminiSubtitleResult = {
   provider: "gemini_api";
   model: string;
   chunk_count: number;
+  actual_models?: string[];
+  chunks?: GeminiChunkStatus[];
+  version_id?: string;
 };
+
+export type GeminiChunkStatus = { chunk_id: string; state: string; message?: string; key_id?: string; key_name?: string; model?: string };
 
 export type SubtitleJob = {
   id: string;
-  kind: "alignment" | "generation" | "render";
+  kind: "alignment" | "generation" | "render" | "review";
   dedupe_key: string;
   state: "queued" | "running" | "succeeded" | "failed" | "canceled";
   progress: number;
   phase: string;
   message: string;
+  details?: { version?: number; total?: number; completed?: number; chunks?: GeminiChunkStatus[] };
   cancel_requested: boolean;
   created_at: string;
   updated_at: string;
@@ -522,6 +537,32 @@ export type VideoLibraryItem = {
   thumbnail_url: string;
   video_url: string;
   metrics?: Record<string, number>;
+  title?: string | null;
+  source_url?: string | null;
+  platform?: string | null;
+  duration?: number | null;
+  downloaded?: boolean;
+};
+
+export type VideoDownloadQuality = "best" | "1080" | "720" | "480";
+export type VideoDownloadJob = {
+  id: string;
+  url: string;
+  quality: VideoDownloadQuality;
+  platform: string;
+  state: "queued" | "running" | "succeeded" | "failed" | "canceled" | "paused";
+  phase: string;
+  progress: number | null;
+  title: string;
+  filename: string;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+  speed: number | null;
+  eta: number | null;
+  duration: number | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type CredentialStatus = {

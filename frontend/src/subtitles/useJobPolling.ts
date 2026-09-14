@@ -8,12 +8,16 @@ export function useJobPolling<T extends JobState>(options: {
   fetchJob: (id: string, signal: AbortSignal) => Promise<T>;
   onJob: (job: T) => void;
   onError: (error: unknown) => void;
+  isTerminal?: (job: T) => boolean;
   interval?: number;
   retryDelay?: number;
 }) {
   const { jobId, fetchJob, interval = 500, retryDelay = 1200 } = options;
   const onJob = useEffectEvent(options.onJob);
   const onError = useEffectEvent(options.onError);
+  const isTerminal = useEffectEvent((job: T) => options.isTerminal
+    ? options.isTerminal(job)
+    : ["succeeded", "failed", "canceled"].includes(job.state));
   useEffect(() => {
     if (!jobId) return;
     const controller = new AbortController();
@@ -24,7 +28,7 @@ export function useJobPolling<T extends JobState>(options: {
         const job = await fetchJob(jobId, controller.signal);
         if (controller.signal.aborted) return;
         onJob(job);
-        if (["succeeded", "failed", "canceled"].includes(job.state)) return;
+        if (isTerminal(job)) return;
       } catch (error) {
         if (controller.signal.aborted) return;
         onError(error);

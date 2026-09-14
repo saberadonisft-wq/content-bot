@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 import wave
@@ -23,6 +24,35 @@ from .store import VoiceStore, generation_hash, normalized_text, read_json, writ
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 RUNTIME = REPO_ROOT / "runtimes" / "voiceover"
+
+
+def stop_worker(process):
+    """Windows venv Python launches a child; killing only the launcher leaks it."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW, timeout=10, check=False,
+        )
+    if process.poll() is None:
+        process.kill()
+
+
+def keep_worker_alive(path):
+    stopped = threading.Event()
+    path.touch()
+
+    def heartbeat():
+        while not stopped.wait(2):
+            try:
+                path.touch()
+            except OSError:
+                return  # Worker releases its resources if this lease expires.
+
+    threading.Thread(target=heartbeat, name="voice-heartbeat", daemon=True).start()
+    return stopped
 
 
 class WorkerDeadline:
@@ -58,12 +88,16 @@ class VoiceManager:
         self._max_pending = max(1, max_pending)
         self._futures = {}
         self._processes = {}
+        self.sync_runner = None
         for path in store.root.glob("*/jobs/*.json"):
             if path.name.endswith(".manifest.json"):
                 continue
             try:
                 job = read_json(path)
-                if job.get("state") in {"queued", "running"}:
+                if job.get("state") in {"queued", "running", "interrupted"}:
+                    old_root = path.parent.parent / "work" / path.stem
+                    if old_root.is_dir():
+                        write_json(old_root / "control.json", {"action": "pause"})
                     job.update(
                         state="interrupted",
                         message="Tác vụ gián đoạn. Có thể tiếp tục phần còn thiếu.",
@@ -161,7 +195,7 @@ class VoiceManager:
         with self.store.lock:
             return read_json(self.store.path(owner, "jobs", job_id))
 
-    def start(self, owner: str, project: str, device: str, clip_ids=None):
+    def start(self, owner: str, project: str, device: str, clip_ids=None, *, subtitle_document=None, sync_session_id=None):
         document = self.store.get_document(owner, project)
         runtime_status = self.status(document.profile.model_id) if document.profile.model_id != MODEL_ID else self.status()
         if not runtime_status["ready"]:
@@ -187,6 +221,12 @@ class VoiceManager:
                 raise ValueError("Engine vừa thay đổi. Thử tạo giọng lại.")
             manifest = self.manifest(owner, document, device, clip_ids)
             jid = uuid.uuid4().hex[:20]
+            if subtitle_document is not None:
+                sync_session_id = sync_session_id or uuid.uuid4().hex
+                sync_root = self.store.owner_root(owner) / 'sync-generation' / sync_session_id
+                if not (sync_root / 'input.json').exists():
+                    write_json(sync_root / 'input.json', {'document': subtitle_document,
+                        'clip_ids': [item['id'] for item in manifest['clips']]})
             job = {
                 "id": jid,
                 "project_id": project,
@@ -202,6 +242,7 @@ class VoiceManager:
                 "elapsed_seconds": 0,
                 "eta_seconds": None,
                 "created_at": time.time(),
+                "sync_session_id": sync_session_id,
             }
             write_json(self.store.path(owner, "jobs", jid), job)
             self.live.add(jid)
@@ -227,21 +268,55 @@ class VoiceManager:
                 if jid in self.live:
                     return job
                 return self.start(
-                    owner, job["project_id"], job["device"], job["clip_ids"]
+                    owner, job["project_id"], job["device"], job["clip_ids"], sync_session_id=job.get('sync_session_id')
                 )
             if jid in self.live:
                 self.controls[jid] = action
                 job["message"] = (
-                    "Đang tạm dừng sau đoạn hiện tại…"
+                    "Đang tạm dừng và giữ các đoạn đã lưu…"
                     if action == "pause"
                     else "Đang hủy…"
                 )
                 write_json(self.store.path(owner, "jobs", jid), job)
             return job
 
+    def _recover_checkpoints(self, owner, manifest):
+        """Recover committed audio missed by a previous supervisor, without inference."""
+        missing = {
+            item["generation_hash"] for item in manifest["clips"]
+            if not self.store.path(owner, "assets", item["generation_hash"]).exists()
+            or not self.store.path(owner, "assets", item["generation_hash"], ".wav").exists()
+        }
+        if not missing:
+            return
+        for sidecar in (self.store.owner_root(owner) / "work").glob("*/assets/*.json"):
+            key = sidecar.stem
+            if key not in missing:
+                continue
+            try:
+                committed = read_json(sidecar)
+                wav = sidecar.with_suffix(".wav")
+                meta = audio_metadata(wav)
+                if committed.get("generation_hash") != key or committed.get("checksum") != meta["checksum"]:
+                    continue
+                meta.update(id=key, generation_hash=key, device=manifest["device"])
+                dest = self.store.path(owner, "assets", key, ".wav")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                temporary = dest.with_name(f"{key}.{uuid.uuid4().hex}.part")
+                shutil.copyfile(wav, temporary)
+                temporary.replace(dest)
+                write_json(self.store.path(owner, "assets", key), meta)
+                missing.remove(key)
+                if not missing:
+                    break
+            except (OSError, ValueError, KeyError, EOFError, wave.Error):
+                continue  # Partial/corrupt pairs must be generated again.
+
     def _run(self, owner, job, manifest):
         jid = job["id"]
         process = None
+        heartbeat = None
+        sync_started = False
         started = time.monotonic()
         root = self.store.owner_root(owner) / "work" / jid
         root.mkdir(parents=True, exist_ok=True)
@@ -257,21 +332,31 @@ class VoiceManager:
 
         try:
             pending = []
+            self._recover_checkpoints(owner, manifest)
+            cached_assets = {}
+            verified = {}
+            current_clips = {clip.id: clip for clip in self.store.get_document(owner, job['project_id']).clips}
             for item in manifest["clips"]:
                 key = item["generation_hash"]
-                meta_path = self.store.path(owner, "assets", key)
-                wav_path = self.store.path(owner, "assets", key, ".wav")
+                current_clip = current_clips.get(item['id'])
+                # Processed or same-text retry assets have their own immutable ID.
+                # Resume must preserve a valid attached waveform instead of reverting to raw cache.
+                asset_key = current_clip.asset_id if current_clip and current_clip.asset_id and current_clip.generation_hash == key else key
+                meta_path = self.store.path(owner, "assets", asset_key)
+                wav_path = self.store.path(owner, "assets", asset_key, ".wav")
                 if meta_path.exists() and wav_path.exists():
                     try:
-                        meta = read_json(meta_path)
-                        valid = audio_metadata(wav_path)["checksum"] == meta["checksum"]
+                        meta = verified.get(asset_key) or read_json(meta_path)
+                        valid = meta['generation_hash'] == key and (asset_key in verified or audio_metadata(wav_path)["checksum"] == meta["checksum"])
                     except (OSError, ValueError, KeyError, EOFError, wave.Error):
                         valid = False
                     if valid:
-                        self.store.attach(owner, job["project_id"], item["id"], meta)
+                        verified[asset_key] = meta
+                        cached_assets[item["id"]] = meta
                         attached.add(item["id"])
                         continue
                 pending.append(item)
+            self.store.attach_many(owner, job["project_id"], cached_assets)
             manifest["clips"] = pending
             cached_count = len(attached)
             reference = manifest["profile"].get("reference_id")
@@ -293,7 +378,11 @@ class VoiceManager:
                         message="Đã dừng trước khi nạp model",
                     )
                     return
-                env = dict(os.environ, PYTHONUTF8="1", HF_HUB_DISABLE_TELEMETRY="1")
+                heartbeat_path = root / "supervisor.heartbeat"
+                heartbeat = keep_worker_alive(heartbeat_path)
+                env = dict(os.environ, PYTHONUTF8="1", HF_HUB_DISABLE_TELEMETRY="1",
+                           VOICE_SUPERVISOR_HEARTBEAT=str(heartbeat_path.resolve()),
+                           VOICE_WORKER_LOCK=str((RUNTIME / ".worker.lock").resolve()))
                 with (root / "worker.log").open("w", encoding="utf-8") as log:
                     process = subprocess.Popen(
                         [
@@ -305,26 +394,33 @@ class VoiceManager:
                         stdout=log,
                         stderr=log,
                         env=env,
-                        creationflags=subprocess.CREATE_NO_WINDOW
+                        creationflags=subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS
                         if os.name == "nt"
                         else 0,
                     )
                     with self.store.lock:
                         self._processes[jid] = process
                         if not self._accepting and process.poll() is None:
-                            process.kill()
+                            stop_worker(process)
                     last_change = time.monotonic()
                     deadline = WorkerDeadline(last_change)
                     previous = None
+                    items_by_id = {item["id"]: item for item in pending}
+                    generation_started = None
                     while True:
+                        worker_exited = process.poll() is not None
                         action = self.controls.get(jid)
+                        if not action and control_path.exists():
+                            external_action = read_json(control_path).get("action")
+                            if external_action in {"pause", "cancel"}:
+                                action = self.controls[jid] = external_action
                         if action and (
                             not control_path.exists()
                             or read_json(control_path).get("action") != action
                         ):
                             write_json(control_path, {"action": action})
-                        if action == "cancel" and process.poll() is None:
-                            process.terminate()
+                        if action in {"pause", "cancel"} and process.poll() is None:
+                            stop_worker(process)
                         if progress_path.exists():
                             progress = read_json(progress_path)
                             deadline.observe(progress, time.monotonic())
@@ -334,7 +430,18 @@ class VoiceManager:
                             job["message"] = progress.get("message", "Đang tạo giọng")
                             job["failed"] = progress.get("failed", [])
                             job["current_clip_id"] = progress.get("clip_id") if progress.get("stage") == "generating" else None
-                            for item in pending:
+                            if generation_started is None and progress.get("stage") == "generating":
+                                generation_started = time.monotonic()
+                            # The worker publishes completed IDs only after its sidecar is committed.
+                            ready_ids = set(progress.get("completed", [])) - attached
+                            if worker_exited:
+                                # A crash may land between committing a sidecar and publishing progress.
+                                ready_ids.update(items_by_id.keys() - attached)
+                            new_assets = {}
+                            for cid in ready_ids:
+                                item = items_by_id.get(cid)
+                                if item is None:
+                                    continue
                                 cid, key = item["id"], item["generation_hash"]
                                 wav = target / f"{key}.wav"
                                 sidecar = target / f"{key}.json"
@@ -355,15 +462,16 @@ class VoiceManager:
                                 shutil.copyfile(wav, dest.with_suffix(".part"))
                                 dest.with_suffix(".part").replace(dest)
                                 write_json(self.store.path(owner, "assets", key), meta)
-                                self.store.attach(owner, job["project_id"], cid, meta)
+                                new_assets[cid] = meta
                                 attached.add(cid)
+                            self.store.attach_many(owner, job["project_id"], new_assets)
                             job["completed"] = len(attached)
                             job["completed_clip_ids"] = sorted(attached)
                         job["elapsed_seconds"] = round(time.monotonic() - started, 1)
                         generated_count = len(attached) - cached_count
-                        if generated_count > 0:
+                        if generated_count > 0 and generation_started is not None:
                             job["eta_seconds"] = round(
-                                job["elapsed_seconds"]
+                                (time.monotonic() - generation_started)
                                 / generated_count
                                 * (job["total"] - len(attached))
                             )
@@ -371,6 +479,8 @@ class VoiceManager:
                             job["eta_seconds"] = None
                         persist()
                         if process.poll() is not None:
+                            if not worker_exited:
+                                continue  # Read final progress/checkpoints once after exit.
                             if process.returncode and not action:
                                 detail = (root / "worker.log").read_text(
                                     encoding="utf-8", errors="replace"
@@ -420,12 +530,39 @@ class VoiceManager:
                     "succeeded": "Đã tạo xong giọng đọc",
                 }[state],
             )
+            if state in {'succeeded', 'failed'} and not action and job.get('sync_session_id') and self.sync_runner:
+                # The first TTS worker has exited; run CPU checks and bounded repairs sequentially.
+                # Keep this job active so pause/cancel/shutdown cover the complete pipeline.
+                if heartbeat is not None:
+                    heartbeat.set()
+                    heartbeat = None
+                job.update(state='running', phase='sync', message='Đang kiểm tra độ khớp sau tạo giọng', eta_seconds=None)
+                persist()
+                sync_started = True
+                self.sync_runner(self, owner, job, persist)
         except Exception as exc:
             job.update(state="failed", message=str(exc)[-2000:])
+            if job.get('sync_session_id') and self.sync_runner and not sync_started and not self.controls.get(jid):
+                # A partial first pass can still recover missing clips within the separate repair budget.
+                # Release a failed/stuck original worker before any repair worker starts.
+                if heartbeat is not None:
+                    heartbeat.set()
+                    heartbeat = None
+                if process is not None and process.poll() is None:
+                    stop_worker(process)
+                    process.wait(timeout=10)
+                job.update(state='running', phase='sync', message='Đang kiểm tra và bổ sung các đoạn còn thiếu', eta_seconds=None)
+                persist()
+                try:
+                    self.sync_runner(self, owner, job, persist)
+                except Exception as sync_error:
+                    job.update(state='failed', message=str(sync_error)[-2000:])
         finally:
+            if heartbeat is not None:
+                heartbeat.set()
             job["current_clip_id"] = None
             if process is not None and process.poll() is None:
-                process.kill()
+                stop_worker(process)
                 process.wait(timeout=10)
             persist()
             with self.store.lock:
@@ -454,7 +591,7 @@ class VoiceManager:
                     processes = list(self._processes.values())
                 for process in processes:
                     if process.poll() is None:
-                        process.kill()
+                        stop_worker(process)
                 for process in processes:
                     process.wait(timeout=5)
                 _, pending = wait(pending, timeout=5)

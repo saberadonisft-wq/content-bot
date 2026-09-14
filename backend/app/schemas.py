@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, StrictInt, model_validator
 
+from .services.speech_evidence import AlignmentMethod, SpeechEvidence
+
 
 class ChannelSubscription(BaseModel):
     id: str | None = None
@@ -287,6 +289,7 @@ class SubtitleWordV2(BaseModel):
     start_ms: StrictInt = Field(ge=0)
     end_ms: StrictInt = Field(ge=0)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    alignment_method: AlignmentMethod | None = None
 
     @model_validator(mode="after")
     def validate_time_range(self) -> SubtitleWordV2:
@@ -309,8 +312,15 @@ class SubtitleCueV2(BaseModel):
     end_ms: StrictInt = Field(ge=0)
     speech_start_ms: StrictInt | None = Field(default=None, ge=0)
     speech_end_ms: StrictInt | None = Field(default=None, ge=0)
+    speech_evidence: SpeechEvidence | None = None
     text: str = Field(min_length=1, max_length=4000)
     secondary_text: str | None = Field(default=None, max_length=4000)
+    source_text: str | None = Field(default=None, max_length=4000)
+    source_language: str | None = Field(default=None, max_length=32)
+    content_source: Literal["audio", "screen", "mixed", "unknown"] = "unknown"
+    origin_chunk_id: str | None = Field(default=None, max_length=64)
+    origin_model: str | None = Field(default=None, max_length=128)
+    locked: bool = False
     words: list[SubtitleWordV2] | None = Field(default=None, max_length=500)
     timing_source: TimingSource = "gemini_estimate"
     timing_precision_ms: StrictInt = Field(default=1000, ge=1, le=60_000)
@@ -327,34 +337,34 @@ class SubtitleCueV2(BaseModel):
         if (
             self.speech_start_ms is not None
             and self.speech_end_ms is not None
-            and not (
-                self.start_ms
-                <= self.speech_start_ms
-                < self.speech_end_ms
-                <= self.end_ms
-            )
+            and self.speech_start_ms >= self.speech_end_ms
         ):
-            raise ValueError("Speech timing must be contained by display timing")
+            raise ValueError("Speech timing must be a non-empty interval")
         if self.words:
             seen_ids: set[str] = set()
             for word in self.words:
                 if word.id in seen_ids:
                     raise ValueError("Word IDs must be unique inside a cue")
                 seen_ids.add(word.id)
-                if word.start_ms < self.start_ms or word.end_ms > self.end_ms:
+                in_display = self.start_ms <= word.start_ms < word.end_ms <= self.end_ms
+                in_speech = (self.speech_start_ms is not None and self.speech_end_ms is not None
+                             and self.speech_start_ms <= word.start_ms < word.end_ms <= self.speech_end_ms)
+                if not in_display and not in_speech:
                     raise ValueError("Word timing must be contained by its cue")
         return self
 
 
 class SubtitleDocumentV2(BaseModel):
     schema_version: Literal[2] = 2
+    revision: StrictInt = Field(default=0, ge=0)
+    run_id: str | None = Field(default=None, max_length=64)
     language: str = Field(
         default="vi", min_length=2, max_length=32, pattern=r"^[A-Za-z0-9-]+$"
     )
     timebase: Literal["milliseconds"] = "milliseconds"
     timing_source: TimingSource = "gemini_estimate"
     timing_precision_ms: StrictInt = Field(default=1000, ge=1, le=60_000)
-    segments: list[SubtitleCueV2] = Field(default_factory=list, max_length=500)
+    segments: list[SubtitleCueV2] = Field(default_factory=list, max_length=20_000)
 
     @model_validator(mode="after")
     def validate_ids(self) -> SubtitleDocumentV2:
@@ -373,7 +383,7 @@ class SubtitleWarning(BaseModel):
 
 
 class SubtitleParseRequestV2(BaseModel):
-    text: str = Field(min_length=1, max_length=500_000)
+    text: str = Field(min_length=1, max_length=8_000_000)
     media_duration_ms: StrictInt | None = Field(default=None, gt=0)
 
 
@@ -502,12 +512,15 @@ class SubtitleAlignmentOptions(BaseModel):
     window_padding_ms: StrictInt = Field(default=650, ge=0, le=5000)
     max_window_ms: StrictInt = Field(default=30_000, ge=5000, le=120_000)
     force_manual: bool = False
+    preserve_display: bool = False
+    source_language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Za-z]{2,4})?$")
+    max_shift_ms: StrictInt = Field(default=1000, ge=0, le=10_000)
 
 
 class SubtitleAlignmentRequest(BaseModel):
     video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
     document: SubtitleDocumentV2
-    cue_ids: list[str] | None = Field(default=None, max_length=500)
+    cue_ids: list[str] | None = Field(default=None, max_length=20_000)
     options: SubtitleAlignmentOptions = Field(default_factory=SubtitleAlignmentOptions)
 
     @model_validator(mode="after")
@@ -521,8 +534,38 @@ class SubtitleAlignmentRequest(BaseModel):
         return self
 
 
+class GeminiChunkPolicy(BaseModel):
+    target_ms: StrictInt = Field(default=120_000, ge=30_000, le=1_800_000)
+    max_chunk_ms: StrictInt = Field(default=600_000, ge=30_000, le=1_800_000)
+    min_pause_ms: StrictInt = Field(default=800, ge=100, le=10_000)
+    context_ms: StrictInt = Field(default=2000, ge=0, le=10_000)
+
+    @model_validator(mode="after")
+    def ordered_limits(self):
+        if self.target_ms > self.max_chunk_ms:
+            raise ValueError("Target chunk duration exceeds resource limit")
+        return self
+
+
+class VoiceSyncApplyRequest(BaseModel):
+    video_id: str = Field(pattern=r'^[a-f0-9]{12,32}$')
+    voice_revision: StrictInt = Field(ge=0)
+    document: SubtitleDocumentV2
+    clip_ids: list[str] = Field(min_length=1, max_length=40)
+
+
+class VoiceSyncAuditRequest(VoiceSyncApplyRequest):
+    align_source: bool = True
+
+
 class GeminiSubtitleOptions(BaseModel):
     bilingual: bool = True
+    # Kept for old drafts/clients; scheduling now uses every enabled key.
+    max_concurrent: StrictInt = Field(default=0, ge=0)
+    chunk_policy: GeminiChunkPolicy | None = None
+    shared_context: str = Field(default="", max_length=8000)
+    alignment_mode: Literal["off", "review", "all"] = "off"
+    alignment_engine: Literal["energy", "faster_whisper"] = "faster_whisper"
     model: str | None = Field(
         default=None,
         max_length=128,
@@ -534,11 +577,13 @@ class GeminiSubtitleOptions(BaseModel):
 class GeminiSubtitleRequest(BaseModel):
     video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
     options: GeminiSubtitleOptions = Field(default_factory=GeminiSubtitleOptions)
+    regenerate: bool = False
+    current_document: SubtitleDocumentV2 | None = None
 
 
 class SubtitleJobResponse(BaseModel):
     id: str = Field(pattern=r"^[a-f0-9]{20}$")
-    kind: Literal["alignment", "generation", "render"]
+    kind: Literal["alignment", "generation", "render", "review"]
     dedupe_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: Literal["queued", "running", "succeeded", "failed", "canceled"]
     progress: StrictInt = Field(ge=0, le=100)
@@ -551,6 +596,7 @@ class SubtitleJobResponse(BaseModel):
     finished_at: str | None = None
     error: str | None = Field(default=None, max_length=2000)
     result: dict[str, Any] | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class SubtitleVideoSegment(BaseModel):
@@ -590,7 +636,7 @@ class SubtitleRenderOptionsV2(BaseModel):
     bg_enabled: bool = False
     bg_color: str = Field(default="#000000", pattern=r"^#[0-9A-Fa-f]{6}$")
     bg_opacity: float = Field(default=0.75, ge=0, le=1)
-    spacing: int = Field(default=0, ge=-5, le=20)
+    spacing: float = Field(default=0, ge=-5, le=20, allow_inf_nan=False)
     line_spacing: float = Field(default=1.2, ge=0.8, le=3)
     pos_x: float = Field(default=50, ge=0, le=100)
     pos_y: float = Field(default=78, ge=0, le=100)
@@ -705,7 +751,7 @@ class SubtitleBurnOptions(BaseModel):
     bg_enabled: bool = Field(default=False)
     bg_color: str = Field(default="#000000", pattern=r"^#[0-9A-Fa-f]{3,6}$")
     bg_opacity: float = Field(default=0.75, ge=0.0, le=1.0)
-    spacing: int = Field(default=0, ge=-5, le=20)
+    spacing: float = Field(default=0, ge=-5, le=20, allow_inf_nan=False)
     line_spacing: float = Field(default=1.2, ge=0.8, le=3.0)
     pos_x: float = Field(default=50.0, ge=0.0, le=100.0)
     pos_y: float = Field(default=85.0, ge=0.0, le=100.0)
@@ -751,3 +797,8 @@ class VideoLibraryItem(BaseModel):
     thumbnail_url: str
     video_url: str
     metrics: dict[str, int] = {}
+    title: str | None = None
+    source_url: str | None = None
+    platform: str | None = None
+    duration: float | None = None
+    downloaded: bool = False

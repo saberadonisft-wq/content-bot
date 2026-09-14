@@ -19,6 +19,13 @@ const source: SubtitleCueV2 = {
 };
 
 describe("subtitle model migration boundary", () => {
+  it('invalidates speech evidence when a cue is manually changed or split', () => {
+    const cue: SubtitleCueV2 = { ...source, speech_start_ms: 0, speech_end_ms: 1300,
+      speech_evidence: { method: 'asr_observed', audio_identity: 'a'.repeat(64), transcript_sha256: 'b'.repeat(64),
+        start_ms: 0, end_ms: 1300, algorithm: 'pilot', transcript_complete: true } };
+    expect(updateCueById([cue], cue.id, { start_ms: 100 })[0].speech_evidence).toBeNull();
+    expect(splitCueById([cue], cue.id, 600).every(c => c.speech_evidence === null)).toBe(true);
+  });
   it("keeps canonical integer ms and derives legacy seconds only for render", () => {
     const legacy = cueToLegacySubtitle(source);
     expect(legacy.start_time).toBe("00:00:00,001");

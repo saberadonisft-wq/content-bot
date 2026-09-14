@@ -1,6 +1,6 @@
 import { Merge, Play, Plus, Scissors, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { TIMING_SOURCE_LABELS } from "./model";
+import { speechEvidenceLabel, TIMING_SOURCE_LABELS } from "./model";
 import { formatCompactTimecode, formatTimecode, snapMsToFrame } from "./time";
 import { TimecodeInput } from "./TimecodeInput";
 import type { FrameTiming, SubtitleCueV2 } from "./types";
@@ -25,6 +25,7 @@ type VirtualSubtitleListProps = {
     patch: Partial<Pick<SubtitleCueV2, "start_ms" | "end_ms" | "text">>,
   ) => void;
   onAlignCue?: (cueId: string) => void;
+  onToggleLock?: (cueId: string) => void;
 };
 
 export function VirtualSubtitleList({
@@ -40,6 +41,7 @@ export function VirtualSubtitleList({
   onMergeNext,
   onChange,
   onAlignCue,
+  onToggleLock,
 }: VirtualSubtitleListProps) {
   const [scrollTop, setScrollTop] = useState(0);
   const viewportHeight = 472;
@@ -114,7 +116,7 @@ export function VirtualSubtitleList({
                   </button>
                   <div className="subtitle-cue-badges">
                     <span className={`timing-source-badge source-${cue.timing_source}`}>
-                      {TIMING_SOURCE_LABELS[cue.timing_source]}
+                      {speechEvidenceLabel(cue) || TIMING_SOURCE_LABELS[cue.timing_source]}
                     </span>
                     {(cue.needs_review || (cue.confidence ?? 1) < 0.65) && (
                       <span className="timing-source-badge is-warning" title="Độ tin cậy thấp; cần kiểm tra lại">
@@ -186,6 +188,10 @@ export function VirtualSubtitleList({
                 </div>
 
                 <div className="subtitle-cue-actions">
+                  {onToggleLock && <button type="button" className="studio-text-button" aria-pressed={!!cue.locked}
+                    onClick={event => { event.stopPropagation(); onToggleLock(cue.id); }}>
+                    {cue.locked ? "Mở khóa AI" : "Khóa AI"}
+                  </button>}
                   <button
                     type="button"
                     className="studio-text-button"
@@ -201,7 +207,7 @@ export function VirtualSubtitleList({
                     <button
                       type="button"
                       className="studio-text-button"
-                      disabled={cue.timing_source === "manual"}
+                      disabled={cue.locked || cue.timing_source === "manual"}
                       title={
                         cue.timing_source === "manual"
                           ? "Cue đã chỉnh tay đang được khóa"

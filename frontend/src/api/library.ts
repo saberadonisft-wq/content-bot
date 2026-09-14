@@ -1,6 +1,20 @@
 import { API_BASE, request } from "../transport/client";
 import type { CrawlerLoginStatus, Keyword, LiveWallConfig, Source, TikTokOAuthStatus, VideoLibraryItem } from "./types";
+import type { VideoDownloadJob, VideoDownloadQuality } from "./types";
 export const videos = () => request<VideoLibraryItem[]>("/videos");
+export const videoDownloads = () => request<VideoDownloadJob[]>("/videos/downloads");
+export const downloadVideos = (urls: string[], quality: VideoDownloadQuality, cookieText?: string) =>
+  request<VideoDownloadJob[]>("/videos/downloads", {
+    method: "POST", body: JSON.stringify({ urls, quality, cookie_text: cookieText || undefined }),
+  });
+export const cancelVideoDownload = (id: string) => request<VideoDownloadJob>(
+  `/videos/downloads/${encodeURIComponent(id)}/cancel`, { method: "POST" },
+);
+export const retryVideoDownload = (id: string, cookieText?: string) => request<VideoDownloadJob>(
+  `/videos/downloads/${encodeURIComponent(id)}/retry`, {
+    method: "POST", body: JSON.stringify({ cookie_text: cookieText || undefined }),
+  },
+);
 
 export const sources = () => request<Source[]>("/sources");
 

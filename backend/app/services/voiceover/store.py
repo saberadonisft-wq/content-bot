@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from .models import SDK_VERSION, V2_MODEL_ID, VoiceDocument
+from .timing import AUTO_RATE_LIMIT, clip_signature, file_interval, refresh_timing
 
 
 def digest(value) -> str:
@@ -35,7 +36,14 @@ def write_json(path: Path, value) -> None:
 
 
 def read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    for attempt in range(10):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            # Windows can briefly deny opens while an atomic checkpoint is replaced.
+            if attempt == 9:
+                raise
+            time.sleep(.01)
 
 
 def normalized_text(text: str, pronunciation: dict[str, str]) -> str:
@@ -93,9 +101,48 @@ class VoiceStore:
         return self.owner_root(owner) / kind / (identifier + suffix)
 
     def get_document(self, owner: str, project: str) -> VoiceDocument:
-        return VoiceDocument.model_validate(
-            read_json(self.path(owner, "projects", project))
-        )
+        document = VoiceDocument.model_validate(read_json(self.path(owner, "projects", project)))
+        self.validate_alignments(owner, document)
+        return refresh_timing(document)
+
+    @staticmethod
+    def alignment_binding(document: VoiceDocument, clip) -> str:
+        return digest({'project': document.project_id, 'video': document.video_fingerprint,
+            'profile': document.profile.model_dump(), 'pronunciation': document.pronunciation,
+            'clip': clip_signature(clip), 'rate': float(clip.rate)})
+
+    def validate_alignments(self, owner: str, document: VoiceDocument) -> None:
+        # A client cannot turn a guessed source window into a verified alignment.
+        for clip in document.clips:
+            alignment = clip.sync.alignment
+            if alignment is None:
+                continue
+            try:
+                proof = read_json(self.owner_root(owner) / 'sync-fits' / f'{alignment.proof_id}.json')
+                valid = (proof['alignment'] == alignment.model_dump()
+                    and proof['binding'] == self.alignment_binding(document, clip))
+            except (OSError, ValueError, KeyError):
+                valid = False
+            if not valid:
+                clip.sync.alignment = None
+
+    def _write_document(self, owner: str, document: VoiceDocument) -> None:
+        path = self.path(owner, "projects", document.project_id)
+        if path.exists():
+            raw = path.read_bytes()
+            if json.loads(raw).get("schema_version", 1) == 1:
+                snapshot = path.parent / "snapshots" / document.project_id / (hashlib.sha256(raw).hexdigest() + ".v1.json")
+                snapshot.parent.mkdir(parents=True, exist_ok=True)
+                if not snapshot.exists():
+                    # Exclusive creation preserves an existing recovery copy.
+                    with snapshot.open("xb") as stream:
+                        stream.write(raw)
+                if snapshot.read_bytes() != raw:
+                    raise ValueError("Bản phục hồi không toàn vẹn. Chưa ghi thay đổi dự án.")
+        document.schema_version = 2
+        self.validate_alignments(owner, document)
+        write_json(path, refresh_timing(document).model_dump())
+        document._migrated_from_v1 = False
 
     def save_document(self, owner: str, document: VoiceDocument) -> VoiceDocument:
         with self.lock:
@@ -105,6 +152,8 @@ class VoiceStore:
             )
             if old and document.revision != old.revision:
                 raise ValueError("Dự án vừa thay đổi. Tải lại trước khi lưu.")
+            if old and document._migrated_from_v1 and not old._migrated_from_v1:
+                raise ValueError("Dự án đã nâng phiên bản đồng bộ. Tải lại ứng dụng trước khi lưu.")
             if old and old.video_fingerprint != document.video_fingerprint:
                 raise ValueError("Video của dự án không khớp.")
             if (
@@ -127,41 +176,43 @@ class VoiceStore:
                     clip.status = (
                         "ready" if expected == clip.generation_hash else "stale"
                     )
-                    if (
-                        clip.status == "ready"
-                        and clip.duration_ms / clip.rate > clip.end_ms - clip.start_ms
-                    ):
-                        clip.status = "overflow"
             document.revision += 1
-            write_json(path, document.model_dump())
+            self._write_document(owner, document)
             return document
 
     def attach(self, owner: str, project: str, clip_id: str, asset: dict) -> bool:
+        return clip_id in self.attach_many(owner, project, {clip_id: asset})
+
+    def attach_many(self, owner: str, project: str, assets: dict[str, dict]) -> set[str]:
+        if not assets:
+            return set()
         with self.lock:
             doc = self.get_document(owner, project)
-            clip = next((c for c in doc.clips if c.id == clip_id), None)
-            if (
-                not clip
-                or generation_hash(doc, clip, asset["device"])
-                != asset["generation_hash"]
-            ):
-                return False
-            if (
-                clip.asset_id == asset["id"]
-                and clip.generation_hash == asset["generation_hash"]
-            ):
-                return True
-            clip.asset_id = asset["id"]
-            clip.generation_hash = asset["generation_hash"]
-            clip.duration_ms = asset["duration_ms"]
-            # Limit automatic fitting to 1.20x total. Longer lines require review.
-            needed = clip.duration_ms / (clip.end_ms - clip.start_ms)
-            clip.rate = max(clip.rate, min(1.20, needed))
-            clip.status = "overflow" if needed > clip.rate + 0.001 else "ready"
-            clip.error = None
-            doc.revision += 1
-            write_json(self.path(owner, "projects", project), doc.model_dump())
-            return True
+            accepted = set()
+            changed = False
+            for clip in doc.clips:
+                asset = assets.get(clip.id)
+                if not asset or generation_hash(doc, clip, asset["device"]) != asset["generation_hash"]:
+                    continue
+                accepted.add(clip.id)
+                if clip.asset_id == asset["id"] and clip.generation_hash == asset["generation_hash"]:
+                    continue
+                clip.asset_id = asset["id"]
+                clip.generation_hash = asset["generation_hash"]
+                clip.duration_ms = asset["duration_ms"]
+                # Keep manual and unclassified legacy adjustments unchanged.
+                remaining = clip.end_ms - file_interval(clip)[0]
+                if (clip.sync.timing_origin == "automatic" and not clip.sync.timing_locked
+                        and remaining > 0 and clip.rate <= AUTO_RATE_LIMIT):
+                    needed = clip.duration_ms / remaining
+                    clip.rate = max(clip.rate, min(AUTO_RATE_LIMIT, needed))
+                clip.status = "ready"
+                clip.error = None
+                changed = True
+            if changed:
+                doc.revision += 1
+                self._write_document(owner, doc)
+            return accepted
 
     def mark_failed(self, owner: str, project: str, clip_id: str, expected_hash: str, device: str, error: str) -> bool:
         with self.lock:
@@ -174,5 +225,5 @@ class VoiceStore:
             clip.status = "failed"
             clip.error = error[:1000]
             doc.revision += 1
-            write_json(self.path(owner, "projects", project), doc.model_dump())
+            self._write_document(owner, doc)
             return True

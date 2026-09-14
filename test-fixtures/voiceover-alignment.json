@@ -1,0 +1,43 @@
+{
+  "cue": {
+    "id": "cue",
+    "start_ms": 1000,
+    "end_ms": 3000,
+    "text": "Xin chào",
+    "source_text": "Hello",
+    "source_language": "en",
+    "revision": 1
+  },
+  "clip": {
+    "id": "one",
+    "source_cue_ids": [
+      "cue"
+    ],
+    "source_text": "Xin chào",
+    "spoken_text": "Xin chào",
+    "start_ms": 1000,
+    "end_ms": 3000,
+    "offset_ms": -175,
+    "rate": 1,
+    "gain": 1,
+    "asset_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "generation_hash": null,
+    "duration_ms": 400,
+    "status": "ready",
+    "error": null
+  },
+  "alignment": {
+    "proof_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "original_asset_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "clip_signature": "[\"one\",[\"cue\"],1000,3000,-175,\"Xin chào\",\"Xin chào\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",400]",
+    "source_signature": "[\"cue\",1000,3000,\"Xin chào\",\"Hello\",null,\"en\",1]",
+    "source_start_ms": 900,
+    "source_end_ms": 1250,
+    "allowed_end_ms": 1250,
+    "speech_head_ms": 75,
+    "speech_tail_ms": 290,
+    "output_duration_ms": 400.25
+  },
+  "file_start": 825,
+  "file_end": 1225.25
+}

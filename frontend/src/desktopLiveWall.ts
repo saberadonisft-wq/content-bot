@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SubtitleUploadResult } from "./api/types";
+
+export type DesktopSelectedVideo = { name: string; size: number; lastModified: number; upload: SubtitleUploadResult };
 
 export type DesktopLiveWallState = "queued" | "loading" | "ready" | "error";
 
@@ -24,6 +27,7 @@ type DesktopLiveWallView = {
 };
 
 type DesktopLiveWallBridge = {
+  pickProjectVideo?: (payload: { apiBase: string; accessToken?: string }) => Promise<DesktopSelectedVideo | null>;
   environment: () => Promise<{
     available: boolean;
     platform: string;

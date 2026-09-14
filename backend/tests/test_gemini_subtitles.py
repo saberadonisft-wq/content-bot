@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -95,7 +96,9 @@ def test_prompt_bilingual_has_secondary_text(tmp_path: Path) -> None:
         bilingual=False, chunk_index=1, chunk_count=1, chunk_duration_ms=60000
     )
     assert "secondary_text" in prompt_bi
-    assert "secondary_text" not in prompt_vi
+    example = json.loads(prompt_vi[prompt_vi.index('{\n  "schema_version"'):])
+    assert "secondary_text" not in example["segments"][0]
+    assert example["segments"][0]["source_text"]
     assert "VIDEO_END_MS=60000" in prompt_bi
     assert "0 <= start_ms < end_ms <= 60000" in prompt_bi
     assert "khong dung kien thuc ve phim/video goc de viet tiep" in prompt_bi
@@ -180,8 +183,8 @@ def test_generate_retry_status_distinguishes_5xx_from_rate_limit(
         attempts += 1
         if attempts == 1:
             return httpx.Response(
-                503,
-                json={"error": {"message": "Model is overloaded"}},
+                502,
+                json={"error": {"message": "Bad gateway"}},
             )
         return httpx.Response(
             200,
@@ -213,8 +216,8 @@ def test_generate_retry_status_distinguishes_5xx_from_rate_limit(
         )
 
     assert len(status_messages) == 1
-    assert "HTTP 503" in status_messages[0]
-    assert "Model is overloaded" in status_messages[0]
+    assert "HTTP 502" in status_messages[0]
+    assert "Bad gateway" in status_messages[0]
     assert "HTTP 429" not in status_messages[0]
 
 
@@ -269,6 +272,40 @@ def test_generate_retry_status_distinguishes_timeout_and_connection_error(
         )
 
     assert status_messages == [f"{expected_message}; thử lại sau 3s (1/5)"]
+
+
+def test_fallback_does_not_call_model_already_in_daily_cooldown(tmp_path: Path) -> None:
+    from app.services.gemini_dispatch import ApiFailure
+    from app.services.gemini_subtitles import GeminiApiError
+    svc = _service(tmp_path, api_key="fake-key")
+    owner = svc.runtime_keys()[0]
+    svc.dispatcher.report(owner, "gemini-3.6-flash", ApiFailure(429, "generateContent", "quota", 86400, "daily"))
+    models = []
+    def send(request):
+        models.append(request.url.path.rsplit('/', 1)[-1].split(':')[0])
+        return httpx.Response(503, json={"error": {"message": "overloaded"}})
+    with httpx.Client(transport=httpx.MockTransport(send), base_url="https://generativelanguage.googleapis.com") as client, pytest.raises(GeminiApiError) as error:
+        svc._generate_content("files/test", "prompt", model="gemini-3.8-flash", client=client,
+            cancel_event=threading.Event(), model_guard=lambda model: svc._guard_model(owner, model))
+    assert error.value.failure.category == 'quota'
+    assert models == ['gemini-3.8-flash', 'gemini-3.7-flash']
+
+
+def test_generation_joins_output_parts_and_skips_thoughts(tmp_path: Path) -> None:
+    svc = _service(tmp_path, api_key="fake-key")
+    schema = {"type": "object", "required": ["segments"]}
+    def send(request):
+        payload = json.loads(request.content)
+        assert payload["generationConfig"]["responseSchema"] == {"type": "OBJECT", "required": ["segments"]}
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [
+            {"thought": True, "text": '{"analysis": "not output"}'},
+            {"text": '{"segments":'}, {"text": '[]}'},
+        ]}}], "usageMetadata": {"totalTokenCount": 10, "unrecognized": "not retained"}})
+    with httpx.Client(transport=httpx.MockTransport(send), base_url="https://generativelanguage.googleapis.com") as client:
+        execution = {}
+        raw = svc._generate_content("files/test", "prompt", client=client, api_key="fake-key", cancel_event=threading.Event(), response_schema=schema, execution=execution)
+    assert json.loads(raw) == {"segments": []}
+    assert execution["usage"] == {"totalTokenCount": 10}
 
 
 def test_gemini_uses_api_key_header_and_not_query_parameter(tmp_path: Path) -> None:
@@ -442,6 +479,8 @@ def test_remote_cleanup_failure_is_reported_as_warning(
     tmp_path: Path, monkeypatch
 ) -> None:
     svc = _service(tmp_path, api_key="header-key")
+    from app.services.gemini_media import ChunkPolicy, plan_chunks
+    monkeypatch.setattr("app.services.gemini_pipeline.prepare_manifest", lambda *a, **k: plan_chunks(5000, [], ChunkPolicy(), fingerprint="fixture"))
     video = tmp_path / "video.mp4"
     video.write_bytes(b"fixture")
     media = {"duration_ms": 5000, "audio_hash": "a" * 64, "fingerprint": "b" * 64}
@@ -552,7 +591,7 @@ def test_gemini_endpoint_runs_as_separate_attachable_job(
     monkeypatch.setattr(
         application_services,
         "gemini_subtitle_service",
-        SimpleNamespace(generate=fake_generate),
+        SimpleNamespace(generate=fake_generate, cache_policy=lambda: {"pipeline": 1}),
     )
     submitted = subtitles_api.generate_subtitles_with_gemini_endpoint(
         GeminiSubtitleRequest(video_id="a" * 12), services=application_services

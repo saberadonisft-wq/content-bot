@@ -96,16 +96,21 @@
     },
     {
       "label": "Content Bot: Start",
+      "dependsOn": ["Content Bot: Desktop Dev"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Content Bot: Web Services",
       "dependsOn": [
         "Content Bot: Auth Server",
         "Content Bot: Backend",
         "Content Bot: Frontend"
       ],
       "dependsOrder": "parallel",
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      },
       "problemMatcher": []
     },
     {

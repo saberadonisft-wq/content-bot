@@ -161,7 +161,8 @@ def create_app(services_factory=None, *, scheduler: bool = True) -> FastAPI:
     )
     application.include_router(credentials_router)
     application.include_router(
-        build_voiceover_router(lambda: resource("voiceover_manager"))
+        build_voiceover_router(lambda: resource("voiceover_manager"),
+            sync_service_provider=lambda: resource("gemini_subtitle_service"))
     )
     application.add_middleware(
         CORSMiddleware,

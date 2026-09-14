@@ -11,8 +11,10 @@ export type SavedSubtitleDraft = {
   mediaDurationMs: number;
   rawText: string;
   cues: SubtitleCueV2[];
+  documentMeta?: { revision: number; run_id: string | null };
   selectedCueId: string | null;
   activeGeminiJobId: string | null;
+  lastGeminiJobId?: string | null;
   activeAlignmentJobId: string | null;
   activeRenderJobId: string | null;
   options: SubtitleBurnOptions;
@@ -79,11 +81,39 @@ const normalizeCue = (
   const confidence = finiteNumber(candidate.confidence)
     ? Math.max(0, Math.min(1, candidate.confidence))
     : null;
+  const speechStart = integerMs(candidate.speech_start_ms), speechEnd = integerMs(candidate.speech_end_ms);
+  const validSpeech = speechStart !== null && speechEnd !== null && speechStart >= 0 && speechEnd > speechStart;
+  const evidence = candidate.speech_evidence;
+  const validEvidence = validSpeech && isRecord(evidence)
+    && ['asr_observed', 'ctc_aligned', 'energy_estimated', 'interpolated', 'manual'].includes(String(evidence.method))
+    && (evidence.audio_identity === null || typeof evidence.audio_identity === 'string' && evidence.audio_identity.length <= 128)
+    && typeof evidence.transcript_sha256 === 'string' && /^[a-f0-9]{64}$/.test(evidence.transcript_sha256)
+    && evidence.start_ms === speechStart && evidence.end_ms === speechEnd
+    && typeof evidence.algorithm === 'string' && evidence.algorithm.length > 0 && evidence.algorithm.length <= 100
+    && typeof evidence.transcript_complete === 'boolean';
   return {
     id,
     start_ms: startMs,
     end_ms: endMs,
     text: text.slice(0, 4000),
+    source_text: typeof candidate.source_text === "string" ? candidate.source_text.slice(0, 4000) : null,
+    source_language: typeof candidate.source_language === "string" ? candidate.source_language.slice(0, 32) : null,
+    content_source: ["audio", "screen", "mixed", "unknown"].includes(String(candidate.content_source)) ? candidate.content_source as SubtitleCueV2["content_source"] : "unknown",
+    origin_chunk_id: typeof candidate.origin_chunk_id === "string" ? candidate.origin_chunk_id.slice(0, 64) : null,
+    origin_model: typeof candidate.origin_model === "string" ? candidate.origin_model.slice(0, 128) : null,
+    locked: candidate.locked === true,
+    speech_start_ms: validSpeech ? speechStart : null,
+    speech_end_ms: validSpeech ? speechEnd : null,
+    speech_evidence: validEvidence ? evidence as SubtitleCueV2['speech_evidence'] : null,
+    words: Array.isArray(candidate.words) ? candidate.words.filter((word): word is NonNullable<SubtitleCueV2["words"]>[number] =>
+      isRecord(word) && typeof word.id === "string" && typeof word.text === "string"
+      && integerMs(word.start_ms) !== null && integerMs(word.end_ms) !== null
+      && Number(word.end_ms) > Number(word.start_ms)
+      && ((Number(word.start_ms) >= startMs && Number(word.end_ms) <= endMs)
+        || (validSpeech && Number(word.start_ms) >= speechStart && Number(word.end_ms) <= speechEnd)))
+      .slice(0, 500).map(word => ({ ...word, alignment_method:
+        ['asr_observed', 'ctc_aligned', 'energy_estimated', 'interpolated', 'manual'].includes(String(word.alignment_method))
+          ? word.alignment_method : null })) : null,
     ...(isRecord(candidate.layout) && finiteNumber(candidate.layout.x) && finiteNumber(candidate.layout.y)
       ? { layout: { x: Math.max(0, Math.min(100, candidate.layout.x)), y: Math.max(0, Math.min(100, candidate.layout.y)) } }
       : {}),
@@ -149,6 +179,7 @@ export const normalizeSavedDraft = (
       : null;
   return {
     version: 2,
+    documentMeta: isRecord(value.documentMeta) ? { revision: Math.max(0, integerMs(value.documentMeta.revision) ?? 0), run_id: typeof value.documentMeta.run_id === "string" ? value.documentMeta.run_id.slice(0, 64) : null } : { revision: 0, run_id: null },
     videoId,
     projectName:
       typeof value.projectName === "string" && value.projectName.trim()
@@ -163,6 +194,7 @@ export const normalizeSavedDraft = (
     selectedCueId,
     activeGeminiJobId:
       typeof value.activeGeminiJobId === "string" ? value.activeGeminiJobId : null,
+    lastGeminiJobId: typeof value.lastGeminiJobId === "string" && /^[a-f0-9]{20}$/.test(value.lastGeminiJobId) ? value.lastGeminiJobId : null,
     activeAlignmentJobId:
       typeof value.activeAlignmentJobId === "string" ? value.activeAlignmentJobId : null,
     activeRenderJobId:

@@ -1,4 +1,5 @@
 import type { VoiceDocument } from './types';
+import { refreshTiming } from './timing';
 
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -26,7 +27,13 @@ export function mergeVoiceDocument(base: VoiceDocument | null, local: VoiceDocum
   const byId = (doc: VoiceDocument) => Object.fromEntries(doc.clips.map(clip => [clip.id, clip]));
   const normalized = (doc: VoiceDocument) => ({ ...doc, revision: 0, clips: byId(doc) });
   const merged = mergeValue(normalized(base), normalized(local), normalized(remote), conflict) as Omit<VoiceDocument, 'clips'> & { clips: Record<string, VoiceDocument['clips'][number] | undefined> };
-  return { ...merged, revision: remote.revision,
+  const result: VoiceDocument = { ...merged, revision: remote.revision,
     clips: Object.values(merged.clips).filter((clip): clip is VoiceDocument['clips'][number] => !!clip)
       .sort((a, b) => a.start_ms - b.start_ms) };
+  if (result.clips.some(clip => clip.sync?.alignment)) {
+    const generationChanged = !equal([result.profile, result.pronunciation], [remote.profile, remote.pronunciation]);
+    result.clips = refreshTiming(result.clips.map(clip => generationChanged && clip.sync?.alignment
+      ? { ...clip, sync: { ...clip.sync, alignment: null } } : clip));
+  }
+  return result;
 }
