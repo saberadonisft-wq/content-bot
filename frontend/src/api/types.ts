@@ -463,7 +463,10 @@ export type GeminiSubtitleResult = {
   version_id?: string;
 };
 
-export type GeminiChunkStatus = { chunk_id: string; state: string; message?: string; key_id?: string; key_name?: string; model?: string };
+export type GeminiChunkStatus = {
+  chunk_id: string; state: string; message?: string; key_id?: string; key_name?: string; model?: string;
+  quality_errors?: string[]; repair_attempt?: number;
+};
 
 export type SubtitleJob = {
   id: string;

@@ -101,8 +101,8 @@ def test_prompt_bilingual_has_secondary_text(tmp_path: Path) -> None:
     assert example["segments"][0]["source_text"]
     assert "VIDEO_END_MS=60000" in prompt_bi
     assert "0 <= start_ms < end_ms <= 60000" in prompt_bi
-    assert "khong dung kien thuc ve phim/video goc de viet tiep" in prompt_bi
-    assert "So cue co the bang 0" in prompt_bi
+    assert "Do not complete cut-off sentences" in prompt_bi
+    assert "Return zero segments" in prompt_bi
 
 
 def test_generate_content_retries_on_429(tmp_path: Path) -> None:
@@ -495,9 +495,13 @@ def test_remote_cleanup_failure_is_reported_as_warning(
         svc,
         "_generate_content",
         lambda *args, **kwargs: (
-            '{"schema_version":2,"language":"vi","timebase":"milliseconds","timing_source":"gemini_estimate","timing_precision_ms":100,"segments":[{"id":"g1","start_ms":0,"end_ms":1000,"text":"Xin chao"}]}'
+            '{"schema_version":2,"language":"vi","timebase":"milliseconds","timing_source":"gemini_estimate","timing_precision_ms":100,"segments":[{"id":"g1","start_ms":0,"end_ms":1000,"text":"Xin chào","source_text":"你好","source_language":"zh","content_source":"screen"}]}'
         ),
     )
+    monkeypatch.setattr(svc, "_audit_content", lambda *args, **kwargs: json.dumps({
+        "reviewed_entire_clip": True, "issues": [], "units": [{"start_ms": 0, "end_ms": 1000,
+        "source_text": "你好", "candidate_indices": [0], "translation_ok": True,
+        "evidence": "Fixture visible source at 0-1000 ms"}]}))
     monkeypatch.setattr(svc, "_delete_file", lambda *args, **kwargs: False)
 
     result = svc.generate(video, media, {}, context)

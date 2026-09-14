@@ -87,6 +87,10 @@ class DispatchUnavailable(RuntimeError):
     pass
 
 
+class RequestBudgetExceeded(DispatchUnavailable):
+    """Local request cap; retrying with a fresh budget must not bypass it."""
+
+
 class NoEligibleKeys(DispatchUnavailable):
     """No enabled credential/model combination remains in this run."""
 
@@ -266,10 +270,15 @@ class ChunkRequestBudget:
         if request.url.path.endswith(":generateContent"):
             self.generation_calls += 1
             if self.generation_calls > self.attempts:
-                raise DispatchUnavailable("Đã hết tổng số lần gọi generateContent cho đoạn.")
-        if request.url.path == "/upload/v1beta/files":
+                raise RequestBudgetExceeded("Đã hết tổng số lần gọi generateContent cho đoạn.")
+        # Resumable upload uses two POSTs, often on the SAME URL path:
+        # 'start' creates the session; 'upload, finalize' sends its bytes.
+        # Only session creation consumes an upload attempt. Chunk/finalize/query
+        # requests still obey the common cancellation and deadline checks above.
+        commands = {part.strip().lower() for part in request.headers.get("X-Goog-Upload-Command", "").split(",")}
+        if request.method == "POST" and request.url.path.rstrip("/") == "/upload/v1beta/files" and "start" in commands:
             self.upload_calls += 1
             if self.upload_calls > self.attempts:
-                raise DispatchUnavailable("Đã hết tổng số lần upload cho đoạn.")
+                raise RequestBudgetExceeded("Đã hết tổng số lần khởi tạo upload cho đoạn.")
         timeouts = request.extensions.get("timeout", {})
         request.extensions["timeout"] = {key: min(value if value is not None else remaining, remaining) for key, value in timeouts.items()}

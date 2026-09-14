@@ -6,6 +6,9 @@ const phaseLabels: Record<string, string> = {
   preparing_video: "Chuẩn bị video",
   uploading_video: "Tải lên Gemini",
   gemini_analyzing: "Đang dịch",
+  gemini_checking: "Đang đối chiếu video",
+  gemini_repairing: "Đang sửa lại",
+  quality_failed: "Chưa khớp · tự sửa",
   quota_wait: "Chờ lượt API",
   retrying: "Đang thử lại",
   retry_wait: "Chờ tự thử lại",
@@ -24,7 +27,7 @@ function chunkStatus(chunk: GeminiChunkStatus, job: GeminiSubtitleJob) {
     return { tone: "waiting", label: "Chờ tiếp tục", value: undefined };
   }
   if (chunk.state === "queued") return { tone: "queued", label: phaseLabels.queued, value: 0 };
-  const waiting = ["quota_wait", "retrying", "retry_wait"].includes(chunk.state);
+  const waiting = ["quota_wait", "retrying", "retry_wait", "quality_failed"].includes(chunk.state);
   return { tone: waiting ? "waiting" : "active", label: phaseLabels[chunk.state] ?? "Đang xử lý", value: undefined };
 }
 
@@ -59,6 +62,11 @@ export function GeminiChunkProgress({ job }: { job: GeminiSubtitleJob }) {
               </small>
               {(status.tone === "failed" || status.tone === "waiting") && chunk.message && (
                 <p className="gemini-chunk-message">{chunk.message}</p>
+              )}
+              {status.tone === "active" && !!chunk.quality_errors?.length && (
+                <p className="gemini-chunk-message" role="status">
+                  Kết quả trước chưa đạt · đang tự sửa lần {chunk.repair_attempt}: {chunk.quality_errors[0]}
+                </p>
               )}
             </li>
           );

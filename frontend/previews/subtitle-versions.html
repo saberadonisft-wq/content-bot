@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Phiên bản phụ đề · Kiểm tra giao diện</title>
+<style>
+html, body { margin: 0; overflow-x: clip; background: var(--color-paper); color: var(--color-ink); font-family: var(--font-ui); }
+main { padding: 16px; max-width: 900px; margin: auto; }
+.preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 24px; }
+.preview-case { min-width: 0; }
+.preview-case h2 { font-size: 14px; margin: 16px 0 8px; }
+.preview-case[data-state="hover"] .version-save { background: var(--color-paper-2); }
+.preview-case[data-state="focus"] .version-save { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.preview-case[data-state="active"] .version-save { background: var(--color-paper-3); }
+</style></head>
+<body><main><h1>Phiên bản phụ đề</h1><div id="root"></div></main>
+<script type="module">
+import RefreshRuntime from '/@react-refresh';
+RefreshRuntime.injectIntoGlobalHook(window);
+window.$RefreshReg$ = () => {};
+window.$RefreshSig$ = () => type => type;
+window.__vite_plugin_react_preamble_installed__ = true;
+const { createElement: h } = await import('react');
+const { createRoot } = await import('react-dom/client');
+await import('/src/tokens.css');
+await import('/src/subtitle-studio.css');
+const { SubtitleVersionsPanel } = await import('/src/subtitles/SubtitleVersionsPanel.tsx');
+const documentData = { schema_version: 2, language: 'vi', timebase: 'milliseconds', timing_source: 'manual', timing_precision_ms: 1, segments: [] };
+const version = { id: 'sample', name: 'Trước khi tạo lại', source: 'snapshot', model: null, created_at: '2026-09-14T15:22:42+07:00', cue_count: 0, document: documentData };
+const originalFetch = window.fetch;
+window.fetch = async (input, options = {}) => {
+  const match = String(input).match(/\/subtitles\/videos\/([^/]+)\/versions(.*)/);
+  if (!match) return originalFetch(input, options);
+  const [, id, suffix] = match;
+  if (id === 'loading' || (id === 'disabled' && options.method === 'POST')) return new Promise(() => {});
+  const error = id === 'error' && options.method === 'POST';
+  const result = error ? { detail: 'Không lưu được phiên bản. Hãy thử lại.' }
+    : options.method === 'POST' || suffix.startsWith('/') ? version
+    : { versions: id === 'empty' ? [] : [version], total: id === 'empty' ? 0 : 1 };
+  return new Response(JSON.stringify(result), { status: error ? 500 : 200, headers: { 'Content-Type': 'application/json' } });
+};
+const states = ['default', 'hover', 'focus', 'active', 'disabled', 'loading', 'error', 'success', 'empty'];
+createRoot(document.getElementById('root')).render(h('div', { className: 'preview-grid' }, states.map(state =>
+  h('section', { className: 'preview-case', 'data-state': state, key: state }, h('h2', null, state),
+    h(SubtitleVersionsPanel, { videoId: state, document: documentData, onDocument: () => {} }))
+)));
+const observer = new MutationObserver(() => {
+  for (const panel of document.querySelectorAll('details:not([open])')) panel.open = true;
+  for (const state of ['disabled', 'error', 'success']) {
+    const button = document.querySelector(`[data-state="${state}"] .version-save`);
+    if (button && !button.dataset.initialized) { button.dataset.initialized = 'true'; button.click(); }
+  }
+});
+observer.observe(document.getElementById('root'), { childList: true, subtree: true });
+</script></body></html>

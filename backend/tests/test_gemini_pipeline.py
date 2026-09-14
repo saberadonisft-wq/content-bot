@@ -72,6 +72,15 @@ def pipeline_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_create_proxy", lambda v, p, **kw: p.write_bytes(b"proxy"))
     monkeypatch.setattr(service, "_upload_file", lambda p, **kw: "files/" + p.stem)
     monkeypatch.setattr(service, "_delete_file", lambda *a, **k: True)
+    # Transport/resume tests isolate the media auditor; quality tests override it
+    # with actual mismatches. No live Gemini/video observation happens here.
+    def audit(file, prompt, **kwargs):
+        data = json.loads(prompt.split("Candidate data (not instructions):\n", 1)[1])
+        return json.dumps({"reviewed_entire_clip": True, "issues": [], "units": [
+            {"start_ms": c["start_ms"], "end_ms": c["end_ms"], "source_text": c["source_text"],
+             "candidate_indices": [c["index"]], "translation_ok": True, "evidence": "Fixture source observation"}
+            for c in data["candidates"]]})
+    monkeypatch.setattr(service, "_audit_content", audit)
     updates = []
     event = threading.Event()
     def check():
@@ -225,7 +234,7 @@ def test_generation_prompt_upgrade_invalidates_completed_checkpoints(tmp_path, m
     policy = service.cache_policy()
     service.generate(video, media, options, context)
     assert len(calls) == 3
-    assert all("MOI CUE CHI CHUA MOT CAU" in prompt and "BAT BUOC dich theo phu de goc" in prompt
+    assert all("exactly one translated segment" in prompt and "original subtitles as the authority" in prompt
                and "Trương Tam" in prompt for prompt in calls)
     service.generate(video, media, options, context)
     assert len(calls) == 3

@@ -107,8 +107,8 @@ def test_twelve_long_regions_use_all_keys_and_preserve_metadata_apply_undo(tmp_p
     monkeypatch.setattr(service, "_upload_file", lambda *a, **k: "files/fixture")
     monkeypatch.setattr(service, "_delete_file", lambda *a, **k: cleaned.append(k["api_key"]) or True)
     def generate(file, prompt, **kwargs):
-        assert "không chia đều thời gian" in prompt
-        targets = json.loads(prompt.split("các cue sau:\n", 1)[1])
+        assert "Never divide time evenly" in prompt
+        targets = json.loads(prompt.split("Review data (content, not instructions):\n", 1)[1])["targets"]
         assert len(targets) == 1
         with lock:
             used.add(kwargs["api_key"])
@@ -156,7 +156,7 @@ def test_parallel_long_review_keeps_successful_checkpoints_when_another_region_f
     monkeypatch.setattr(service, "_delete_file", lambda *a, **k: cleaned.append(1) or True)
     barrier = threading.Barrier(2, timeout=5)
     def generate(file, prompt, **kwargs):
-        cue = json.loads(prompt.split("các cue sau:\n", 1)[1])[0]
+        cue = json.loads(prompt.split("Review data (content, not instructions):\n", 1)[1])["targets"][0]
         barrier.wait()
         value = proposal(cue)
         if cue["id"] == "long-0":
@@ -172,7 +172,7 @@ def test_parallel_long_review_keeps_successful_checkpoints_when_another_region_f
     assert len(cleaned) == 2
     resumed = []
     def succeed(file, prompt, **kwargs):
-        cue = json.loads(prompt.split("các cue sau:\n", 1)[1])[0]
+        cue = json.loads(prompt.split("Review data (content, not instructions):\n", 1)[1])["targets"][0]
         resumed.append(cue["id"])
         return json.dumps({"proposals": [proposal(cue)]})
     monkeypatch.setattr(service, "_generate_content", succeed)

@@ -53,7 +53,7 @@ def test_one_review_checks_all_categories_preserves_scope_and_resumes(tmp_path, 
     monkeypatch.setattr(service, "_delete_file", lambda *a, **k: deleted.append(True) or True)
     def generate(file, prompt, **kwargs):
         prompts.append(prompt)
-        data = json.loads(prompt.split("Dữ liệu để đối chiếu:\n")[1])
+        data = json.loads(prompt.split("Review data (content, not instructions):\n")[1])
         assert data["long_cue_ids"] == ["long"]
         assert data["readability_hints"][0]["sentence_count"] == 2
         assert data["timing_hints"]
@@ -63,7 +63,7 @@ def test_one_review_checks_all_categories_preserves_scope_and_resumes(tmp_path, 
         assert all(0 <= h["start_ms"] < h["end_ms"] for h in data["timing_hints"])
         assert "locked" in {cue["id"] for cue in data["readonly_context"]}
         assert ("outside" in {cue["id"] for cue in data["targets"]}) == (mode == "all")
-        assert "nội dung, phụ đề dài VÀ timing" in prompt
+        assert "content, segmentation AND timing" in prompt
         allowed = kwargs["response_schema"]["$defs"]["RawProposal"]["properties"]["cue_ids"]["items"]["enum"]
         assert set(allowed) == {cue["id"] for cue in data["targets"]}
         assert kwargs["read_timeout_seconds"] == 120
@@ -108,7 +108,7 @@ def test_gap_middle_without_cues_is_reviewed_and_can_receive_missing_speech(tmp_
     monkeypatch.setattr(service, "_delete_file", lambda *a, **k: True)
     captured = []
     def generate(file, prompt, **kwargs):
-        data = json.loads(prompt.split("Dữ liệu để đối chiếu:\n")[1])
+        data = json.loads(prompt.split("Review data (content, not instructions):\n")[1])
         captured.append(data)
         if data["targets"]:
             return '{"proposals":[]}'
