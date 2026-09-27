@@ -11,6 +11,7 @@ import {
 import type { SubtitleBurnOptions } from "../api";
 import { fitOverlayLayout } from "./overlay";
 import { SubtitleMaskLayer } from "./SubtitleMaskLayer";
+import { SubtitleOcrBox } from "./SubtitleOcrBox";
 import { previewSubtitleMetrics } from "./preview-scale";
 import { hexToRgba } from "./style";
 import { SubtitleIntervalIndex, sortCues } from "./time";
@@ -20,6 +21,7 @@ import type {
   PreviewMode,
   SubtitleCueV2,
   SubtitleMaskRegion,
+  SubtitleOcrRegion,
   VideoDimensions,
 } from "./types";
 import { useActiveCueId } from "./useActiveCue";
@@ -38,6 +40,10 @@ type PreviewStageProps = {
   overlayLayout: OverlayLayout;
   subtitleMasks: readonly SubtitleMaskRegion[];
   selectedMaskId: string | null;
+  ocrRegion?: SubtitleOcrRegion | null;
+  onOcrRegionChange?: (region: SubtitleOcrRegion) => void;
+  showOcrBox?: boolean;
+  ocrDisabled?: boolean;
   clock: PlaybackClockStore;
   onVideoElementChange: (video: HTMLVideoElement | null) => void;
   onTogglePlay: () => void;
@@ -111,6 +117,10 @@ export function PreviewStage({
   overlayLayout,
   subtitleMasks,
   selectedMaskId,
+  ocrRegion,
+  onOcrRegionChange,
+  showOcrBox,
+  ocrDisabled,
   clock,
   onVideoElementChange,
   onTogglePlay,
@@ -600,6 +610,15 @@ export function PreviewStage({
             onChangeMask={onMaskChange}
             onDeleteMask={onMaskDelete}
           />
+
+          {showOcrBox && ocrRegion && onOcrRegionChange && (
+            <SubtitleOcrBox
+              region={ocrRegion}
+              disabled={ocrDisabled}
+              onChange={onOcrRegionChange}
+              visible={previewMode === "live"}
+            />
+          )}
 
           <div
             ref={onLibassHostElementChange}

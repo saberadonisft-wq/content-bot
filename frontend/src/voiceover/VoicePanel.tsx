@@ -10,9 +10,10 @@ import {
   smartResolveVoiceOverlaps,
   voiceClipsInRange,
 } from './planner';
-import { DEFAULT_PROFILE, VOICE_STATUS_LABELS, type VoiceDocument, type VoiceJob, type VoiceProfile } from './types';
+import { DEFAULT_PROFILE, VOICE_STATUS_LABELS, type Separation, type SeparationJob, type VoiceDocument, type VoiceJob, type VoiceProfile } from './types';
 import { legacySync, SYNC_ISSUE_LABELS } from './timing';
 import { VoiceSyncPanel } from './VoiceSyncPanel';
+import { VoiceTextPreview } from './VoiceTextPreview';
 
 function describeVoiceDocument(doc: VoiceDocument | null): string {
   if (!doc) return 'Chưa có lời đọc';
@@ -29,6 +30,7 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
   video_speed?: number; video_segments?: { start_ms: number; end_ms: number }[];
 } }) {
   const { document: doc, status, job, selectedId, setError } = voice;
+  const projectId = doc?.project_id;
   const selected = doc?.clips.find(c => c.id === selectedId);
   const [profiles, setProfiles] = useState<VoiceProfile[]>([]);
   const [previewText, setPreviewText] = useState('Cô gái tưởng rằng mình đã thoát khỏi nguy hiểm. Nhưng ngay khi cánh cửa mở ra, một bí mật khiến mọi thứ thay đổi.');
@@ -51,7 +53,12 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
     ? voiceClipsInRange(doc.clips, Number(rangeStart) * 1000, Number(rangeEnd) * 1000) : [];
   const [pronunciationWord, setPronunciationWord] = useState('');
   const [pronunciationReading, setPronunciationReading] = useState('');
+  const [separations, setSeparations] = useState<Separation[]>([]);
+  const [separationJob, setSeparationJob] = useState<SeparationJob | null>(null);
+  const [separationMethod, setSeparationMethod] = useState<'demucs' | 'center_reduction'>('demucs');
+  const [separationGain, setSeparationGain] = useState(1);
   const urlRef = useRef<string | null>(null);
+  const stemUrlRef = useRef<string | null>(null);
   const running = job && ['queued', 'running'].includes(job.state);
   const previewRunning = previewJob && ['queued', 'running'].includes(previewJob.state);
   const profile = doc?.profile ?? DEFAULT_PROFILE;
@@ -70,7 +77,10 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
       .catch(e => { if (!controller.signal.aborted) setError(String(e)); });
     return () => controller.abort();
   }, [setError]);
-  useEffect(() => () => { if (urlRef.current) URL.revokeObjectURL(urlRef.current); }, []);
+  useEffect(() => () => {
+    if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    if (stemUrlRef.current) URL.revokeObjectURL(stemUrlRef.current);
+  }, []);
   useEffect(() => () => { referenceUrls.current.forEach(url => URL.revokeObjectURL(url)); }, []);
   const listen = useCallback(async (asset: string) => {
     const response = await voiceFetch(`/assets/${asset}`);
@@ -124,6 +134,75 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
   const listenSelected = () => {
     const asset = selected?.asset_id;
     if (asset) void action(() => listen(asset));
+  };
+  useEffect(() => {
+    if (!projectId) {
+      const reset = window.setTimeout(() => { setSeparations([]); setSeparationJob(null); }, 0);
+      return () => window.clearTimeout(reset);
+    }
+    const controller = new AbortController();
+    void voiceRequest<Separation[]>(`/projects/${projectId}/separations`, { signal: controller.signal })
+      .then(setSeparations).catch(e => { if (!controller.signal.aborted) setError(String(e)); });
+    return () => controller.abort();
+  }, [projectId, setError]);
+  useEffect(() => {
+    if (!separationJob || !projectId || !['queued', 'running'].includes(separationJob.state)) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const next = await voiceRequest<SeparationJob>(`/projects/${projectId}/separations/jobs/${separationJob.id}`);
+        if (disposed) return;
+        setSeparationJob(next);
+        if (next.state === 'succeeded' && next.result) {
+          setSeparations(current => [next.result!, ...current.filter(row => row.stem_id !== next.result!.stem_id)]);
+        } else if (['queued', 'running'].includes(next.state)) timer = setTimeout(poll, 1000);
+      } catch (e) { if (!disposed) { setError(String(e)); timer = setTimeout(poll, 3000); } }
+    };
+    timer = setTimeout(poll, 700);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [projectId, separationJob, setError]);
+  const startSeparation = () => {
+    if (!doc) return;
+    void action(async () => {
+      const job = await voiceRequest<SeparationJob>(`/projects/${doc.project_id}/separations`, {
+        method: 'POST', body: JSON.stringify({ method: separationMethod, device: voice.device }),
+      });
+      setSeparationJob(job);
+    });
+  };
+  const cancelSeparation = () => {
+    if (!doc || !separationJob) return;
+    void action(async () => setSeparationJob(await voiceRequest<SeparationJob>(
+      `/projects/${doc.project_id}/separations/jobs/${separationJob.id}/cancel`, { method: 'POST' },
+    )));
+  };
+  const listenStem = (stem: Separation['stems'][string]) => {
+    void action(async () => {
+      const response = await voiceFetch(stem.url);
+      const blob = await response.blob();
+      if (!mounted.current) return;
+      if (stemUrlRef.current) URL.revokeObjectURL(stemUrlRef.current);
+      stemUrlRef.current = URL.createObjectURL(blob);
+      const player = document.querySelector<HTMLAudioElement>('[data-separation-preview]');
+      if (player) { player.src = stemUrlRef.current; await player.play().catch(() => undefined); }
+    });
+  };
+  const selectBackground = (separation: Separation) => {
+    if (!doc || !separation.stems.background) return;
+    void action(async () => {
+      const saved = await voiceRequest<VoiceDocument>(
+        `/projects/${doc.project_id}/background-stems/${separation.stem_id}/select`,
+        { method: 'POST', body: JSON.stringify({ gain: separationGain }) },
+      );
+      voice.replace(saved);
+    });
+  };
+  const clearBackground = () => {
+    if (!doc) return;
+    void action(async () => voice.replace(await voiceRequest<VoiceDocument>(
+      `/projects/${doc.project_id}/background-stems/selection`, { method: 'DELETE' },
+    )));
   };
   return <div className="studio-panel-section voice-panel">
     <div className="studio-panel-heading"><h2><AudioLines size={18} /> Giọng đọc AI</h2>
@@ -257,9 +336,11 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
     </details>
     <details open><summary>Nghe thử chất giọng</summary>
       <label>Lời đọc thử<textarea rows={4} value={previewText} maxLength={3000} onChange={e => setPreviewText(e.target.value)} /></label>
+      <VoiceTextPreview text={previewText} document={doc} />
       <button type="button" className="studio-secondary-button" disabled={!engineReady || !engineDevices.includes(voice.device) || working || Boolean(previewRunning) || !previewText.trim()}
         onClick={() => void action(async () => setPreviewJob(await voiceRequest<VoiceJob>('/preview', { method: 'POST',
-          body: JSON.stringify({ profile, text: previewText, device: voice.device }) })))}><Play size={16} /> Tạo mẫu nghe</button>
+          body: JSON.stringify({ profile, text: previewText, device: voice.device,
+            pronunciation: doc?.pronunciation ?? {}, text_normalization: doc?.text_normalization ?? 'off' }) })))}><Play size={16} /> Tạo mẫu nghe</button>
       {previewJob && <p role="status">{previewJob.state === 'interrupted'
         ? 'Tác vụ bị gián đoạn khi bộ tạo giọng khởi động lại. Bấm “Tiếp tục mẫu nghe” để chạy lại.'
         : previewJob.message}</p>}
@@ -316,6 +397,7 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
           onChange={e => voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id
             ? { ...c, sync: { ...(c.sync ?? legacySync()), text_locked: e.target.checked } } : c) }))} />Giữ nguyên lời đọc đã chỉnh</label>
         <label>Lời đọc<textarea rows={5} value={selected.spoken_text} maxLength={8000} onChange={e => voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id ? { ...c, spoken_text: e.target.value, status: c.asset_id ? 'stale' : 'missing' } : c) }))} /></label>
+        <VoiceTextPreview text={selected.spoken_text} document={doc} />
         <div className="voice-fields"><label>Tốc độ<input type="number" min={0.5} max={2} step={0.01} value={selected.rate} onChange={e => {
           const rate = Number(e.target.value); if (rate >= 0.5 && rate <= 2) voice.edit(d => ({ ...d, clips: d.clips.map(c => c.id === selected.id ? { ...c, rate } : c) }));
         }} /></label>
@@ -357,6 +439,40 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
           </button>
         </div>
       </details>
+      <details><summary>Tách thoại và nhạc nền</summary>
+        <p>Tạo stem riêng để nghe và chọn làm âm nền. Demucs cần runtime/model cục bộ; khử kênh giữa là hiệu ứng có thể làm mất thoại, nhạc hoặc hiệu ứng ở giữa.</p>
+        <div className="voice-fields">
+          <label>Phương pháp<select value={separationMethod} disabled={working || Boolean(separationJob && ['queued', 'running'].includes(separationJob.state))}
+            onChange={event => setSeparationMethod(event.target.value as 'demucs' | 'center_reduction')}>
+            <option value="demucs">Demucs · tách AI</option>
+            <option value="center_reduction">Khử kênh giữa · có giới hạn</option>
+          </select></label>
+          <label>Mức âm nền<input type="range" min={0} max={2} step={0.05} value={separationGain}
+            onChange={event => setSeparationGain(Number(event.target.value))} /></label>
+        </div>
+        <div className="voice-actions">
+          <button type="button" className="studio-secondary-button" disabled={!doc || working || Boolean(separationJob && ['queued', 'running'].includes(separationJob.state))}
+            onClick={startSeparation}>Tách audio</button>
+          {separationJob && ['queued', 'running'].includes(separationJob.state) && <button type="button" disabled={working} onClick={cancelSeparation}>Hủy tách</button>}
+        </div>
+        {separationJob && <div className="voice-separation-job" role="status">
+          <progress value={separationJob.progress} max={100} />
+          <span>{separationJob.message}</span>
+          {separationJob.error && <small className="voice-error">{separationJob.error}</small>}
+        </div>}
+        <audio data-separation-preview controls preload="none" aria-label="Nghe stem tách nền" />
+        {separations.map(separation => <div className="voice-separation-result" key={separation.stem_id}>
+          <div><strong>{separation.method === 'demucs' ? 'Demucs' : 'Khử kênh giữa'}</strong><small>{separation.warnings.join(' ')}</small></div>
+          <div className="voice-actions">
+            {separation.stems.vocals && <button type="button" onClick={() => listenStem(separation.stems.vocals)}>Nghe thoại</button>}
+            {separation.stems.background && <button type="button" onClick={() => listenStem(separation.stems.background)}>Nghe nền</button>}
+            <button type="button" className="studio-secondary-button" disabled={working || !separation.stems.background}
+              onClick={() => selectBackground(separation)}>{doc.mix.background_stem_id === separation.stem_id ? 'Đang dùng âm nền' : 'Dùng âm nền'}</button>
+          </div>
+        </div>)}
+        {doc.mix.background_stem_id && <div className="voice-actions"><small>Đang dùng stem âm nền đã kiểm tra.</small>
+          <button type="button" onClick={clearBackground} disabled={working}>Bỏ âm nền riêng</button></div>}
+      </details>
       <details><summary>Trộn âm thanh</summary>
         <p>Giảm âm gốc cũng giảm nhạc và hiệu ứng nằm trong cùng bản thu.</p>
         <label><input type="checkbox" checked={doc.mix.enabled} onChange={e => voice.edit(d => ({ ...d, mix: { ...d.mix, enabled: e.target.checked } }))} /> Dùng giọng AI khi xuất</label>
@@ -365,9 +481,15 @@ export function VoicePanel({ voice, exportTimeline }: { voice: VoiceController; 
           <option value="voice">Chỉ giọng AI</option><option value="mix">Trộn cùng âm gốc</option><option value="duck">Giảm âm gốc khi có lời đọc</option></select></label>
         <label>Âm lượng giọng<input type="range" min={0} max={2} step={0.05} value={doc.mix.gain} onChange={e => voice.edit(d => ({ ...d, mix: { ...d.mix, gain: Number(e.target.value) } }))} /></label>
         <label>Âm lượng gốc<input type="range" min={0} max={2} step={0.05} value={doc.mix.original_gain} onChange={e => voice.edit(d => ({ ...d, mix: { ...d.mix, original_gain: Number(e.target.value) } }))} /></label>
+        {doc.mix.background_stem_id && <label>Âm lượng stem nền<input type="range" min={0} max={2} step={0.05} value={doc.mix.background_gain ?? 1}
+          onChange={e => voice.edit(d => ({ ...d, mix: { ...d.mix, background_gain: Number(e.target.value) } }))} /></label>}
       </details>
       <details><summary>Từ điển phát âm</summary>
         <p>Đổi cách đọc tên riêng và chữ viết tắt, giữ nguyên chữ phụ đề.</p>
+        <label className="voice-normalization-toggle"><input type="checkbox" checked={doc.text_normalization === 'vi-context-v1'} disabled={Boolean(running) || Boolean(previewRunning)}
+          onChange={event => voice.edit(d => ({ ...d, text_normalization: event.target.checked ? 'vi-context-v1' : 'off',
+            clips: d.clips.map(c => ({ ...c, status: c.asset_id ? 'stale' : 'missing' })) }))} /><span>Chuẩn hóa số, ngày và giờ tiếng Việt</span></label>
+        <small>Kiểm tra nội dung đọc trước khi tạo giọng. Từ điển phát âm được ưu tiên; phụ đề hiển thị được giữ nguyên.</small>
         <label>Chữ trong lời đọc<input value={pronunciationWord} maxLength={100} onChange={e => setPronunciationWord(e.target.value)} /></label>
         <label>Cách đọc thay thế<input value={pronunciationReading} maxLength={200} onChange={e => setPronunciationReading(e.target.value)} /></label>
         <button type="button" disabled={!pronunciationWord.trim() || !pronunciationReading.trim()} onClick={() => {

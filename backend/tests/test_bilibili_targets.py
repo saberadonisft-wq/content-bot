@@ -39,6 +39,20 @@ from app.crawlers.adapters.bilibili.targets import BilibiliTargetError
             None,
         ),
         (
+            "https://www.bilibili.com/medialist/play/ml1103407912?from=share",
+            BilibiliTargetKind.PLAYLIST,
+            "ml1103407912",
+            "https://www.bilibili.com/medialist/detail/ml1103407912",
+            None,
+        ),
+        (
+            "https://space.bilibili.com/123/favlist?fid=1103407912&ftype=create",
+            BilibiliTargetKind.PLAYLIST,
+            "ml1103407912",
+            "https://www.bilibili.com/medialist/detail/ml1103407912",
+            None,
+        ),
+        (
             "https://t.bilibili.com/456",
             BilibiliTargetKind.DYNAMIC,
             "456",
@@ -81,6 +95,8 @@ def test_short_url_is_explicitly_unresolved() -> None:
         "https://www.bilibili.com/video/BV1bad",
         "https://www.bilibili.com/video/av123?p=zero",
         "https://www.bilibili.com/search?keyword=game",
+        "https://www.bilibili.com/medialist/detail/ml0",
+        "https://space.bilibili.com/123/favlist?fid=not-a-number",
         "123",
     ],
 )

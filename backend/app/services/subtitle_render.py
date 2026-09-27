@@ -30,6 +30,7 @@ SRT_PLAYRES_X = 384
 SRT_PLAYRES_Y = 288
 RenderProgress = Callable[[int, str, str], None]
 EncoderName = Literal["h264_nvenc", "h264_qsv", "libx264"]
+_AUDIO_ONLY_RENDER_OPTIONS = frozenset({"volume", "fade_in_ms", "fade_out_ms"})
 _CAPABILITY_LOCK = threading.Lock()
 _ENCODER_CAPABILITIES: dict[str, bool] | None = None
 
@@ -64,15 +65,66 @@ def precision_render_cache_key(
     overlay: dict[str, Any] | None = None,
     masks: list[dict[str, Any]] | None = None,
 ) -> str:
-    payload = {
+    payload = _render_cache_payload(
+        document,
+        media,
+        options,
+        overlay,
+        masks,
+        include_audio=True,
+    )
+    return _render_cache_digest(payload)
+
+
+def precision_render_visual_cache_key(
+    document: dict[str, Any],
+    media: dict[str, Any],
+    options: dict[str, Any],
+    overlay: dict[str, Any] | None = None,
+    masks: list[dict[str, Any]] | None = None,
+) -> str:
+    """Return the cache identity for the encoded video stream."""
+
+    return _render_cache_digest(
+        _render_cache_payload(
+            document,
+            media,
+            options,
+            overlay,
+            masks,
+            include_audio=False,
+        )
+    )
+
+
+def _render_cache_payload(
+    document: dict[str, Any],
+    media: dict[str, Any],
+    options: dict[str, Any],
+    overlay: dict[str, Any] | None,
+    masks: list[dict[str, Any]] | None,
+    *,
+    include_audio: bool,
+) -> dict[str, Any]:
+    visual_options = {
+        key: value
+        for key, value in options.items()
+        if include_audio or key not in _AUDIO_ONLY_RENDER_OPTIONS
+    }
+    payload: dict[str, Any] = {
         "renderer": PRECISION_RENDERER_VERSION,
         "media": media.get("fingerprint"),
-        "audio": media.get("audio_hash"),
         "document": document,
-        "options": options,
+        "options": visual_options,
         "overlay": overlay,
         "masks": masks or [],
     }
+    if include_audio:
+        payload["audio"] = media.get("audio_hash")
+    return payload
+
+
+def _render_cache_digest(payload: dict[str, Any]) -> str:
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -81,6 +133,76 @@ def precision_render_cache_key(
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _render_metadata_path(output: Path) -> Path:
+    return output.with_name(f"{output.name}.render.json")
+
+
+def _write_render_metadata(
+    output: Path,
+    *,
+    visual_cache_key: str,
+    video_id: str,
+    output_duration_ms: int,
+    media_fingerprint: str | None,
+) -> None:
+    metadata_path = _render_metadata_path(output)
+    temporary_path = metadata_path.with_name(f"{metadata_path.name}.part")
+    try:
+        temporary_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "visual_cache_key": visual_cache_key,
+                    "video_id": video_id,
+                    "output_duration_ms": output_duration_ms,
+                    "media_fingerprint": media_fingerprint,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        temporary_path.replace(metadata_path)
+    except OSError:
+        # The rendered MP4 is still valid if a sidecar cannot be persisted;
+        # the next render simply falls back to a full encode.
+        temporary_path.unlink(missing_ok=True)
+
+
+def _find_visual_cache_candidate(
+    output_dir: Path,
+    *,
+    video_id: str,
+    visual_cache_key: str,
+    output_duration_ms: int,
+    excluded: Path,
+) -> Path | None:
+    pattern = f"subtitled_{video_id}_*.mp4"
+    candidates = sorted(
+        output_dir.glob(pattern),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if candidate == excluded or not candidate.is_file():
+            continue
+        metadata_path = _render_metadata_path(candidate)
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if (
+                metadata.get("version") != 1
+                or metadata.get("visual_cache_key") != visual_cache_key
+                or int(metadata.get("output_duration_ms", -1)) != output_duration_ms
+            ):
+                continue
+            probed = probe_media(candidate, timeout_seconds=60)
+            if abs(int(probed["duration_ms"]) - output_duration_ms) <= 1000:
+                return candidate
+        except (OSError, ValueError, KeyError, MediaProbeError):
+            continue
+    return None
 
 
 def _encoder_smoke_test(ffmpeg_exe: str, encoder: EncoderName) -> bool:
@@ -875,6 +997,151 @@ def _run_ffmpeg(
         raise SubtitleRenderError(detail or f"FFmpeg exited with code {return_code}")
 
 
+def _audio_segments_filter_graph(
+    media: dict[str, Any],
+    options: dict[str, Any],
+    output_duration_ms: int,
+) -> str:
+    segments, cuts_active = _effective_video_segments(media, options)
+    if not cuts_active:
+        raise SubtitleRenderError("Audio segment graph requires active cuts")
+    graph_parts: list[str] = []
+    labels: list[str] = []
+    for index, (start_ms, end_ms) in enumerate(segments):
+        label = f"audio_cut_{index}"
+        graph_parts.append(
+            f"[1:a]atrim=start={start_ms / 1000:.3f}:end={end_ms / 1000:.3f},"
+            f"asetpts=PTS-STARTPTS[{label}]"
+        )
+        labels.append(f"[{label}]")
+    if len(labels) == 1:
+        graph_parts.append(f"{labels[0]}anull[acut]")
+    else:
+        graph_parts.append(
+            f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[acut]"
+        )
+    speed = Decimal(str(options.get("video_speed", 1)))
+    filters = ["asetpts=PTS-STARTPTS"]
+    if speed != 1:
+        filters.append(f"atempo={speed}")
+    volume = float(options.get("volume", 1))
+    if volume != 1:
+        filters.append(f"volume={volume:.4f}")
+    fade_in_ms = int(options.get("fade_in_ms", 0))
+    if fade_in_ms > 0:
+        filters.append(f"afade=t=in:st=0:d={fade_in_ms / 1000:.3f}")
+    fade_out_ms = int(options.get("fade_out_ms", 0))
+    if fade_out_ms > 0:
+        fade_start = max(0, output_duration_ms - fade_out_ms) / 1000
+        filters.append(
+            f"afade=t=out:st={fade_start:.3f}:d={fade_out_ms / 1000:.3f}"
+        )
+    graph_parts.append(f"[acut]{','.join(filters)}[aout]")
+    return ";".join(graph_parts)
+
+
+def _try_audio_only_video_reuse(
+    *,
+    candidate: Path,
+    source: Path,
+    media: dict[str, Any],
+    options: dict[str, Any],
+    output_duration_ms: int,
+    output: Path,
+    ffmpeg_exe: str,
+    error_log: Path,
+    cancel_event: threading.Event | None,
+    progress: RenderProgress | None,
+    timeout_seconds: int,
+) -> bool:
+    """Reuse an encoded video stream while rebuilding only its audio stream."""
+
+    segments, cuts_active = _effective_video_segments(media, options)
+    del segments
+    command = [
+        ffmpeg_exe,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-stats_period",
+        "0.25",
+        "-i",
+        str(candidate.resolve()),
+    ]
+    if media.get("has_audio"):
+        if not cuts_active:
+            trim_start_ms = int(options.get("trim_start_ms", 0))
+            trim_end_ms = min(
+                int(options.get("trim_end_ms") or media["duration_ms"]),
+                int(media["duration_ms"]),
+            )
+            source_clip_ms = max(0, trim_end_ms - trim_start_ms)
+            if trim_start_ms > 0:
+                command.extend(["-ss", f"{trim_start_ms / 1000:.3f}"])
+            command.extend(["-t", f"{source_clip_ms / 1000:.3f}"])
+        command.extend(["-i", str(source.resolve())])
+
+    audio_copied = False
+    filter_graph: str | None = None
+    if not media.get("has_audio"):
+        audio_args = ["-an"]
+    elif cuts_active:
+        filter_graph = _audio_segments_filter_graph(
+            media, options, output_duration_ms
+        )
+        audio_args = [
+            "-map",
+            "[aout]",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+        ]
+    else:
+        audio_args, audio_copied = _audio_arguments(
+            media, options, output_duration_ms
+        )
+        audio_args = [
+            "1:a:0?" if value == "0:a:0?" else value
+            for value in audio_args
+        ]
+
+    if filter_graph:
+        command.extend(["-filter_complex", filter_graph])
+    command.extend(
+        [
+            "-map",
+            "0:v:0",
+            *audio_args,
+            "-c:v",
+            "copy",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            str(output.resolve()),
+        ]
+    )
+    _check_canceled(cancel_event)
+    _run_ffmpeg(
+        command,
+        error_log,
+        output_duration_ms,
+        cancel_event=cancel_event,
+        progress=progress,
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        probe_media(output, timeout_seconds=120)
+    except (MediaProbeError, OSError):
+        output.unlink(missing_ok=True)
+        return False
+    return audio_copied
+
+
 def render_precision_video(
     video_path: Path,
     document: dict[str, Any],
@@ -900,6 +1167,9 @@ def render_precision_video(
     if overlay_path is not None and not overlay_path.is_file():
         raise SubtitleRenderError("Overlay image does not exist")
     cache_key = precision_render_cache_key(document, media, options, overlay, masks)
+    visual_cache_key = precision_render_visual_cache_key(
+        document, media, options, overlay, masks
+    )
     output_duration_ms = _output_duration_ms(media, options)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_filename = f"subtitled_{video_id}_{cache_key[:12]}.mp4"
@@ -925,6 +1195,73 @@ def render_precision_video(
             }
         except (MediaProbeError, OSError):
             final_output.unlink(missing_ok=True)
+
+    visual_candidate = _find_visual_cache_candidate(
+        output_dir,
+        video_id=video_id,
+        visual_cache_key=visual_cache_key,
+        output_duration_ms=output_duration_ms,
+        excluded=final_output,
+    )
+    if visual_candidate is not None:
+        part_output = output_dir / f"{output_filename}.part.mp4"
+        part_output.unlink(missing_ok=True)
+        work_root = output_dir.parent / "render-work"
+        work_root.mkdir(parents=True, exist_ok=True)
+        started_at = time.perf_counter()
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix=f"{video_id[:8]}-audio-", dir=work_root
+            ) as work:
+                reused = _try_audio_only_video_reuse(
+                    candidate=visual_candidate,
+                    source=video_path,
+                    media=media,
+                    options=options,
+                    output_duration_ms=output_duration_ms,
+                    output=part_output,
+                    ffmpeg_exe=imageio_ffmpeg.get_ffmpeg_exe(),
+                    error_log=Path(work) / "audio-remux.log",
+                    cancel_event=cancel_event,
+                    progress=progress,
+                    timeout_seconds=timeout_seconds,
+                )
+                part_output.replace(final_output)
+        except SubtitleRenderCanceled:
+            raise
+        except (OSError, SubtitleRenderError):
+            part_output.unlink(missing_ok=True)
+        else:
+            _write_render_metadata(
+                final_output,
+                visual_cache_key=visual_cache_key,
+                video_id=video_id,
+                output_duration_ms=output_duration_ms,
+                media_fingerprint=media.get("fingerprint"),
+            )
+            elapsed_seconds = time.perf_counter() - started_at
+            _emit(progress, 100, "complete", "Đã ghép âm thanh trên video cache")
+            return {
+                "video_id": video_id,
+                "output_filename": output_filename,
+                "subtitled_video_url": f"/api/v1/subtitles/renders/{output_filename}",
+                "encoder": "copy",
+                "cache_hit": False,
+                "video_cache_hit": True,
+                "audio_only_reuse": True,
+                "audio_copied": reused,
+                "output_size_bytes": final_output.stat().st_size,
+                "duration_ms": output_duration_ms,
+                "elapsed_seconds": round(elapsed_seconds, 3),
+                "realtime_factor": round(
+                    output_duration_ms / 1000 / max(0.001, elapsed_seconds), 3
+                ),
+                "fallback_reasons": [],
+                "render_mode": render_mode,
+                "timing_precision_ms": 1 if render_mode == "precision" else 10,
+                "overlay_applied": overlay is not None,
+                "mask_count": len(masks or []),
+            }
 
     trim_start_ms = int(options.get("trim_start_ms", 0))
     trim_end_ms = min(
@@ -1082,6 +1419,13 @@ def render_precision_video(
                     "Rendered duration does not match the project timeline"
                 )
             part_output.replace(final_output)
+            _write_render_metadata(
+                final_output,
+                visual_cache_key=visual_cache_key,
+                video_id=video_id,
+                output_duration_ms=output_duration_ms,
+                media_fingerprint=media.get("fingerprint"),
+            )
     finally:
         part_output.unlink(missing_ok=True)
 
@@ -1093,6 +1437,8 @@ def render_precision_video(
         "subtitled_video_url": f"/api/v1/subtitles/renders/{output_filename}",
         "encoder": selected_encoder,
         "cache_hit": False,
+        "video_cache_hit": False,
+        "audio_only_reuse": False,
         "audio_copied": audio_copied,
         "output_size_bytes": final_output.stat().st_size,
         "duration_ms": output_duration_ms,

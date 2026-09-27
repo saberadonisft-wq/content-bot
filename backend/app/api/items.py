@@ -3,21 +3,84 @@ from __future__ import annotations
 import csv
 import io
 import logging
+from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..application_services import AppServices, get_services
 from ..config import settings
 from ..schemas import (
+    CaptionApplyRequest,
+    CaptionApplyResponse,
+    CaptionCleanRequest,
+    CaptionCleanResponse,
     ItemOutput,
     PagedItems,
+)
+from ..services.caption_cleaner import (
+    clean_caption_text,
+    extract_hashtags,
+    sanitize_filename,
 )
 from ..services.item_query import ItemQuery, query_items
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+@router.post("/api/v1/captions/clean", response_model=CaptionCleanResponse)
+def clean_caption(request: CaptionCleanRequest):
+    cleaned = clean_caption_text(request.text)
+    return CaptionCleanResponse(
+        original_text=request.text,
+        cleaned_text=cleaned,
+        hashtags=extract_hashtags(cleaned),
+        safe_filename=sanitize_filename(cleaned),
+        changed=cleaned != request.text,
+    )
+
+
+@router.post(
+    "/api/v1/items/{item_id}/caption",
+    response_model=CaptionApplyResponse,
+)
+def apply_caption(
+    item_id: int,
+    request: CaptionApplyRequest,
+    *,
+    services: AppServices = Depends(get_services),
+):
+    if item_id <= 0:
+        raise HTTPException(status_code=422, detail="ID bài viết không hợp lệ.")
+    item = services.store.item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài viết.")
+    source_text = "\n".join(
+        value for value in (item.get("title"), item.get("body_snippet")) if value
+    ).strip()
+    original = (
+        item.get("caption_original")
+        or request.original_text
+        or source_text
+        or request.edited_text
+    )
+    edited_at = datetime.now(UTC)
+    saved = services.store.save_item(
+        {
+            "id": item_id,
+            "caption_original": original,
+            "caption_edited": request.edited_text,
+            "caption_edited_at": edited_at,
+        }
+    )
+    return CaptionApplyResponse(
+        item_id=item_id,
+        caption_original=str(saved.get("caption_original") or original),
+        caption_edited=str(saved.get("caption_edited") or request.edited_text),
+        caption_edited_at=saved.get("caption_edited_at") or edited_at,
+    )
 
 
 def filtered_item_outputs(

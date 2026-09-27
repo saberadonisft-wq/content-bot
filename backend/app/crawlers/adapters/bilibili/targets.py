@@ -15,6 +15,7 @@ _SHORT_TOKEN = re.compile(r"^[0-9A-Za-z_-]{3,64}$")
 class BilibiliTargetKind(StrEnum):
     VIDEO = "video"
     CREATOR = "creator"
+    PLAYLIST = "playlist"
     DYNAMIC = "dynamic"
     SHORT_URL = "short_url"
 
@@ -30,6 +31,13 @@ class BilibiliTarget:
     canonical_url: str
     part_index: int | None = None
     requires_resolution: bool = False
+
+    @property
+    def media_url(self) -> str:
+        """Navigation URL retaining the selected part of a video."""
+        if self.kind is BilibiliTargetKind.VIDEO and self.part_index is not None:
+            return f"{self.canonical_url}?p={self.part_index}"
+        return self.canonical_url
 
 
 def parse_bilibili_target(value: str) -> BilibiliTarget:
@@ -65,6 +73,29 @@ def parse_bilibili_target(value: str) -> BilibiliTarget:
 
     if not (host == "bilibili.com" or host.endswith(".bilibili.com")):
         raise BilibiliTargetError("URL is not owned by Bilibili")
+
+    playlist_match = re.fullmatch(
+        r"/(?:medialist/(?:detail|play)/ml|list/ml)([1-9][0-9]*)", path
+    )
+    if playlist_match:
+        media_id = playlist_match.group(1)
+        return BilibiliTarget(
+            BilibiliTargetKind.PLAYLIST,
+            f"ml{media_id}",
+            f"https://www.bilibili.com/medialist/detail/ml{media_id}",
+        )
+
+    if host == "space.bilibili.com":
+        creator_path = re.fullmatch(r"/([1-9][0-9]*)/favlist", path)
+        if creator_path:
+            values = parse_qs(parsed.query, keep_blank_values=True).get("fid", [])
+            if len(values) == 1 and re.fullmatch(r"[1-9][0-9]*", values[0]):
+                media_id = values[0]
+                return BilibiliTarget(
+                    BilibiliTargetKind.PLAYLIST,
+                    f"ml{media_id}",
+                    f"https://www.bilibili.com/medialist/detail/ml{media_id}",
+                )
 
     video_match = re.fullmatch(r"/video/([^/]+)", path)
     if video_match and _VIDEO_ID.fullmatch(video_match.group(1)):

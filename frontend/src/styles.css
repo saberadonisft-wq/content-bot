@@ -703,6 +703,83 @@ tr:hover td {
   color: var(--cobalt-deep);
   text-decoration: underline;
 }
+.caption-cleaner-trigger {
+  margin-top: var(--space-2);
+  min-height: 32px;
+  padding-block: var(--space-1);
+}
+.caption-cleaner {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--cobalt);
+  border-radius: var(--radius-1);
+  background: var(--surface-tint);
+}
+.caption-cleaner-head,
+.caption-cleaner-actions,
+.caption-cleaner-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.caption-cleaner-head > div {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.caption-cleaner-head span,
+.caption-cleaner-meta,
+.caption-cleaner-result > div > span,
+.caption-cleaner-result small {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+.caption-cleaner-field {
+  display: grid;
+  gap: var(--space-1);
+  font-size: 13px;
+  font-weight: 600;
+}
+.caption-cleaner-field textarea {
+  width: 100%;
+  min-height: 112px;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-1);
+  padding: var(--space-3);
+  background: var(--surface-raised);
+  color: var(--ink-strong);
+  font: inherit;
+  line-height: 1.5;
+}
+.caption-cleaner-result {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--surface-raised);
+}
+.caption-cleaner-result p {
+  margin: var(--space-1) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.caption-cleaner-meta code {
+  overflow-wrap: anywhere;
+}
+.caption-cleaner-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+}
 .insight-line {
   display: flex;
   flex-wrap: wrap;

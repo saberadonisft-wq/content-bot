@@ -2,6 +2,7 @@ import type {
   MediaMetadata,
   OverlayLayout,
   SubtitleParseResultV2,
+  SubtitleOcrRegion,
   SubtitleWarning,
   VideoClip
 } from "../subtitles/types";
@@ -85,6 +86,7 @@ export type TikTokOAuthStatus = {
 
 export type CrawlerLoginStatus = {
   source_id: string;
+  connection_id: string;
   state:
   | "idle"
   | "opening"
@@ -168,6 +170,9 @@ export type Item = {
     topics: { id: string; label: string; reasons: string[] }[];
     method: string;
   };
+  caption_original?: string | null;
+  caption_edited?: string | null;
+  caption_edited_at?: string | null;
 };
 
 export type ItemFilters = {
@@ -468,22 +473,120 @@ export type GeminiChunkStatus = {
   quality_errors?: string[]; repair_attempt?: number;
 };
 
-export type SubtitleJob = {
+export type SubtitleExtractionResult = {
+  device?: string;
+  compute_type?: string;
+  detected_language?: string;
+  region?: SubtitleOcrRegion;
+  document: SubtitleParseResultV2['document'];
+  version_id?: string;
+  segment_count?: number;
+  translated_count?: number;
+  total_count?: number;
+  warnings?: SubtitleParseResultV2['warnings'];
+  srt?: string;
+};
+
+export type SubtitleAsrRuntimeStatus = {
+  dependency_ready: boolean; allow_download: boolean; message: string | null;
+  models: { id: string; state: 'ready' | 'missing' | 'incomplete' }[];
+  devices: { id: 'cpu' | 'cuda'; compute_types: string[] }[];
+  runtimes?: { cuda?: { ready: boolean; message: string | null } };
+};
+
+export type SubtitleJob<Result = SubtitleExtractionResult & Partial<Omit<SubtitleAlignmentResult, 'document' | 'warnings'>>> = {
   id: string;
-  kind: "alignment" | "generation" | "render" | "review";
+  kind: "alignment" | "generation" | "render" | "review" | "ocr" | "asr" | "translation" | "scene";
   dedupe_key: string;
   state: "queued" | "running" | "succeeded" | "failed" | "canceled";
   progress: number;
   phase: string;
   message: string;
-  details?: { version?: number; total?: number; completed?: number; chunks?: GeminiChunkStatus[] };
+  details?: {
+    version?: number;
+    total?: number;
+    completed?: number;
+    chunks?: GeminiChunkStatus[];
+    translated_count?: number;
+    total_cues?: number;
+    resume_available?: boolean;
+    partial_version_id?: string;
+    cache_hits?: number;
+  };
   cancel_requested: boolean;
   created_at: string;
   updated_at: string;
   started_at?: string | null;
   finished_at?: string | null;
   error?: string | null;
-  result?: SubtitleAlignmentResult | null;
+  result?: Result | null;
+};
+
+export type SubtitleSceneChunk = {
+  id: string;
+  start_s: number;
+  end_s: number;
+  start_ms: number;
+  end_ms: number;
+  duration_s: number;
+};
+
+export type SubtitleSceneDetectionResult = {
+  video_id: string;
+  source_fingerprint: string;
+  duration_s: number;
+  scene_cuts_s: number[];
+  chunks: SubtitleSceneChunk[];
+  parameters: {
+    video_id: string;
+    threshold: number;
+    min_scene_len_s: number;
+    target_duration_s: number;
+    min_duration_s: number;
+    max_duration_s: number;
+  };
+};
+
+export type SubtitleSceneExportFile = {
+  chunk_index: number;
+  start_ms: number;
+  end_ms: number;
+  video_url: string;
+  srt_url?: string;
+  json_url?: string;
+};
+
+export type SubtitleSceneExportResult = {
+  video_id: string;
+  source_fingerprint: string;
+  manifest_url: string;
+  files: SubtitleSceneExportFile[];
+};
+
+export type SubtitleSceneJob = Omit<SubtitleJob, "result"> & {
+  result?: SubtitleSceneDetectionResult | SubtitleSceneExportResult | null;
+};
+
+export type SubtitleOcrOptions = {
+  auto_probe?: boolean;
+  source_language?: string;
+  sample_fps?: number;
+  min_duration_ms?: number;
+  max_gap_ms?: number;
+};
+
+export type SubtitleAsrOptions = {
+  source_language?: string;
+  model?: string;
+  device?: "auto" | "cpu" | "cuda";
+  compute_type?: string;
+};
+
+export type SubtitleTranslateOptions = {
+  target_language?: string;
+  bilingual?: boolean;
+  model?: string;
+  batch_size?: number;
 };
 
 export type GeminiSubtitleJob = Omit<SubtitleJob, "result"> & {
@@ -545,6 +648,12 @@ export type VideoLibraryItem = {
   platform?: string | null;
   duration?: number | null;
   downloaded?: boolean;
+  source_id?: string | null;
+  provider_id?: string | null;
+  external_id?: string | null;
+  media_id?: string | null;
+  part_index?: number | null;
+  creator_id?: string | null;
 };
 
 export type VideoDownloadQuality = "best" | "1080" | "720" | "480";
@@ -564,6 +673,172 @@ export type VideoDownloadJob = {
   eta: number | null;
   duration: number | null;
   error: string | null;
+  connection_id?: string | null;
+  intent_key?: string | null;
+  provenance?: Record<string, string | number> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AcquisitionRun = {
+  id: string;
+  can_continue?: boolean;
+  pagination?: {
+    kind: string;
+    generation: number;
+    next_offset: number;
+    exhausted: boolean;
+    last_stop_reason?: string;
+  };
+  parent_run_id?: string;
+  children?: {
+    id: string;
+    target: string;
+    state: string;
+    provider_id: string;
+    error_code: string | null;
+    error: string | null;
+    retry_after?: number | null;
+    stop_reason: string | null;
+    counters: { scanned: number; new: number };
+  }[];
+  mode: "video" | "creator" | "playlist" | "search";
+  provider_id: string;
+  source_id: string | null;
+  state: string;
+  phase: string;
+  stop_reason: string | null;
+  error_code: string | null;
+  error: string | null;
+  retry_after?: number | null;
+  request: Record<string, unknown>;
+  counters: {
+    scanned: number;
+    new: number;
+    duplicate: number;
+    filtered: number;
+    unavailable: number;
+  };
+  created_at: string;
+  updated_at: string;
+};
+
+export type AcquisitionMode = "video" | "creator" | "playlist" | "search";
+
+export type AcquisitionCapabilityStatus =
+  | "ready"
+  | "setup_required"
+  | "unverified"
+  | "unsupported";
+
+export type AcquisitionOperationCapability = {
+  status: AcquisitionCapabilityStatus;
+  enabled: boolean;
+  provider_id: string | null;
+  detail: string;
+  reason_code: string | null;
+  implementation?: string;
+  implementation_version?: string;
+  availability?: string;
+  target_kinds?: string[];
+  auth?: string;
+  schedule_policy?: "background_safe" | "manual_only" | string;
+  coverage?: string;
+  limits?: Record<string, number>;
+  checked_at?: string;
+};
+
+export type AcquisitionSourceCapability = {
+  source_id: string;
+  label: string;
+  operations: Record<string, AcquisitionOperationCapability>;
+};
+
+export type AcquisitionCapabilities = {
+  version: number;
+  feature_enabled?: boolean;
+  feature_disabled_reason?: string | null;
+  generated_at: string;
+  session_bridge: {
+    status: AcquisitionCapabilityStatus;
+    enabled: boolean;
+    reason_code: string;
+    detail: string;
+  };
+  items: AcquisitionSourceCapability[];
+};
+
+export type AcquisitionCandidate = {
+  id: string;
+  source_id: string;
+  provider_id: string;
+  external_id: string;
+  media_id: string;
+  part_index?: number | null;
+  canonical_url: string;
+  title: string;
+  uploader: string;
+  creator_id: string;
+  thumbnail_url: string | null;
+  published_at: string | null;
+  duration_seconds: number | null;
+  media_type: "video" | "audio" | "live";
+  availability: string;
+  download_available?: boolean;
+  download_unavailable_reason?: string | null;
+  metrics: Record<string, number>;
+  position: number;
+  download?: {
+    state: string;
+    job_id: string | null;
+    error: string | null;
+  };
+};
+
+export type AcquisitionCandidatesPage = {
+  run_id: string;
+  items: AcquisitionCandidate[];
+  total: number;
+  offset: number;
+  limit: number;
+};
+
+export type AcquisitionSelection = {
+  id: string;
+  idempotency_key: string | null;
+  quality: VideoDownloadQuality;
+  connection_id?: string | null;
+  candidate_ids: string[];
+  intent_ids?: string[];
+  state: string;
+  counts: Record<string, number>;
+  total: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AcquisitionChannel = {
+  id: string;
+  source_id: string;
+  canonical_url: string;
+  label: string;
+  target_kind: "creator" | "playlist";
+  connection_id?: string | null;
+  enabled: boolean;
+  subscription: {
+    enabled: boolean;
+    initial_policy: "baseline" | "backfill";
+    auto_download: boolean;
+    interval_minutes: number;
+    quality?: VideoDownloadQuality;
+    max_items?: number;
+    active_run_id?: string | null;
+    last_run_id?: string | null;
+    last_scanned_at?: string | null;
+    next_run_at?: string | null;
+    last_status?: string | null;
+    last_error?: string | null;
+  };
   created_at: string;
   updated_at: string;
 };

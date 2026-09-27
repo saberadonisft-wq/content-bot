@@ -15,6 +15,7 @@ import { LiveChannelWall } from "../../LiveChannelWall";
 import { LIBRARY_TABS,LibraryTab } from "../shared/presentation";
 
 const VideoLibrary = lazy(() => import("../../VideoLibrary").then(module => ({ default: module.VideoLibrary })));
+const VideoAcquisition = lazy(() => import("./VideoAcquisition").then(module => ({ default: module.VideoAcquisition })));
 export function ContentLibrary({
   tab,
   sources,
@@ -51,12 +52,12 @@ export function ContentLibrary({
       <section className="page-head content-library-head">
         <div>
           <p className="eyebrow">Kho nội dung</p>
-          <h1>{tab === "videos" ? "Tải & quản lý video" : "Nguồn & Video"}</h1>
+          <h1>{tab === "videos" ? "Tải & quản lý video" : tab === "acquisition" ? "Cào và chọn video" : "Nguồn & Video"}</h1>
           <p className="subtle">
-            {tab === "videos" ? "Dán link, tải video về máy và lưu vào thư viện của bạn." : "Quản lý kênh thu thập, kết nối nền tảng và toàn bộ video trong cùng một nơi."}
+            {tab === "videos" ? "Dán link, tải video về máy và lưu vào thư viện của bạn." : tab === "acquisition" ? "Cào metadata trước, chọn đúng video cần tải rồi theo dõi tiến độ." : "Quản lý kênh thu thập, kết nối nền tảng và toàn bộ video trong cùng một nơi."}
           </p>
         </div>
-        {selected && tab !== "videos" && <span className="library-topic-context">Chủ đề: {selected.name}</span>}
+        {selected && tab !== "videos" && tab !== "acquisition" && <span className="library-topic-context">Chủ đề: {selected.name}</span>}
       </section>
       <section
         id={`library-panel-${tab}`}
@@ -100,6 +101,11 @@ export function ContentLibrary({
         {tab === "videos" && (
           <Suspense fallback={<div className="library-loading"><LoaderCircle className="spin" size={24} /> Đang tải thư viện video…</div>}>
             <VideoLibrary embedded />
+          </Suspense>
+        )}
+        {tab === "acquisition" && (
+          <Suspense fallback={<div className="library-loading"><LoaderCircle className="spin" size={24} /> Đang tải công cụ cào…</div>}>
+            <VideoAcquisition />
           </Suspense>
         )}
       </section>

@@ -129,10 +129,11 @@ async def probe_dom(
     executable: Path,
     profile_root: Path,
     auth_timeout_seconds: float = 600,
+    account_ref: str = "default",
 ) -> dict[str, object]:
     spec = dom_probe_spec(source_id)
     profile = ProfileNamespace(profile_root, SOURCE_REGISTRY).profile(
-        spec.source_id, "default"
+        spec.source_id, account_ref
     )
     browser = BrowserSession(
         PlaywrightPersistentDriver(),

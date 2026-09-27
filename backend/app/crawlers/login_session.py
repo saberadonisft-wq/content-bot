@@ -45,13 +45,14 @@ async def open_manual_login(
     executable: Path,
     profile_root: Path,
     timeout_seconds: float = 600,
+    account_ref: str = "default",
 ) -> None:
     if not 30 <= timeout_seconds <= 7_200:
         raise ValueError("Login timeout must be between 30 and 7200 seconds")
     canonical = SOURCE_REGISTRY.resolve_id(source_id)
     homepage = login_homepage(canonical)
     profile = ProfileNamespace(profile_root, SOURCE_REGISTRY).profile(
-        canonical, "default"
+        canonical, account_ref
     )
     session = BrowserSession(
         PlaywrightPersistentDriver(),

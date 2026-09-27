@@ -10,9 +10,10 @@ import {
   Search,
   Settings2,
   Trash2,
-  Waypoints
+  Waypoints,
+  WandSparkles,
 } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
 import {
   Batch,
   InsightBucket,
@@ -20,8 +21,9 @@ import {
   Item,
   Keyword,
   Source,
-  TrendClusters
+  TrendClusters,
 } from "../../api";
+import { api } from "../../api";
 const XTimelineEmbed = lazy(() => import("../../LiveChannelWall").then(module => ({ default: module.XTimelineEmbed })));
 
 import { fmt, insightEvidence, metric, safeExternalUrl, stateLabel } from "../shared/presentation";
@@ -92,6 +94,64 @@ export function TopicsWorkspace({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const [captionTarget, setCaptionTarget] = useState<Item | null>(null);
+  const [captionDraft, setCaptionDraft] = useState("");
+  const [captionResult, setCaptionResult] = useState<Awaited<ReturnType<typeof api.cleanCaption>> | null>(null);
+  const [captionLoading, setCaptionLoading] = useState(false);
+  const [captionSaving, setCaptionSaving] = useState(false);
+  const [captionError, setCaptionError] = useState("");
+  const [captionApplied, setCaptionApplied] = useState(false);
+
+  const openCaptionCleaner = (item: Item) => {
+    setCaptionTarget(item);
+    setCaptionDraft(
+      item.caption_edited ?? [item.title, item.body_snippet].filter(Boolean).join("\n"),
+    );
+    setCaptionResult(null);
+    setCaptionError("");
+    setCaptionApplied(false);
+  };
+
+  const runCaptionCleaner = async () => {
+    if (!captionDraft.trim() || captionLoading) return;
+    setCaptionLoading(true);
+    setCaptionError("");
+    setCaptionApplied(false);
+    try {
+      setCaptionResult(await api.cleanCaption(captionDraft));
+    } catch (cause) {
+      setCaptionError(cause instanceof Error ? cause.message : "Không thể làm sạch caption.");
+    } finally {
+      setCaptionLoading(false);
+    }
+  };
+
+  const applyCaptionDraft = async () => {
+    if (!captionTarget || !captionDraft.trim() || captionSaving) return;
+    setCaptionSaving(true);
+    setCaptionError("");
+    try {
+      const original =
+        captionTarget.caption_original ??
+        [captionTarget.title, captionTarget.body_snippet].filter(Boolean).join("\n");
+      await api.applyCaption(captionTarget.id, {
+        original_text: original,
+        edited_text: captionDraft,
+      });
+      try {
+        await navigator.clipboard.writeText(captionDraft);
+      } catch {
+        // Saving the product caption does not depend on clipboard permissions.
+      }
+      setCaptionApplied(true);
+      onRefresh();
+    } catch {
+      setCaptionError("Không thể lưu caption đã chỉnh sửa.");
+    } finally {
+      setCaptionSaving(false);
+    }
+  };
+
   return (
     <>
       <div className="canva-home-header">
@@ -347,6 +407,16 @@ export function TopicsWorkspace({
               {/* ── Zone 3: Danh sách bài viết ── */}
               <section className="zone zone-content" aria-label="Danh sách bài viết">
                 <h3 className="zone-title">📋 Danh sách bài viết</h3>
+                {captionTarget && <section className="caption-cleaner" aria-label="Làm sạch caption">
+                  <div className="caption-cleaner-head">
+                    <div><strong>Làm sạch caption</strong><span>Giữ nguyên bản gốc, loại liên hệ/rác và cho chỉnh sửa trước khi áp dụng.</span></div>
+                    <button type="button" className="button secondary compact-button" onClick={() => setCaptionTarget(null)}>Đóng</button>
+                  </div>
+                  <label className="caption-cleaner-field"><span>Caption bản nháp</span><textarea value={captionDraft} maxLength={20_000} rows={5} onChange={event => { setCaptionDraft(event.target.value); setCaptionApplied(false); }} /></label>
+                  <div className="caption-cleaner-actions"><button type="button" className="button" disabled={!captionDraft.trim() || captionLoading || captionSaving} onClick={() => void runCaptionCleaner()}>{captionLoading ? <LoaderCircle className="spin" size={15} /> : <WandSparkles size={15} />} {captionLoading ? "Đang xử lý…" : "Làm sạch"}</button>{captionResult && <button type="button" className="button secondary" disabled={!captionDraft.trim() || captionSaving} onClick={() => void applyCaptionDraft()}>{captionSaving ? <LoaderCircle className="spin" size={15} /> : null} {captionSaving ? "Đang lưu…" : "Lưu caption"}</button>}</div>
+                  {captionResult && <div className="caption-cleaner-result" role="status"><div><span>Bản làm sạch</span><p>{captionResult.cleaned_text || "(trống)"}</p></div><div className="caption-cleaner-meta"><span>Hashtag: {captionResult.hashtags.length ? captionResult.hashtags.map(tag => `#${tag}`).join(" ") : "Không có"}</span><span>Tên file: <code>{captionResult.safe_filename}</code></span></div>{captionApplied && <small>Đã lưu vào bài viết; bản chỉnh sửa cũng đã được chép vào clipboard.</small>}</div>}
+                  {captionError && <p className="caption-cleaner-error" role="alert">{captionError}</p>}
+                </section>}
                 <table>
                   <thead>
                     <tr>
@@ -372,6 +442,7 @@ export function TopicsWorkspace({
                             {item.author || "Không rõ tác giả"} ·{" "}
                             {fmt(item.published_at)}
                           </div>
+                          <button type="button" className="button secondary compact-button caption-cleaner-trigger" onClick={() => openCaptionCleaner(item)} aria-label={`Làm sạch caption: ${item.title}`}><WandSparkles size={13} /> Caption</button>
                           <div
                             className="insight-line"
                             aria-label={`Phân tích: ${item.insights.language.label}, cảm xúc ${item.insights.sentiment.label}${item.insights.topics.length ? `, chủ đề ${item.insights.topics.map((topic) => topic.label).join(", ")}` : ""}`}

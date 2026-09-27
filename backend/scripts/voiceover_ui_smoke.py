@@ -5,12 +5,16 @@ Run Vite on 5173 first. This does not generate speech or modify user projects.
 import argparse
 import io
 import json
+import sys
 import wave
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'backend'))
+from app.services.voiceover.store import normalized_text
+
 HTML = r'''<!doctype html><html lang="vi"><meta charset="utf-8">
 <style>html,body {height:auto!important;overflow:auto!important} .subtitle-studio-shell {position:relative!important;inset:auto!important;height:auto!important;overflow:visible!important;display:block!important}</style>
 <div class="subtitle-studio-shell"><div id="root" style="width:100%;padding:12px"></div></div><script type="module">
@@ -53,6 +57,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', choices=('cpu', 'cuda'), default='cpu')
+    parser.add_argument('--url', default='http://127.0.0.1:5187')
     args = parser.parse_args()
     document = None
     saves = []
@@ -72,10 +77,15 @@ def main():
             pass
         elif path == '/status':
             body = {'ready': True, 'installed': True, 'message': 'Bộ tạo giọng thử nghiệm', 'devices': [args.device], 'presets': [], 'model_revision': None}
+        elif path == '/text-preview':
+            payload = request.post_data_json
+            body = {'text':normalized_text(payload['text'],payload['pronunciation'],payload['text_normalization'])}
         elif path in ('/profiles', '/projects/smoke/jobs'):
             if path == '/profiles' and request.method == 'POST':
                 pending_profile.append(route)
                 return
+            body = []
+        elif path in ('/projects/smoke/separations', '/projects/second/separations'):
             body = []
         elif path == '/references':
             body = {'id': 'reference', 'duration_ms': 3000}
@@ -107,7 +117,7 @@ def main():
         page.on('console', lambda msg: print(msg.text, flush=True) if msg.type == 'error' else None)
         page.route('**/api/v1/voiceover/**', api)
         page.route('**/__voice_smoke', lambda route: route.fulfill(content_type='text/html', body=HTML))
-        page.goto('http://127.0.0.1:5173/__voice_smoke')
+        page.goto(args.url+'/__voice_smoke')
         page.get_by_role('button', name='Tạo đoạn từ phụ đề').click()
         block = page.locator('.voice-clip').first
         assert 'Đang tạo' in block.get_attribute('aria-label')
@@ -155,10 +165,22 @@ def main():
         page.get_by_text('Đã lưu lời đọc', exact=True).wait_for(timeout=15000)
         assert saves[-1]['clips'][0]['spoken_text'] == 'Lời tôi muốn giữ sau đối chiếu.'
         assert saves[-1]['mix']['original_gain'] == .6
+        page.get_by_text('Từ điển phát âm', exact=True).click()
+        page.get_by_label('Chuẩn hóa số, ngày và giờ tiếng Việt').check()
+        page.get_by_role('textbox',name='Lời đọc',exact=True).fill('Giá 1.000.000.000.000 đồng.')
+        page.get_by_text('Giá một nghìn tỷ đồng.',exact=True).wait_for()
+        page.get_by_text('Đã lưu lời đọc',exact=True).wait_for(timeout=15000)
+        assert saves[-1]['text_normalization'] == 'vi-context-v1'
+        assert saves[-1]['clips'][0]['spoken_text'] == 'Giá 1.000.000.000.000 đồng.'
+        assert saves[-1]['clips'][0]['source_text'] == 'Cô gái mở cửa.'
         output = ROOT / 'artifacts/voiceover/ui'
         output.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(output / 'panel.png'), full_page=True)
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Panel overflows viewport'
+        page.get_by_text('Tách thoại và nhạc nền', exact=True).click()
+        page.wait_for_timeout(100)
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Separation panel overflows viewport'
+        page.screenshot(path=str(output / 'panel-separation.png'), full_page=True)
         assert not errors, errors
         page.get_by_text('Tạo hồ sơ giọng từ mẫu', exact=True).click()
         page.locator('input[accept="audio/*"]').set_input_files({'name': 'sample.wav', 'mimeType': 'audio/wav', 'buffer': audio.getvalue()})

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +34,7 @@ from ..crawlers.runtime import (
     WorkerMessageKind,
     WorkerProcessSpec,
     WorkerProcessSupervisor,
+    normalize_account_ref,
     safe_worker_environment,
 )
 from .cbce_runtime import cbce_browser_preflight
@@ -74,6 +75,8 @@ class CbceWorkerSearchConnector(SourceConnector):
         self,
         spec: CbceSearchSpec,
         process_supervisor: WorkerProcessSupervisor | None = None,
+        *,
+        account_ref: str = "default",
     ) -> None:
         self.spec = spec
         self.source_id = spec.source_id
@@ -84,6 +87,7 @@ class CbceWorkerSearchConnector(SourceConnector):
             interaction_fields=spec.interaction_fields,
         )
         self.process_supervisor = process_supervisor or WorkerProcessSupervisor()
+        self.account_ref = normalize_account_ref(account_ref)
 
     @property
     def configured(self) -> bool:
@@ -164,6 +168,7 @@ class CbceWorkerSearchConnector(SourceConnector):
                 "browser_executable": str(executable),
                 "profile_root": str(settings.content_bot_cbce_profile_root),
                 "pseudonym_key_ref": str(key_store.path),
+                "account_ref": self.account_ref,
                 **self._extra_worker_payload(),
             },
         )
@@ -247,6 +252,8 @@ class CbceBilibiliConnector(CbceWorkerSearchConnector):
     def __init__(
         self,
         process_supervisor: WorkerProcessSupervisor | None = None,
+        *,
+        account_ref: str = "default",
     ) -> None:
         super().__init__(
             CbceSearchSpec(
@@ -258,7 +265,102 @@ class CbceBilibiliConnector(CbceWorkerSearchConnector):
                 "public_dom",
             ),
             process_supervisor,
+            account_ref=account_ref,
         )
+
+    def for_account(self, account_ref: str) -> CbceBilibiliConnector:
+        """Return a connector bound to one isolated app-owned browser profile."""
+        normalized = normalize_account_ref(account_ref)
+        if normalized == self.account_ref:
+            return self
+        return CbceBilibiliConnector(
+            self.process_supervisor,
+            account_ref=normalized,
+        )
+
+    async def fetch_detail(self, target_url: str) -> RawContentItem:
+        """Fetch one video through the same isolated profile used by CBCE."""
+        if not self.configured:
+            raise CrawlerFailure(
+                CrawlerErrorCode.UNSUPPORTED,
+                "CBCE Bilibili detail provider is not locally ready.",
+            )
+        item: RawContentItem | None = None
+        async for message in _worker_operation_messages(
+            connector=self,
+            action="bilibili_detail",
+            operation="fetch_detail",
+            payload={
+                "target_url": target_url,
+                "deadline_seconds": min(
+                    max(float(settings.mediacrawler_timeout_seconds), 30.0),
+                    7_200.0,
+                ),
+            },
+        ):
+            if message.kind is WorkerMessageKind.ITEM:
+                if item is not None:
+                    raise CrawlerFailure(
+                        CrawlerErrorCode.PARSE_CHANGED,
+                        "CBCE Bilibili detail returned more than one video.",
+                    )
+                item = _raw_item(
+                    message.payload,
+                    source_id="bilibili",
+                    provider_id=self.spec.provider_id,
+                )
+            elif message.kind in {
+                WorkerMessageKind.ERROR,
+                WorkerMessageKind.CANCELLED,
+            }:
+                raise _worker_failure(message)
+        if item is None:
+            raise CrawlerFailure(
+                CrawlerErrorCode.TRANSPORT_ERROR,
+                "CBCE Bilibili detail worker returned no video.",
+            )
+        return item
+
+    async def list_creator(
+        self,
+        target_url: str,
+        *,
+        max_items: int = 20,
+        initial_cursor: str | None = None,
+    ) -> AsyncIterator[RawContentItem]:
+        """Enumerate creator videos through the isolated Bilibili DOM worker."""
+        if not self.configured:
+            raise CrawlerFailure(
+                CrawlerErrorCode.UNSUPPORTED,
+                "CBCE Bilibili creator provider is not locally ready.",
+            )
+        total = min(max(int(max_items), 1), 100)
+        async for message in _worker_operation_messages(
+            connector=self,
+            action="bilibili_creator",
+            operation="list_creator",
+            payload={
+                "target_url": target_url,
+                "max_items": total,
+                "max_requests": min(total, 1_000),
+                "deadline_seconds": min(
+                    max(float(settings.mediacrawler_timeout_seconds), 30.0),
+                    7_200.0,
+                ),
+                "initial_cursor": initial_cursor,
+            },
+        ):
+            if message.kind is WorkerMessageKind.ITEM:
+                yield _raw_item(
+                    message.payload,
+                    source_id="bilibili",
+                    provider_id=self.spec.provider_id,
+                )
+            elif message.kind in {
+                WorkerMessageKind.ERROR,
+                WorkerMessageKind.CANCELLED,
+            }:
+                raise _worker_failure(message)
 
     async def list_comments(
         self,
@@ -665,6 +767,7 @@ async def _worker_operation_messages(
             "browser_executable": str(executable),
             "profile_root": str(settings.content_bot_cbce_profile_root),
             "pseudonym_key_ref": str(key_store.path),
+            "account_ref": connector.account_ref,
         },
     )
     spec = WorkerProcessSpec(
@@ -851,6 +954,21 @@ def _raw_item(
         for key, value in metrics_value.items()
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0
     }
+    media: list[dict[str, Any]] = []
+    media_value = payload.get("media")
+    if isinstance(media_value, (list, tuple)):
+        for raw_media in media_value[:8]:
+            if not isinstance(raw_media, Mapping):
+                continue
+            kind = str(raw_media.get("kind") or "").strip()
+            if kind == "cover":
+                url = str(raw_media.get("url") or "").strip()
+                if url and len(url) <= 4096:
+                    media.append({"kind": kind, "url": url})
+            elif kind == "video_metadata":
+                duration = raw_media.get("duration_seconds")
+                if isinstance(duration, int) and not isinstance(duration, bool):
+                    media.append({"kind": kind, "duration_seconds": duration})
     return RawContentItem(
         external_id=external_id,
         canonical_url=canonical_url,
@@ -863,6 +981,7 @@ def _raw_item(
             "provider_id": provider_id,
             "contract_version": f"cbce.{source_id}.content.v1",
         },
+        media=media,
     )
 
 

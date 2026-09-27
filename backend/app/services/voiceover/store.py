@@ -9,6 +9,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
+from ..vietnamese_tts_normalizer import normalize_vietnamese_for_tts
 from .models import SDK_VERSION, V2_MODEL_ID, VoiceDocument
 from .timing import AUTO_RATE_LIMIT, clip_signature, file_interval, refresh_timing
 
@@ -46,8 +47,29 @@ def read_json(path: Path):
             time.sleep(.01)
 
 
-def normalized_text(text: str, pronunciation: dict[str, str]) -> str:
+def normalized_text(text: str, pronunciation: dict[str, str], normalization: str = 'off') -> str:
     text = unicodedata.normalize("NFC", text)
+    if normalization != 'off':
+        if normalization != 'vi-context-v1':
+            raise ValueError('Phiên bản chuẩn hóa lời đọc không được hỗ trợ.')
+        if not pronunciation:
+            return normalize_vietnamese_for_tts(text)
+        # Longest dictionary key wins. Replacements are literal and do not pass
+        # through the normalizer or another dictionary entry a second time.
+        keys = sorted((key for key in pronunciation if key.strip()),key=len,reverse=True)
+        if not keys:
+            return normalize_vietnamese_for_tts(text)
+        pattern = re.compile(r'(?<!\w)(?:'+'|'.join(re.escape(key) for key in keys)+r')(?!\w)',re.IGNORECASE)
+        def normalize_fragment(fragment):
+            if not fragment.strip(): return fragment
+            return (' ' if fragment[:1].isspace() else '')+normalize_vietnamese_for_tts(fragment)+(' ' if fragment[-1:].isspace() else '')
+        parts=[]; end=0
+        for match in pattern.finditer(text):
+            parts.append(normalize_fragment(text[end:match.start()]))
+            parts.append(next(pronunciation[key] for key in keys if key.casefold()==match.group().casefold()))
+            end=match.end()
+        parts.append(normalize_fragment(text[end:]))
+        return ' '.join(''.join(parts).split())
     for word, replacement in sorted(
         pronunciation.items(), key=lambda row: -len(row[0])
     ):
@@ -68,9 +90,10 @@ def generation_hash(document: VoiceDocument, clip, device: str) -> str:
     return digest(
         {
             "pipeline": 1,
+            **({'normalizer':document.text_normalization} if document.text_normalization != 'off' else {}),
             "sdk": SDK_VERSION,
             "profile": profile,
-            "text": normalized_text(clip.spoken_text, document.pronunciation),
+            "text": normalized_text(clip.spoken_text, document.pronunciation, document.text_normalization),
             "backend": device,
             "precision": "bf16" if document.profile.model_id == V2_MODEL_ID else "fp32",
             "temperature": 0.4 if document.profile.model_id == V2_MODEL_ID else 0.8,
@@ -109,6 +132,7 @@ class VoiceStore:
     def alignment_binding(document: VoiceDocument, clip) -> str:
         return digest({'project': document.project_id, 'video': document.video_fingerprint,
             'profile': document.profile.model_dump(), 'pronunciation': document.pronunciation,
+            **({'normalizer':document.text_normalization} if document.text_normalization != 'off' else {}),
             'clip': clip_signature(clip), 'rate': float(clip.rate)})
 
     def validate_alignments(self, owner: str, document: VoiceDocument) -> None:

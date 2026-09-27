@@ -294,6 +294,27 @@
   border-radius: 999px;
 }
 
+.voice-separation-job,
+.voice-separation-result {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  background: var(--color-paper-2);
+}
+
+.voice-separation-result > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.voice-separation-result small {
+  color: var(--color-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
 .voice-error {
   color: var(--color-error);
   overflow-wrap: anywhere;
@@ -332,6 +353,7 @@
 
 .subtitle-workspace.has-voice-track {
   grid-template-rows: minmax(150px, 1fr) 56px 52px 280px 42px;
+  min-height: 580px;
 }
 
 .subtitle-timeline-rail .voice-track-label {
@@ -420,13 +442,6 @@
   fill: none;
 }
 
-@media (max-height: 700px) {
-  .subtitle-workspace.has-voice-track {
-    overflow-y: auto;
-    min-height: 580px;
-  }
-}
-
 /* ── Dark Studio Theme for Voiceover ── */
 .theme-dark .voice-panel input:not([type="checkbox"]):not([type="file"]),
 .theme-dark .voice-panel select,
@@ -500,4 +515,31 @@
 .theme-dark .voice-clip.is-selected {
   outline-color: #38bdf8;
   border-color: #38bdf8;
+}
+
+.voice-text-preview {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-2);
+}
+.voice-text-preview p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.voice-panel label.voice-normalization-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+}
+.voice-panel .voice-normalization-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  flex: 0 0 18px;
 }

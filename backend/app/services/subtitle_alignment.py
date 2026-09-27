@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 import imageio_ffmpeg
 
+from .model_resources import gpu_model_slot
 from .speech_evidence import SpeechEvidence, audio_identity, transcript_hash
 
 ALIGNMENT_CACHE_VERSION = 4
@@ -1003,6 +1004,7 @@ def align_subtitle_document(
     aligned_by_id: dict[str, dict[str, Any]] = {}
     source_observations = []
     whisper_model: Any | None = None
+    model_slot = None
     try:
         for index, window in enumerate(windows):
             _check_canceled(cancel_event)
@@ -1046,6 +1048,9 @@ def align_subtitle_document(
                     if observed is None:
                         if whisper_model is None:
                             _emit(progress, window_percent, 'model', 'Đang nạp mô hình word timing')
+                            candidate_slot = gpu_model_slot(settings.whisper_device, lambda: _check_canceled(cancel_event))
+                            candidate_slot.__enter__()
+                            model_slot = candidate_slot
                             whisper_model = _load_whisper_model(model_settings)
                         observed = _transcribe_pcm(
                             pcm, window, " ".join(alignment_transcript(cue) for cue in window_cues),
@@ -1079,6 +1084,8 @@ def align_subtitle_document(
         if whisper_model is not None:
             del whisper_model
             gc.collect()
+        if model_slot is not None:
+            model_slot.__exit__(None, None, None)
 
     _check_canceled(cancel_event)
     merged = [deepcopy(aligned_by_id.get(str(cue["id"]), cue)) for cue in source_cues]

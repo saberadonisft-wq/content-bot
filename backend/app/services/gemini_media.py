@@ -25,7 +25,17 @@ def atomic_json(path: Path, value: Any) -> None:
     temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-        temporary.replace(path)
+        # Windows readers/antivirus may briefly deny replacement even after our
+        # temporary writer is closed. Keep the old complete JSON until replace
+        # succeeds; do not retry disk-full, invalid paths or permanent failures.
+        for attempt in range(11):
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError as exc:
+                if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 10:
+                    raise
+                time.sleep(0.05)
     finally:
         temporary.unlink(missing_ok=True)
 

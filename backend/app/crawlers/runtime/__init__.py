@@ -45,7 +45,13 @@ from .playwright_driver import (
     PlaywrightUnavailable,
 )
 from .privacy import IdentityPseudonymizer, PseudonymKeyStore
-from .profiles import ProfileInUse, ProfileLock, ProfileNamespace, ProfileRef
+from .profiles import (
+    ProfileInUse,
+    ProfileLock,
+    ProfileNamespace,
+    ProfileRef,
+    normalize_account_ref,
+)
 from .protocol import (
     BoundedMessageBuffer,
     SequenceTracker,
@@ -135,6 +141,7 @@ __all__ = [
     "compare_shadow",
     "decode_message",
     "encode_message",
+    "normalize_account_ref",
     "observe_dom_structure",
     "safe_diagnostic",
     "safe_worker_environment",

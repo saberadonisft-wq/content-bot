@@ -204,7 +204,7 @@ def test_bilibili_detail_adapter_canonicalizes_target_and_closes() -> None:
             await adapter.close()
 
     record = asyncio.run(run())
-    assert provider.target == "https://www.bilibili.com/video/BV1ab411c7De"
+    assert provider.target == "https://www.bilibili.com/video/BV1ab411c7De?p=2"
     assert provider.closed is True
     assert record.author_pseudonym == ""
     assert record.external_id == "BV1ab411c7De"

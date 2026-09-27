@@ -562,6 +562,66 @@ def test_composition_reuses_audio_across_document_revisions(tmp_path, monkeypatc
     assert compose_voice(store, 'user', doc, 4000) != first
 
 
+def test_composition_reuses_unchanged_clip_dsp_when_one_gain_changes(tmp_path, monkeypatch):
+    from app.services.voiceover import mix
+
+    store = VoiceStore(tmp_path)
+    doc = document()
+    doc.clips.append(
+        doc.clips[0].model_copy(
+            update={"id": "two", "start_ms": 3000, "end_ms": 5000}
+        )
+    )
+    doc = store.save_document("user", doc)
+    meta = asset(store, doc)
+    for clip in doc.clips:
+        store.attach("user", doc.project_id, clip.id, meta)
+    doc = store.get_document("user", doc.project_id)
+
+    first = compose_voice(store, "user", doc, 6000)
+    cache_dir = store.owner_root("user") / "clip-dsp-cache"
+    # Both clips share the same asset and DSP settings, so one derived PCM is
+    # sufficient for the first composition.
+    assert len(list(cache_dir.glob("*.wav"))) == 1
+
+    calls = []
+    original_ffmpeg = mix.ffmpeg
+
+    def counted(*args, **kwargs):
+        calls.append(args[0])
+        return original_ffmpeg(*args, **kwargs)
+
+    monkeypatch.setattr(mix, "ffmpeg", counted)
+    doc.clips[1].gain = 0.5
+    second = compose_voice(store, "user", doc, 6000)
+
+    assert second != first
+    assert len(calls) == 1
+    assert len(list(cache_dir.glob("*.wav"))) == 2
+
+
+def test_mix_snapshot_skips_waveform_rebuild_when_asset_stat_is_unchanged(
+    tmp_path, monkeypatch
+):
+    from app.services.voiceover import mix
+
+    store = VoiceStore(tmp_path)
+    doc = store.save_document("user", document())
+    store.attach("user", doc.project_id, "one", asset(store, doc))
+    doc = store.get_document("user", doc.project_id)
+    first = compose_voice(store, "user", doc, 4000)
+    snapshot = first.with_suffix(".json")
+    assert snapshot.is_file()
+    reopened = VoiceStore(tmp_path)
+    reopened_doc = reopened.get_document("user", doc.project_id)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unchanged asset should use the verified snapshot")
+
+    monkeypatch.setattr(mix, "audio_metadata", unexpected)
+    assert compose_voice(reopened, "user", reopened_doc, 4000) == first
+
+
 def test_owner_isolation_and_revision_conflict(tmp_path):
     store = VoiceStore(tmp_path)
     doc = store.save_document("user", document())
@@ -758,3 +818,55 @@ def test_real_video_mix_keeps_duration_and_adds_voice(tmp_path, has_audio, mode,
         after = original_amplitude(2)
         assert abs(during / before - (.25 if mode == 'duck' else 1)) < .02
         assert abs(after / before - 1) < .02
+
+
+def test_real_video_mix_uses_selected_background_stem_and_cut_window(tmp_path):
+    import subprocess
+
+    import imageio_ffmpeg
+
+    from app.services.media_probe import probe_media
+    from app.services.voiceover.mix import ffmpeg, prepare_voiced_video
+    from app.services.voiceover.separation_store import SeparationStore
+
+    source = tmp_path / "source.mp4"
+    ffmpeg([
+        "-f", "lavfi", "-i", "color=c=black:s=160x90:r=25:d=4",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "4", str(source),
+    ])
+    media = probe_media(source)
+    store = VoiceStore(tmp_path / "store")
+    doc = store.save_document("user", document())
+    store.attach("user", doc.project_id, "one", asset(store, doc))
+    doc = store.get_document("user", doc.project_id)
+    doc.video_fingerprint = media["fingerprint"]
+
+    background_source = tmp_path / "background.wav"
+    with wave.open(str(background_source), "wb") as audio:
+        audio.setparams((2, 2, 48000, 0, "NONE", "not compressed"))
+        values = array.array("h")
+        for index in range(48000 * 4):
+            value = round(5000 * math.sin(index * 2 * math.pi * 110 / 48000))
+            values.extend((value, value))
+        audio.writeframes(values.tobytes())
+    separation = SeparationStore(store.root / "separation-cache")
+    manifest = separation.publish(
+        "user", source_fingerprint=media["fingerprint"],
+        source_audio_checksum="b" * 64, cache_key="fixture",
+        result={"method": "center_reduction", "stems": {"background": str(background_source)}},
+    )
+    doc.mix.mode = "mix"
+    doc.mix.background_stem_id = manifest["id"]
+    doc.mix.background_stem_checksum = manifest["stems"]["background"]["checksum"]
+    doc.mix.background_source_fingerprint = media["fingerprint"]
+    output = prepare_voiced_video(
+        store, "user", doc, source, media, 1,
+        background_segments=[(1000, 3000)], background_speed=1,
+    )
+    result = probe_media(output)
+    assert result["has_audio"] and result["audio_channels"] == 2
+    decoded = subprocess.run([
+        imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-i", str(output),
+        "-map", "0:a:0", "-ac", "2", "-ar", "48000", "-f", "s16le", "-",
+    ], check=True, capture_output=True, timeout=30)
+    assert any(decoded.stdout)

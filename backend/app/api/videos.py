@@ -16,6 +16,7 @@ from ..schemas import (
     VideoLibraryItem,
 )
 from ..services.runs import utcnow
+from ..services.thumbnail_selector import select_best_thumbnail
 from ..services.video_thumbnails import (
     ThumbnailBusy,
     ThumbnailError,
@@ -25,6 +26,7 @@ from .media_paths import (
     SUPPORTED_VIDEO_EXTENSIONS,
     _subtitled_video_path,
     _uploaded_video_path,
+    _validate_local_video_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,10 +42,12 @@ class VideoDownloadRequest(BaseModel):
     urls: list[str] = Field(min_length=1, max_length=20)
     quality: Literal["best", "1080", "720", "480"] = "1080"
     cookie_text: SecretStr | None = Field(default=None, max_length=1_000_000)
+    connection_id: str | None = Field(default=None, max_length=128)
 
 
 class VideoDownloadRetryRequest(BaseModel):
     cookie_text: SecretStr | None = Field(default=None, max_length=1_000_000)
+    connection_id: str | None = Field(default=None, max_length=128)
 
 
 @router.get("/api/v1/videos/downloads")
@@ -57,6 +61,7 @@ def create_downloads(request: VideoDownloadRequest, services: AppServices = Depe
         return services.video_downloads.submit(
             request.urls, request.quality,
             request.cookie_text.get_secret_value() if request.cookie_text else None,
+            request.connection_id,
         )
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
@@ -70,11 +75,34 @@ def cancel_download(job_id: str, services: AppServices = Depends(get_services)):
     return record
 
 
+@router.post("/api/v1/videos/downloads/{job_id}/pause")
+def pause_download(job_id: str, services: AppServices = Depends(get_services)):
+    record = services.video_downloads.pause(job_id)
+    if record is None:
+        raise HTTPException(404, "Không tìm thấy lượt tải.")
+    return record
+
+
 @router.post("/api/v1/videos/downloads/{job_id}/retry", status_code=202)
 def retry_download(job_id: str, request: VideoDownloadRetryRequest, services: AppServices = Depends(get_services)):
     try:
         record = services.video_downloads.retry(
             job_id, request.cookie_text.get_secret_value() if request.cookie_text else None,
+            request.connection_id,
+        )
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    if record is None:
+        raise HTTPException(404, "Không tìm thấy lượt tải.")
+    return record
+
+
+@router.post("/api/v1/videos/downloads/{job_id}/resume", status_code=202)
+def resume_download(job_id: str, request: VideoDownloadRetryRequest, services: AppServices = Depends(get_services)):
+    try:
+        record = services.video_downloads.retry(
+            job_id, request.cookie_text.get_secret_value() if request.cookie_text else None,
+            request.connection_id,
         )
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
@@ -102,6 +130,20 @@ def _as_utc_datetime(value: object) -> datetime:
     return utcnow()
 
 
+def _metadata_text(value: object, key: str) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    result = value.get(key)
+    return result if isinstance(result, str) and result else None
+
+
+def _metadata_int(value: object, key: str) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    result = value.get(key)
+    return result if isinstance(result, int) and not isinstance(result, bool) else None
+
+
 @router.get("/api/v1/videos", response_model=list[VideoLibraryItem])
 def list_videos(services: AppServices = Depends(get_services)):
     upload_dir = settings.data_dir / "videos" / "upload"
@@ -116,6 +158,12 @@ def list_videos(services: AppServices = Depends(get_services)):
                 stat = path.stat()
                 video_id = path.stem
                 metadata = downloads.get(video_id, {})
+                provenance = metadata.get("provenance") if isinstance(metadata, dict) else None
+                source_url = _metadata_text(provenance, "source_url") or _metadata_text(metadata, "url")
+                selected_thumbnail = (
+                    settings.data_dir / "videos" / "thumbnails" / f"{video_id}_selected.jpg"
+                )
+                thumbnail_type = "selected" if selected_thumbnail.is_file() else "original"
                 videos.append(
                     VideoLibraryItem(
                         id=video_id,
@@ -123,10 +171,16 @@ def list_videos(services: AppServices = Depends(get_services)):
                         type="original",
                         size_bytes=stat.st_size,
                         created_at=datetime.fromtimestamp(stat.st_ctime, tz=UTC),
-                        thumbnail_url=f"/api/v1/videos/{video_id}/thumbnail?type=original",
-                        video_url=f"/api/v1/subtitles/video/{video_id}",
+                        thumbnail_url=f"/api/v1/videos/{video_id}/thumbnail?type={thumbnail_type}",
+                        video_url=f"/api/v1/videos/{video_id}/file?type=original",
                         title=metadata.get("title"),
-                        source_url=metadata.get("url"),
+                        source_url=source_url,
+                        source_id=_metadata_text(provenance, "source_id"),
+                        provider_id=_metadata_text(provenance, "provider_id"),
+                        external_id=_metadata_text(provenance, "external_id"),
+                        media_id=_metadata_text(provenance, "media_id"),
+                        part_index=_metadata_int(provenance, "part_index"),
+                        creator_id=_metadata_text(provenance, "creator_id"),
                         platform=metadata.get("platform"),
                         duration=metadata.get("duration"),
                         downloaded=bool(metadata),
@@ -151,7 +205,7 @@ def list_videos(services: AppServices = Depends(get_services)):
                         size_bytes=stat.st_size,
                         created_at=datetime.fromtimestamp(stat.st_ctime, tz=UTC),
                         thumbnail_url=f"/api/v1/videos/{video_id}/thumbnail?type=subtitled",
-                        video_url=f"/api/v1/subtitles/video/{video_id}?type=subtitled",
+                        video_url=f"/api/v1/videos/{video_id}/file?type=subtitled",
                     )
                 )
 
@@ -238,6 +292,64 @@ def list_videos(services: AppServices = Depends(get_services)):
     return videos
 
 
+@router.get("/api/v1/videos/{video_id}/file")
+def get_library_video_file(
+    video_id: str,
+    type: Literal["original", "subtitled"] = "original",
+):
+    """Serve the exact file represented by a library row.
+
+    Library rows can contain renders written by older versions of the app,
+    before publication records were introduced.  The subtitle download route
+    remains source/publication-bound; this narrow, exact-path endpoint keeps
+    those historical library rows viewable while preserving their filename
+    identity.
+    """
+    target_path = (
+        _subtitled_video_path(video_id)
+        if type == "subtitled"
+        else _uploaded_video_path(video_id)
+    )
+    if not target_path.is_file():
+        raise HTTPException(status_code=404, detail="Video file not found")
+    media_type = "video/mp4"
+    if target_path.suffix.lower() == ".webm":
+        media_type = "video/webm"
+    elif target_path.suffix.lower() == ".mkv":
+        media_type = "video/x-matroska"
+    return FileResponse(target_path, media_type=media_type, filename=target_path.name)
+
+
+@router.post("/api/v1/videos/{video_id}/thumbnail/select")
+def select_video_thumbnail(
+    video_id: str,
+    n_candidates: int = Query(default=15, ge=3, le=60),
+    anti_duplicate: bool = Query(default=False),
+    *,
+    services: AppServices = Depends(get_services),
+):
+    del services
+    video_path = _uploaded_video_path(video_id)
+    thumbnail_dir = settings.data_dir / "videos" / "thumbnails"
+    selected_path = thumbnail_dir / f"{video_id}_selected.jpg"
+    try:
+        result = select_best_thumbnail(
+            video_path,
+            selected_path,
+            n_candidates=n_candidates,
+            anti_duplicate=anti_duplicate,
+        )
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Không thể chọn thumbnail tự động; kiểm tra runtime hình ảnh rồi thử lại.",
+        ) from exc
+    return {
+        **result,
+        "thumbnail_url": f"/api/v1/videos/{video_id}/thumbnail?type=selected",
+    }
+
+
 @router.get("/api/v1/videos/{video_id}/thumbnail")
 def get_video_thumbnail(
     video_id: str,
@@ -245,8 +357,16 @@ def get_video_thumbnail(
     *,
     services: AppServices = Depends(get_services),
 ):
-    if type not in {"original", "subtitled"}:
+    if type not in {"original", "subtitled", "selected"}:
         raise HTTPException(status_code=422, detail="Invalid video type")
+    if type == "selected":
+        _validate_local_video_id(video_id)
+        thumbnail_path = settings.data_dir / "videos" / "thumbnails" / f"{video_id}_selected.jpg"
+        if not thumbnail_path.is_file():
+            raise HTTPException(status_code=404, detail="Selected thumbnail not found")
+        return FileResponse(
+            thumbnail_path, media_type="image/jpeg", filename=thumbnail_path.name
+        )
     if type == "subtitled":
         video_path = _subtitled_video_path(video_id)
     else:
@@ -313,3 +433,5 @@ def delete_video(
     if thumbnail_path.exists():
         thumbnail_path.unlink()
     thumbnail_path.with_suffix(".fingerprint").unlink(missing_ok=True)
+    selected = thumbnail_dir / f"{video_id}_selected.jpg"
+    selected.unlink(missing_ok=True)

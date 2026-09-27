@@ -175,6 +175,56 @@ class PersistenceStore(Protocol):
 
     def set_metadata(self, key: str, values: dict[str, Any]) -> None: ...
 
+    def acquisition_documents(
+        self, collection: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    def acquisition_document(
+        self, collection: str, document_id: str
+    ) -> dict[str, Any] | None: ...
+
+    def upsert_acquisition_document(
+        self, collection: str, values: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def reserve_acquisition_selection(
+        self, values: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def advance_acquisition_pagination(
+        self, run_id: str, *, expected_generation: int, now: str
+    ) -> dict[str, Any] | None: ...
+
+    def delete_acquisition_document(self, collection: str, document_id: str) -> bool: ...
+
+    def claim_acquisition_channel(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        now: str,
+        lease_expires_at: str,
+    ) -> dict[str, Any] | None: ...
+
+    def claim_acquisition_reconciliation(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        now: str,
+        lease_expires_at: str,
+    ) -> dict[str, Any] | None: ...
+
+    def complete_acquisition_reconciliation(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        lease_token: str,
+        now: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None: ...
+
     def due_keywords(self, now: datetime) -> list[dict[str, Any]]: ...
 
     def content_item_ids_before(self, cutoff: datetime) -> list[int]: ...

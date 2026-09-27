@@ -22,7 +22,11 @@ from ...runtime import (
     PlaywrightBrowserHandle,
     RunContext,
 )
-from .provider import BilibiliVideo, BilibiliVideoPage
+from .provider import (
+    BilibiliVideo,
+    BilibiliVideoPage,
+    normalize_bilibili_cover_url,
+)
 from .targets import BilibiliTargetKind, parse_bilibili_target
 
 _CARD = ".video-list-item .bili-video-card"
@@ -41,6 +45,10 @@ _DETAIL_METRICS = {
     "favorite_count": ".video-fav-info",
 }
 _COUNT = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*(万|亿|[kKmM])?$")
+_DATE_TOKEN = re.compile(
+    r"\b20[0-9]{2}[-/.][0-9]{1,2}[-/.][0-9]{1,2}"
+    r"(?:[ T][0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)?\b"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,11 +216,19 @@ class BilibiliDomSearchProvider:
             view_count = parse_compact_count(await view_node.inner_text())
             if view_count is not None:
                 metrics["view_count"] = view_count
+        cover_url = await _extract_card_cover(card)
+        published_at = await _extract_card_published_at(card)
         return BilibiliVideo(
             video_id=target.external_id,
             canonical_url=target.canonical_url,
             title=title,
+            published_at=published_at,
             metrics=metrics,
+            media=(
+                ({"kind": "cover", "url": cover_url},)
+                if cover_url
+                else ()
+            ),
         )
 
     async def _has_next_page(self) -> bool:
@@ -264,9 +280,9 @@ class BilibiliDomDetailProvider:
                 "Bilibili detail target is not a public video.",
             )
         cancellation.raise_if_cancelled()
-        if self._loaded_target != parsed.canonical_url:
-            await self._navigate_detail(parsed.canonical_url)
-            self._loaded_target = parsed.canonical_url
+        if self._loaded_target != parsed.media_url:
+            await self._navigate_detail(parsed.media_url)
+            self._loaded_target = parsed.media_url
         title_node = self._page.locator(_DETAIL_TITLE).first
         if not await title_node.count():
             raise CrawlerFailure(
@@ -398,6 +414,36 @@ def parse_compact_count(value: str) -> int | None:
         return int(Decimal(match.group(1)) * multiplier)
     except InvalidOperation:
         return None
+
+
+async def _extract_card_cover(card: Any) -> str | None:
+    image = card.locator("img").first
+    if not await image.count():
+        return None
+    for attribute in ("src", "data-src", "data-lazy-src", "data-original"):
+        cover = normalize_bilibili_cover_url(await image.get_attribute(attribute))
+        if cover:
+            return cover
+    srcset = await image.get_attribute("srcset") or await image.get_attribute("data-srcset") or ""
+    for raw_candidate in srcset.split(","):
+        cover = normalize_bilibili_cover_url(raw_candidate.strip().split(" ", 1)[0])
+        if cover:
+            return cover
+    return None
+
+
+async def _extract_card_published_at(card: Any) -> datetime | None:
+    for selector in ("time", "[datetime]", ".bili-video-card__info--date", ".bili-video-card__info--bottom"):
+        node = card.locator(selector).first
+        if not await node.count():
+            continue
+        raw_value = await node.get_attribute("datetime") or await node.inner_text()
+        match = _DATE_TOKEN.search(raw_value or "")
+        value = match.group(0) if match else raw_value
+        published_at = parse_public_datetime(value)
+        if published_at is not None:
+            return published_at
+    return None
 
 
 def parse_public_datetime(value: str | None) -> datetime | None:

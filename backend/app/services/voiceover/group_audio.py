@@ -82,12 +82,12 @@ def run_group_audio(store, *, owner, identifier, media, voice, subtitles, clip_i
         clip = originals[member]
         if clip.sync.text_locked or clip.sync.timing_locked or clip.sync.timing_origin != 'automatic':
             raise ValueError('Một vế đã được chỉnh tay hoặc khóa.')
-    inspected = inspect_dubbed_speech(source, normalized_text(joined, voice.pronunciation),
+    inspected = inspect_dubbed_speech(source, normalized_text(joined, voice.pronunciation, voice.text_normalization),
         checksum=metadata['checksum'], model_dir=model_dir, whisper_model=dubbed_whisper_model,
         cache_dir=store.owner_root(owner) / 'dubbed-speech')
     if not inspected.get('speech_verified'):
         raise ValueError('WAV nhóm chưa đạt đối chiếu lời đọc.')
-    cuts = split_points(source, [normalized_text(originals[member].spoken_text, voice.pronunciation)
+    cuts = split_points(source, [normalized_text(originals[member].spoken_text, voice.pronunciation, voice.text_normalization)
                                 for member in members], inspected['words'])
     rows, clips, inspections = [], [], []
     input_binding = snapshot_binding(voice, subtitles)
@@ -121,7 +121,7 @@ def run_group_audio(store, *, owner, identifier, media, voice, subtitles, clip_i
                 'original_asset_id': clip.asset_id, 'original_checksum': original_meta['checksum'], 'asset': meta,
                 'group_members': members, 'group_context': generated['context']}
             proposed, _, path = validate_repair_asset(store, owner, voice, clip, subtitles, attempt)
-            observation = inspect_dubbed_speech(path, normalized_text(clip.spoken_text, voice.pronunciation),
+            observation = inspect_dubbed_speech(path, normalized_text(clip.spoken_text, voice.pronunciation, voice.text_normalization),
                 checksum=meta['checksum'], model_dir=model_dir, whisper_model=dubbed_whisper_model,
                 cache_dir=store.owner_root(owner) / 'dubbed-speech')
             if not observation.get('speech_verified'):

@@ -17,6 +17,10 @@ class PlaywrightBrowserHandle(BrowserHandle):
         self.runtime = runtime
         self.context = context
         self._closed = False
+        # Playwright's public BrowserContext API does not expose the spawned
+        # Chromium PID. Drivers that can obtain a verified identity may set
+        # this optional value before BrowserSession registers the handle.
+        self.process_ownership = None
 
     @property
     def closed(self) -> bool:

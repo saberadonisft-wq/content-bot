@@ -12,9 +12,17 @@ const formatDate = (value: string) => {
   }).format(date);
 };
 const formatTime = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+const versionDocument = (version: SubtitleVersion): SubtitleDocumentV2 => {
+  const document = version.document;
+  return { ...document,
+    ...(version.media_fingerprint ? { media_fingerprint: version.media_fingerprint } : {}),
+    ...(!document.document_role && ['ocr', 'asr', 'translation'].includes(version.source)
+      ? { document_role: version.source === 'translation' ? 'translation' as const : 'source' as const } : {}) };
+};
 
-export function SubtitleVersionsPanel({ videoId, document, reloadKey, onDocument }: {
+export function SubtitleVersionsPanel({ videoId, document, sourceDocument, reloadKey, onDocument }: {
   videoId: string; document: SubtitleDocumentV2; reloadKey?: string;
+  sourceDocument?: SubtitleDocumentV2 | null;
   onDocument: (document: SubtitleDocumentV2) => void;
 }) {
   const [versions, setVersions] = useState<Omit<SubtitleVersion, "document">[]>([]);
@@ -27,38 +35,57 @@ export function SubtitleVersionsPanel({ videoId, document, reloadKey, onDocument
   const [reload, setReload] = useState(0);
   const [offset, setOffset] = useState(0);
   const [total, setTotal] = useState(0);
+  const [unreadableCount, setUnreadableCount] = useState(0);
   const [cuePage, setCuePage] = useState(0);
   const current = useRef(document);
+  const activeVideo = useRef({ id: videoId });
+  const currentSource = useRef(sourceDocument);
   const alive = useRef(true);
   useEffect(() => { current.current = document; }, [document]);
+  useEffect(() => { activeVideo.current = { id: videoId }; }, [videoId]);
+  useEffect(() => { currentSource.current = sourceDocument; }, [sourceDocument]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
     const controller = new AbortController();
     void api.listSubtitleVersions(videoId, offset, controller.signal).then(result => {
-      if (!controller.signal.aborted) { setVersions(result.versions); setTotal(result.total); setLoading(false); }
+      if (!controller.signal.aborted) { setVersions(result.versions); setTotal(result.total); setUnreadableCount(result.unreadable_count ?? 0); setLoading(false); }
     }).catch(error => { if (!controller.signal.aborted) { setMessage(String(error)); setMessageTone("error"); setLoading(false); } });
     return () => controller.abort();
   }, [videoId, offset, reload, reloadKey]);
   async function choose(id: string) {
+    const scope = activeVideo.current;
+    const valid = () => alive.current && activeVideo.current === scope;
     setOperation(id); setMessage("");
-    try { const result = await api.getSubtitleVersion(videoId, id); if (alive.current) { setSelected(result); setCuePage(0); } }
-    catch (error) { if (alive.current) { setMessage(String(error)); setMessageTone("error"); } }
-    finally { if (alive.current) setOperation(null); }
+    try { const result = await api.getSubtitleVersion(videoId, id); if (valid()) {
+      setSelected({ ...result, document: versionDocument(result) }); setCuePage(0);
+    } }
+    catch (error) { if (valid()) { setMessage(String(error)); setMessageTone("error"); } }
+    finally { if (valid()) setOperation(null); }
   }
   async function save(useSelected = false) {
+    const scope = activeVideo.current;
+    const valid = () => alive.current && activeVideo.current === scope;
     setOperation(useSelected ? "apply" : "save"); setMessage(""); setMessageTone("success");
-    const before = current.current;
+    const isSource = useSelected && selected?.document.document_role === 'source';
+    const before = isSource ? currentSource.current : current.current;
     try {
-      await api.saveSubtitleVersion(videoId, before, useSelected ? "Trước khi đổi phiên bản" : "Bản đang chỉnh");
-      if (!alive.current) return;
+      const saved = before ? await api.saveSubtitleVersion(videoId, before, useSelected ? "Trước khi đổi phiên bản" : "Bản đang chỉnh", undefined, useSelected) : null;
+      if (!valid()) return;
       setReload(value => value + 1);
       if (useSelected && selected) {
-        if (current.current !== before) { setMessageTone("error"); setMessage("Phụ đề vừa thay đổi; giữ bản đang chỉnh. Hãy chọn sử dụng lại khi sẵn sàng."); return; }
-        onDocument(selected.document);
+        // Revalidate the source at the apply boundary, even if the comparison
+        // was opened before the underlying video file changed.
+        const refreshed = await api.getSubtitleVersion(videoId, selected.id);
+        if (!valid()) return;
+        if ((isSource ? currentSource.current : current.current) !== before) { setMessageTone("error"); setMessage("Phụ đề vừa thay đổi; giữ bản đang chỉnh. Hãy chọn sử dụng lại khi sẵn sàng."); return; }
+        onDocument(versionDocument(refreshed));
+      } else if (before && current.current === before && saved?.document?.media_fingerprint
+          && saved.document.media_fingerprint !== before.media_fingerprint) {
+        onDocument({ ...before, media_fingerprint: saved.document.media_fingerprint });
       }
       setMessage(useSelected ? "Đã chọn phiên bản. Bản trước đó đã được lưu." : "Đã lưu phiên bản.");
-    } catch (error) { if (alive.current) { setMessage(String(error)); setMessageTone("error"); } }
-    finally { if (alive.current) setOperation(null); }
+    } catch (error) { if (valid()) { setMessage(String(error)); setMessageTone("error"); } }
+    finally { if (valid()) setOperation(null); }
   }
   const start = cuePage * 10;
   return <details className="subtitle-versions-panel">
@@ -70,12 +97,14 @@ export function SubtitleVersionsPanel({ videoId, document, reloadKey, onDocument
         {operation === "save" ? "Đang lưu…" : "Lưu bản đang chỉnh"}
       </button>
       {loading && <p className="versions-empty" role="status">Đang tải phiên bản…</p>}
-      {!loading && !versions.length && <p className="versions-empty">Chưa có bản lưu. Lưu bản đang chỉnh để có thể quay lại sau.</p>}
+      {!loading && !versions.length && unreadableCount === 0 && <p className="versions-empty">Chưa có bản lưu. Lưu bản đang chỉnh để có thể quay lại sau.</p>}
+      {unreadableCount > 0 && <p className="version-feedback is-error" role="alert">Không đọc được {unreadableCount} bản lưu trên trang này. Các bản còn lại vẫn sử dụng được.</p>}
       <ul className="version-list" aria-label="Các phiên bản đã lưu">
         {versions.map(version => <li key={version.id}>
-          <button className="version-item" type="button" disabled={busy} aria-pressed={selected?.id === version.id} onClick={() => void choose(version.id)}>
+          <button className="version-item" type="button" disabled={busy || version.media_binding === 'mismatch'} aria-pressed={selected?.id === version.id} onClick={() => void choose(version.id)}>
             <span className="version-item-copy">
               <strong title={version.name}>{version.name}</strong>
+              {version.media_binding === 'mismatch' && <span>Thuộc video nguồn khác</span>}
               <span className="version-item-meta"><time dateTime={version.created_at}>{formatDate(version.created_at)}</time><span>{version.cue_count} câu</span></span>
             </span>
             {operation === version.id ? <LoaderCircle size={16} className="version-spinner" /> : selected?.id === version.id ? <Check size={16} /> : <ChevronRight size={16} />}
@@ -90,8 +119,9 @@ export function SubtitleVersionsPanel({ videoId, document, reloadKey, onDocument
       {selected && <section className="version-comparison" aria-label="So sánh phiên bản">
         <div className="version-comparison-heading"><h4>So sánh phiên bản</h4><button type="button" aria-label="Đóng so sánh" disabled={busy} onClick={() => setSelected(null)}><X size={16} /></button></div>
         <p className="versions-hint">{selected.name}</p>
+        {selected.media_binding === 'unverified' && <p className="versions-hint">Bản cũ chưa có thông tin xác minh video nguồn. Hãy đối chiếu nội dung và thời gian trước khi sử dụng.</p>}
         <div className="version-compare-columns">
-          {[{ title: "Đang chỉnh", cues: document.segments }, { title: "Bản đã lưu", cues: selected.document.segments }].map(column => <div key={column.title}>
+          {[{ title: selected.document.document_role === 'source' ? 'Nguồn đang chỉnh' : 'Đang chỉnh', cues: selected.document.document_role === 'source' ? sourceDocument?.segments ?? [] : document.segments }, { title: "Bản đã lưu", cues: selected.document.segments }].map(column => <div key={column.title}>
             <div className="version-compare-label"><strong>{column.title}</strong><span>{column.cues.length} câu</span></div>
             <div className="version-compare-cues">
               {column.cues.slice(start, start + 10).map(c => <p key={c.id}><span>{formatTime(c.start_ms)}–{formatTime(c.end_ms)}</span>{c.text}</p>)}

@@ -15,6 +15,7 @@ from .config import settings
 from .crawlers import SOURCE_REGISTRY
 from .crawlers.adapters.tiktok import TikTokOAuthConfig, TikTokTokenVault
 from .mongo import create_store
+from .services.acquisition import AcquisitionManager
 from .services.channel_scans import CHANNEL_SCANNERS
 from .services.connectors import SourceConnector, default_connectors
 from .services.crawler_login import CrawlerLoginManager
@@ -25,8 +26,8 @@ from .services.live_wall import LiveWallManager
 from .services.runs import EventBus, RunManager, utcnow
 from .services.subtitle_jobs import SubtitleJobManager
 from .services.tiktok_oauth import TikTokOAuthService
-from .services.video_thumbnails import VideoThumbnails
 from .services.video_downloads import VideoDownloadManager
+from .services.video_thumbnails import VideoThumbnails
 from .services.voiceover.manager import VoiceManager
 from .services.voiceover.store import VoiceStore
 from .storage_protocol import PersistenceStore
@@ -47,8 +48,10 @@ class AppServices:
     gemini_subtitle_jobs: SubtitleJobManager
     gemini_subtitle_service: GeminiSubtitleService
     voiceover_manager: VoiceManager
+    separation_jobs: SubtitleJobManager
     video_thumbnails: VideoThumbnails
     video_downloads: VideoDownloadManager
+    acquisition: AcquisitionManager
     scheduler_task: asyncio.Task | None = field(default=None, init=False)
     _closed: bool = field(default=False, init=False)
 
@@ -60,6 +63,7 @@ class AppServices:
             connectors, CHANNEL_SCANNERS, renderer_ids={"x", "tiktok"}
         )
         events = EventBus()
+        video_downloads = VideoDownloadManager(settings.data_dir / "videos")
         return cls(
             store=storage,
             connectors=connectors,
@@ -109,10 +113,19 @@ class AppServices:
                 keyring_provider=gemini_credentials,
             ),
             voiceover_manager=VoiceManager(VoiceStore(settings.data_dir / "voiceover")),
+            separation_jobs=SubtitleJobManager(
+                settings.data_dir / "voice-separation-jobs",
+                max_workers=settings.content_bot_separation_job_concurrency,
+            ),
             video_thumbnails=VideoThumbnails(
                 timeout_seconds=settings.content_bot_thumbnail_timeout_seconds
             ),
-            video_downloads=VideoDownloadManager(settings.data_dir / "videos"),
+            video_downloads=video_downloads,
+            acquisition=AcquisitionManager(
+                storage,
+                video_downloads,
+                connectors=connectors,
+            ),
         )
 
     async def start(self, *, scheduler: bool = True) -> None:
@@ -120,6 +133,7 @@ class AppServices:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self.video_downloads.start)
         await asyncio.to_thread(self.store.initialize)
+        await asyncio.to_thread(self.acquisition.start)
         # Import after application construction: the API and startup share the
         # same persisted generation recipe and checkpoint validation.
         from .api.subtitles import recover_gemini_generation_jobs
@@ -158,6 +172,7 @@ class AppServices:
                 )
                 next_retention_at = now + interval
             await self.run_manager.scheduler_tick()
+            await asyncio.to_thread(self.acquisition.scheduler_tick)
             await asyncio.sleep(30)
 
     async def shutdown(self, *, timeout_seconds: float = 10) -> None:
@@ -170,6 +185,8 @@ class AppServices:
             self.subtitle_jobs,
             self.gemini_subtitle_jobs,
             self.voiceover_manager,
+            self.separation_jobs,
+            self.acquisition,
             self.video_downloads,
         ):
             try:
@@ -208,7 +225,13 @@ class AppServices:
                     self.voiceover_manager.shutdown, timeout_seconds=timeout_seconds
                 )
             ),
+            close(
+                asyncio.to_thread(
+                    self.separation_jobs.shutdown, timeout_seconds=timeout_seconds
+                )
+            ),
             close(asyncio.to_thread(self.video_thumbnails.shutdown)),
+            close(asyncio.to_thread(self.acquisition.shutdown, timeout_seconds)),
             close(asyncio.to_thread(self.video_downloads.shutdown, timeout_seconds=timeout_seconds)),
             close(asyncio.wait_for(self.live_wall_manager.shutdown(), timeout_seconds)),
             close(

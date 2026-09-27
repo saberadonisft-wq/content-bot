@@ -1,7 +1,9 @@
 import type { SubtitleBurnOptions, SubtitleCueV2 } from "../api";
 import { normalizeOverlayLayout } from "./overlay";
 import { normalizeSubtitleMasks } from "./masks";
-import type { OverlayLayout, SubtitleMaskRegion, VideoClip } from "./types";
+import type { ExtractionMode, OverlayLayout, SubtitleDocumentV2, SubtitleMaskRegion, SubtitleOcrRegion, VideoClip } from "./types";
+import { clampOcrRegion, DEFAULT_OCR_REGION } from './ocr-region';
+import type { PendingExtraction } from './useExtractionJobs';
 import { normalizeVideoClips } from "./video-clips";
 
 export type SavedSubtitleDraft = {
@@ -11,7 +13,11 @@ export type SavedSubtitleDraft = {
   mediaDurationMs: number;
   rawText: string;
   cues: SubtitleCueV2[];
-  documentMeta?: { revision: number; run_id: string | null };
+  documentMeta?: Partial<Omit<SubtitleDocumentV2, 'segments'>> & { revision: number; run_id: string | null };
+  sourceDocument?: SubtitleDocumentV2 | null;
+  translatedSourceRevision?: number | null;
+  extractionSettings?: ExtractionSettings;
+  pendingExtraction?: PendingExtraction | null;
   selectedCueId: string | null;
   activeGeminiJobId: string | null;
   lastGeminiJobId?: string | null;
@@ -23,6 +29,16 @@ export type SavedSubtitleDraft = {
   overlayLayout: OverlayLayout;
   subtitleMasks: SubtitleMaskRegion[];
   videoClips: VideoClip[];
+};
+
+export type ExtractionSettings = {
+  mode: ExtractionMode; region: SubtitleOcrRegion; ocrLanguage: string; sampleFps: number; autoProbe?: boolean;
+  asrLanguage: string; asrModel: string; asrDevice?: 'auto' | 'cpu' | 'cuda'; asrComputeType?: string;
+  bilingual: boolean; model: string;
+};
+export const DEFAULT_EXTRACTION_SETTINGS: ExtractionSettings = {
+  mode: 'ocr', region: DEFAULT_OCR_REGION, ocrLanguage: 'zh', sampleFps: 3, autoProbe: false,
+  asrLanguage: 'auto', asrModel: 'small', asrDevice: 'auto', asrComputeType: 'auto', bilingual: false, model: '',
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -46,19 +62,22 @@ const timingSources = new Set<SubtitleCueV2["timing_source"]>([
   "forced_alignment",
   "imported_srt",
   "imported_vtt",
+  "ocr",
+  "asr",
 ]);
 
 const normalizeCue = (
   candidate: unknown,
   index: number,
   usedIds: Set<string>,
+  allowEmpty = false,
 ): SubtitleCueV2 | null => {
   if (!isRecord(candidate)) return null;
   const startMs =
     integerMs(candidate.start_ms) ?? secondsAsMs(candidate.start_seconds);
   const endMs = integerMs(candidate.end_ms) ?? secondsAsMs(candidate.end_seconds);
   const text = typeof candidate.text === "string" ? candidate.text.trim() : "";
-  if (startMs === null || endMs === null || startMs < 0 || endMs <= startMs || !text) {
+  if (startMs === null || endMs === null || startMs < 0 || endMs <= startMs || (!text && !allowEmpty)) {
     return null;
   }
   const rawId =
@@ -148,6 +167,39 @@ const normalizeOptions = (
   return next as SubtitleBurnOptions;
 };
 
+export function normalizeSourceDocument(value: unknown): SubtitleDocumentV2 | null {
+  if (!isRecord(value) || !Array.isArray(value.segments) || value.schema_version !== 2) return null;
+  const used = new Set<string>();
+  const segments = value.segments.map((cue, i) => normalizeCue(cue, i, used, true))
+    .filter((cue): cue is SubtitleCueV2 => cue !== null)
+    .map(cue => ({ ...cue, text: value.document_role === 'source' ? cue.text : cue.source_text ?? cue.text,
+      source_text: value.document_role === 'source' ? cue.text : cue.source_text ?? cue.text }));
+  // A corrupt source must never authorize applying an in-flight job to a different document.
+  if (segments.length !== value.segments.length) return null;
+  return { schema_version: 2, document_role: 'source', revision: Math.max(0, integerMs(value.revision) ?? 0),
+    ...(typeof value.media_fingerprint === 'string' && value.media_fingerprint.length > 0 && value.media_fingerprint.length <= 128 ? { media_fingerprint: value.media_fingerprint } : {}),
+    run_id: typeof value.run_id === 'string' ? value.run_id.slice(0, 64) : null,
+    language: typeof value.language === 'string' && /^[A-Za-z0-9-]{2,32}$/.test(value.language) ? value.language : 'und',
+    timebase: 'milliseconds', timing_source: timingSources.has(value.timing_source as SubtitleCueV2['timing_source'])
+      ? value.timing_source as SubtitleCueV2['timing_source'] : 'manual',
+    timing_precision_ms: Math.max(1, Math.min(60000, integerMs(value.timing_precision_ms) ?? 1)), segments };
+}
+
+function normalizeExtractionSettings(value: unknown): ExtractionSettings {
+  if (!isRecord(value)) return DEFAULT_EXTRACTION_SETTINGS;
+  const defaults = DEFAULT_EXTRACTION_SETTINGS;
+  return { mode: ['ocr', 'asr', 'gemini'].includes(String(value.mode)) ? value.mode as ExtractionMode : defaults.mode,
+    autoProbe: value.autoProbe === true,
+    region: clampOcrRegion(isRecord(value.region) ? value.region : defaults.region),
+    ocrLanguage: typeof value.ocrLanguage === 'string' ? value.ocrLanguage.slice(0, 32) : defaults.ocrLanguage,
+    sampleFps: finiteNumber(value.sampleFps) ? Math.max(1, Math.min(30, value.sampleFps)) : defaults.sampleFps,
+    asrLanguage: typeof value.asrLanguage === 'string' ? value.asrLanguage.slice(0, 32) : defaults.asrLanguage,
+    asrModel: typeof value.asrModel === 'string' ? value.asrModel.slice(0, 64) : defaults.asrModel,
+    asrDevice: ['auto', 'cpu', 'cuda'].includes(String(value.asrDevice)) ? value.asrDevice as 'auto' | 'cpu' | 'cuda' : 'auto',
+    asrComputeType: typeof value.asrComputeType === 'string' ? value.asrComputeType.slice(0, 32) : 'auto',
+    bilingual: value.bilingual === true, model: typeof value.model === 'string' ? value.model.slice(0, 128) : '' };
+}
+
 export const normalizeSavedDraft = (
   value: unknown,
   defaultOptions: SubtitleBurnOptions,
@@ -177,9 +229,30 @@ export const normalizeSavedDraft = (
     typeof value.videoId === "string" && /^[a-f0-9]{12,32}$/.test(value.videoId)
       ? value.videoId
       : null;
+  const pending = value.pendingExtraction;
+  const pendingExtraction = isRecord(pending) && pending.videoId === videoId && videoId
+    && typeof pending.id === 'string' && /^[a-f0-9]{20}$/.test(pending.id)
+    && typeof pending.snapshot === 'string' && /^[a-f0-9]{64}$/.test(pending.snapshot)
+    && ['ocr', 'asr', 'translation'].includes(String(pending.kind))
+    ? pending as PendingExtraction : null;
   return {
     version: 2,
-    documentMeta: isRecord(value.documentMeta) ? { revision: Math.max(0, integerMs(value.documentMeta.revision) ?? 0), run_id: typeof value.documentMeta.run_id === "string" ? value.documentMeta.run_id.slice(0, 64) : null } : { revision: 0, run_id: null },
+    documentMeta: isRecord(value.documentMeta) ? { revision: Math.max(0, integerMs(value.documentMeta.revision) ?? 0), run_id: typeof value.documentMeta.run_id === "string" ? value.documentMeta.run_id.slice(0, 64) : null,
+      ...(typeof value.documentMeta.media_fingerprint === 'string' && value.documentMeta.media_fingerprint.length > 0 && value.documentMeta.media_fingerprint.length <= 128 ? { media_fingerprint: value.documentMeta.media_fingerprint } : {}),
+      ...(value.documentMeta.schema_version === 2 ? { schema_version: 2 as const } : {}),
+      ...(value.documentMeta.timebase === 'milliseconds' ? { timebase: 'milliseconds' as const } : {}),
+      ...(typeof value.documentMeta.language === 'string' && value.documentMeta.language.trim() ? { language: value.documentMeta.language.slice(0, 16) } : {}),
+      ...(timingSources.has(value.documentMeta.timing_source as SubtitleCueV2['timing_source']) ? { timing_source: value.documentMeta.timing_source as SubtitleCueV2['timing_source'] } : {}),
+      ...(integerMs(value.documentMeta.timing_precision_ms) !== null ? { timing_precision_ms: Math.max(1, integerMs(value.documentMeta.timing_precision_ms)!) } : {}),
+      ...(['source', 'translation'].includes(String(value.documentMeta.document_role)) ? { document_role: value.documentMeta.document_role as 'source' | 'translation' } : {}),
+      ...(integerMs(value.documentMeta.source_revision) !== null ? { source_revision: Math.max(0, Number(value.documentMeta.source_revision)) } : {}),
+      ...(typeof value.documentMeta.source_run_id === 'string' ? { source_run_id: value.documentMeta.source_run_id.slice(0, 64) } : {}),
+      ...(Array.isArray(value.documentMeta.translation_models) ? { translation_models: value.documentMeta.translation_models.filter((model): model is string => typeof model === 'string' && model.length <= 128).slice(0, 10) } : {}),
+    } : { revision: 0, run_id: null },
+    sourceDocument: normalizeSourceDocument(value.sourceDocument),
+    translatedSourceRevision: integerMs(value.translatedSourceRevision),
+    extractionSettings: normalizeExtractionSettings(value.extractionSettings),
+    pendingExtraction,
     videoId,
     projectName:
       typeof value.projectName === "string" && value.projectName.trim()

@@ -1,5 +1,37 @@
 import { request } from "../transport/client";
 import type { Batch, InsightSummary, Item, ItemFilters, Keyword, TrendClusters } from "./types";
+
+export type CaptionCleanResult = {
+  original_text: string;
+  cleaned_text: string;
+  hashtags: string[];
+  safe_filename: string;
+  changed: boolean;
+};
+
+export type CaptionApplyResult = {
+  item_id: number;
+  caption_original: string;
+  caption_edited: string;
+  caption_edited_at: string;
+};
+
+export const cleanCaption = (text: string, signal?: AbortSignal) =>
+  request<CaptionCleanResult>("/captions/clean", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+    signal,
+  });
+
+export const applyCaption = (
+  itemId: number,
+  payload: { original_text?: string; edited_text: string },
+) =>
+  request<CaptionApplyResult>(`/items/${itemId}/caption`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
 export const keywords = () => request<Keyword[]>("/keywords");
 
 export const createKeyword = (

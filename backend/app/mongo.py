@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -10,6 +12,7 @@ from typing import Any
 import certifi
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
 from .config import settings
 from .mongo_item_query import (
@@ -19,7 +22,15 @@ from .mongo_item_query import (
     unchanged_input,
 )
 
-INDEX_VERSION = 4
+INDEX_VERSION = 5
+_ACQUISITION_COLLECTION = re.compile(r"^acquisition_[a-z][a-z0-9_]{0,63}$")
+
+
+def _validate_acquisition_collection(collection: str) -> str:
+    value = str(collection).strip()
+    if not _ACQUISITION_COLLECTION.fullmatch(value):
+        raise ValueError("Invalid acquisition collection")
+    return value
 
 
 def configure_mongodb_dns() -> None:
@@ -244,6 +255,11 @@ class MongoStore:
             self.db.source_runs.create_index("batch_id")
             self.db.source_runs.create_index(
                 [("batch_id", ASCENDING), ("channel_id", ASCENDING)]
+            )
+            self.db.acquisition_selections.create_index(
+                "idempotency_key",
+                unique=True,
+                partialFilterExpression={"idempotency_key": {"$type": "string"}},
             )
             self.db.app_metadata.update_one(
                 {"_id": "mongo-index-version"},
@@ -861,6 +877,197 @@ class MongoStore:
 
     def set_metadata(self, key: str, values: dict[str, Any]) -> None:
         self.db.app_metadata.update_one({"_id": key}, {"$set": values}, upsert=True)
+
+    def acquisition_documents(
+        self, collection: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        collection = _validate_acquisition_collection(collection)
+        if limit is not None and (limit < 1 or limit > 100_000):
+            raise ValueError("Invalid acquisition document limit")
+        cursor = self.db[collection].find().sort("updated_at", DESCENDING)
+        if limit is not None:
+            cursor = cursor.limit(limit)
+        return [self.public(row) for row in cursor]
+
+    def acquisition_document(
+        self, collection: str, document_id: str
+    ) -> dict[str, Any] | None:
+        collection = _validate_acquisition_collection(collection)
+        if not isinstance(document_id, str) or not document_id.strip():
+            raise ValueError("Invalid acquisition document ID")
+        return self.public(self.db[collection].find_one({"_id": document_id}))
+
+    def upsert_acquisition_document(
+        self, collection: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        collection = _validate_acquisition_collection(collection)
+        document = deepcopy(values)
+        identifier = document.get("_id", document.get("id"))
+        if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 256:
+            raise ValueError("Acquisition document ID is required")
+        document["_id"] = identifier
+        document.pop("id", None)
+        self.db[collection].replace_one({"_id": identifier}, document, upsert=True)
+        return self.public(document)
+
+    def reserve_acquisition_selection(
+        self, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Atomically reserve a selection idempotency key when present."""
+        document = deepcopy(values)
+        identifier = document.get("_id", document.get("id"))
+        if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 256:
+            raise ValueError("Acquisition selection ID is required")
+        document["_id"] = identifier
+        document.pop("id", None)
+        key = document.get("idempotency_key")
+        if key is None:
+            self.db["acquisition_selections"].replace_one(
+                {"_id": identifier}, document, upsert=True
+            )
+            return self.public(document)
+        if not isinstance(key, str) or not key.strip() or len(key) > 256:
+            raise ValueError("Acquisition selection idempotency key is invalid")
+        try:
+            row = self.db["acquisition_selections"].find_one_and_update(
+                {"idempotency_key": key},
+                {"$setOnInsert": document},
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+        except DuplicateKeyError:
+            row = self.db["acquisition_selections"].find_one(
+                {"idempotency_key": key}
+            )
+        return self.public(row)
+
+    def delete_acquisition_document(self, collection: str, document_id: str) -> bool:
+        collection = _validate_acquisition_collection(collection)
+        if not isinstance(document_id, str) or not document_id.strip():
+            raise ValueError("Invalid acquisition document ID")
+        return self.db[collection].delete_one({"_id": document_id}).deleted_count > 0
+
+    def advance_acquisition_pagination(
+        self, run_id: str, *, expected_generation: int, now: str
+    ) -> dict[str, Any] | None:
+        return self.public(self.db["acquisition_runs"].find_one_and_update(
+            {"_id": run_id, "state": "completed", "pagination.generation": expected_generation,
+             "pagination.exhausted": False, "pagination.next_offset": {"$lt": 5000}},
+            {"$inc": {"pagination.generation": 1}, "$set": {
+                "state": "queued", "phase": "queued", "error": None,
+                "error_code": None, "stop_reason": None, "updated_at": now,
+            }}, return_document=ReturnDocument.AFTER,
+        ))
+
+    def claim_acquisition_channel(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        now: str,
+        lease_expires_at: str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            raise ValueError("Invalid acquisition channel ID")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("Invalid acquisition run ID")
+        row = self.db["acquisition_channels"].find_one_and_update(
+            {
+                "_id": channel_id,
+                "subscription.enabled": True,
+                "$or": [
+                    {"subscription.active_run_id": {"$exists": False}},
+                    {"subscription.active_run_id": None},
+                    {"subscription.lease_expires_at": {"$lte": now}},
+                ],
+                "$and": [
+                    {
+                        "$or": [
+                            {"subscription.next_run_at": {"$exists": False}},
+                            {"subscription.next_run_at": None},
+                            {"subscription.next_run_at": {"$lte": now}},
+                        ]
+                    }
+                ],
+            },
+            {
+                "$set": {
+                    "subscription.active_run_id": run_id,
+                    "subscription.lease_expires_at": lease_expires_at,
+                    "subscription.last_status": "queued",
+                    "subscription.last_error": None,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        return self.public(row)
+
+    def claim_acquisition_reconciliation(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        now: str,
+        lease_expires_at: str,
+    ) -> dict[str, Any] | None:
+        """Atomically claim one terminal run without requiring a Mongo transaction."""
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            raise ValueError("Invalid acquisition channel ID")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("Invalid acquisition run ID")
+        row = self.db["acquisition_channels"].find_one_and_update(
+            {
+                "_id": channel_id,
+                "subscription.active_run_id": run_id,
+                "$or": [
+                    {"subscription.reconcile_run_id": {"$exists": False}},
+                    {"subscription.reconcile_run_id": None},
+                    {"subscription.reconcile_lease_expires_at": {"$lte": now}},
+                ],
+            },
+            {
+                "$set": {
+                    "subscription.reconcile_run_id": run_id,
+                    "subscription.reconcile_lease_token": uuid.uuid4().hex,
+                    "subscription.reconcile_lease_expires_at": lease_expires_at,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        return self.public(row)
+
+    def complete_acquisition_reconciliation(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        lease_token: str,
+        now: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Commit finalizer state only while this process owns its lease."""
+        if not isinstance(lease_token, str) or not lease_token.strip():
+            raise ValueError("Reconciliation lease token is required")
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            raise ValueError("Invalid acquisition channel ID")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("Invalid acquisition run ID")
+        set_values = {f"subscription.{key}": deepcopy(value) for key, value in updates.items()}
+        set_values["updated_at"] = now
+        row = self.db["acquisition_channels"].find_one_and_update(
+            {
+                "_id": channel_id,
+                "subscription.active_run_id": run_id,
+                "subscription.reconcile_run_id": run_id,
+                "subscription.reconcile_lease_token": lease_token,
+                "subscription.reconcile_lease_expires_at": {"$gt": now},
+            },
+            {"$set": set_values},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self.public(row)
 
     def due_keywords(self, now: datetime) -> list[dict[str, Any]]:
         return [

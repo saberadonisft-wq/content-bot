@@ -36,7 +36,7 @@ def main():
             pass
         elif path == '/status':
             body = {'ready': True, 'installed': True, 'message': 'Bộ tạo giọng thử', 'devices': ['cpu'], 'presets': []}
-        elif path in ('/profiles', '/projects/smoke/jobs'):
+        elif path in ('/profiles', '/projects/smoke/jobs', '/projects/smoke/separations'):
             body = []
         elif path.endswith('/peaks'):
             body = {'peaks': [[0.2, 0.5, 0.3]]}

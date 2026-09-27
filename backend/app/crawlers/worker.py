@@ -79,6 +79,7 @@ from .runtime import (
     bounded_pages,
     decode_message,
     encode_message,
+    normalize_account_ref,
     safe_diagnostic,
 )
 from .runtime.adapter import SearchAdapter
@@ -94,6 +95,7 @@ class BilibiliWorkerRequest:
     browser_executable: Path
     profile_root: Path
     pseudonym_key_ref: Path
+    account_ref: str = "default"
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> BilibiliWorkerRequest:
@@ -130,6 +132,7 @@ class BilibiliWorkerRequest:
             _required_path(payload, "browser_executable"),
             _required_path(payload, "profile_root"),
             _required_path(payload, "pseudonym_key_ref"),
+            _account_ref_from_payload(payload),
         )
 
 
@@ -307,6 +310,7 @@ class BilibiliDetailWorkerRequest:
     browser_executable: Path
     profile_root: Path
     pseudonym_key_ref: Path
+    account_ref: str = "default"
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> BilibiliDetailWorkerRequest:
@@ -322,11 +326,12 @@ class BilibiliDetailWorkerRequest:
         if not 1 <= deadline <= 7_200:
             raise ValueError("Worker deadline is invalid")
         return cls(
-            parsed.canonical_url,
+            parsed.media_url,
             deadline,
             _required_path(payload, "browser_executable"),
             _required_path(payload, "profile_root"),
             _required_path(payload, "pseudonym_key_ref"),
+            _account_ref_from_payload(payload),
         )
 
 
@@ -343,6 +348,7 @@ class BilibiliPagedTargetWorkerRequest:
     browser_executable: Path
     profile_root: Path
     pseudonym_key_ref: Path
+    account_ref: str = "default"
 
     @classmethod
     def from_payload(
@@ -397,6 +403,7 @@ class BilibiliPagedTargetWorkerRequest:
             _required_path(payload, "browser_executable"),
             _required_path(payload, "profile_root"),
             _required_path(payload, "pseudonym_key_ref"),
+            _account_ref_from_payload(payload),
         )
 
 
@@ -432,7 +439,7 @@ async def run_bilibili_worker(
     if start.source_id != "bilibili" or start.provider_id != "cbce_bilibili":
         raise ValueError("Worker identity does not match the Bilibili provider")
     profile = ProfileNamespace(request.profile_root, SOURCE_REGISTRY).profile(
-        "bilibili", "default"
+        "bilibili", request.account_ref
     )
     key = PseudonymKeyStore.load_reference(request.pseudonym_key_ref)
     browser = BrowserSession(
@@ -941,7 +948,7 @@ async def run_bilibili_detail_worker(
     ):
         raise ValueError("Worker identity does not match the Bilibili detail provider")
     profile = ProfileNamespace(request.profile_root, SOURCE_REGISTRY).profile(
-        "bilibili", "default"
+        "bilibili", request.account_ref
     )
     key = PseudonymKeyStore.load_reference(request.pseudonym_key_ref)
     browser = BrowserSession(
@@ -1001,7 +1008,7 @@ async def run_bilibili_paged_target_worker(
     ):
         raise ValueError("Worker identity does not match the Bilibili provider")
     profile = ProfileNamespace(request.profile_root, SOURCE_REGISTRY).profile(
-        "bilibili", "default"
+        "bilibili", request.account_ref
     )
     key = PseudonymKeyStore.load_reference(request.pseudonym_key_ref)
     browser = BrowserSession(
@@ -1238,6 +1245,14 @@ def _emit_terminal_error(writer: WorkerWriter, failure: CrawlerFailure) -> None:
         else WorkerMessageKind.ERROR
     )
     writer.emit(kind, failure.as_event_error())
+
+
+def _account_ref_from_payload(payload: Mapping[str, Any]) -> str:
+    value = payload.get("account_ref", "default")
+    try:
+        return normalize_account_ref(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Worker account reference is invalid") from exc
 
 
 def _required_path(payload: Mapping[str, Any], key: str) -> Path:

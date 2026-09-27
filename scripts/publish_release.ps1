@@ -68,7 +68,9 @@ foreach ($folder in "backend", "frontend", "scripts", "auth-server", "docs") {
     if (Test-Path -LiteralPath $src) {
         $dst = Join-Path $stagingDir $folder
         New-Item -ItemType Directory -Path $dst -Force | Out-Null
-        robocopy $src $dst /E /XD .venv node_modules __pycache__ .pytest_cache .ruff_cache dist data secrets /XF *.pyc .env .env.* *.log /NJH /NJS /NDL /NC /NS | Out-Null
+        $excludedOcrRuntime = Join-Path $src "runtimes\ocr_gpu\site-packages"
+        $excludedOcrRuntimeStaging = Join-Path $src "runtimes\ocr_gpu\site-packages.installing"
+        robocopy $src $dst /E /XD .venv node_modules __pycache__ .pytest_cache .ruff_cache dist data secrets $excludedOcrRuntime $excludedOcrRuntimeStaging /XF *.pyc .env .env.* *.log /NJH /NJS /NDL /NC /NS | Out-Null
     }
 }
 

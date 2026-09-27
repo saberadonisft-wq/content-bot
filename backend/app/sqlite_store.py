@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import unicodedata
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from copy import deepcopy
@@ -78,6 +79,16 @@ def _normalized(value: str) -> str:
     value = unicodedata.normalize("NFKD", value.casefold())
     value = "".join(char for char in value if not unicodedata.combining(char))
     return re.sub(r"[^\w#]+", " ", value).strip()
+
+
+_ACQUISITION_COLLECTION = re.compile(r"^acquisition_[a-z][a-z0-9_]{0,63}$")
+
+
+def _validate_acquisition_collection(collection: str) -> str:
+    value = str(collection).strip()
+    if not _ACQUISITION_COLLECTION.fullmatch(value):
+        raise ValueError("Invalid acquisition collection")
+    return value
 
 
 def _transactional(method: Callable) -> Callable:
@@ -321,6 +332,214 @@ class SQLiteStore:
                 (collection, self._key(identifier)),
             ).fetchone()
         return self._loads(row["payload"]) if row else None
+
+    def acquisition_documents(
+        self, collection: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        collection = _validate_acquisition_collection(collection)
+        if limit is not None and (limit < 1 or limit > 100_000):
+            raise ValueError("Invalid acquisition document limit")
+        with self._connection() as connection:
+            sql = (
+                "SELECT payload FROM local_documents "
+                "WHERE collection = ? ORDER BY rowid DESC"
+            )
+            values: tuple[Any, ...] = (collection,)
+            if limit is not None:
+                sql += " LIMIT ?"
+                values = (collection, limit)
+            rows = connection.execute(sql, values).fetchall()
+        return [self.public(self._loads(row["payload"])) for row in rows]
+
+    def acquisition_document(
+        self, collection: str, document_id: str
+    ) -> dict[str, Any] | None:
+        collection = _validate_acquisition_collection(collection)
+        if not isinstance(document_id, str) or not document_id.strip():
+            raise ValueError("Invalid acquisition document ID")
+        return self.public(self._get(collection, document_id))
+
+    @_transactional
+    def upsert_acquisition_document(
+        self, collection: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        collection = _validate_acquisition_collection(collection)
+        document = deepcopy(values)
+        identifier = document.get("_id", document.get("id"))
+        if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 256:
+            raise ValueError("Acquisition document ID is required")
+        document["_id"] = identifier
+        document.pop("id", None)
+        with self._write_lock, self._connection() as connection:
+            self._upsert_with(connection, collection, identifier, document)
+        return self.public(document)
+
+    @_transactional
+    def reserve_acquisition_selection(
+        self, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Insert one selection, returning the winner for an idempotency key."""
+        document = deepcopy(values)
+        identifier = document.get("_id", document.get("id"))
+        if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 256:
+            raise ValueError("Acquisition selection ID is required")
+        document["_id"] = identifier
+        document.pop("id", None)
+        key = document.get("idempotency_key")
+        if key is not None:
+            if not isinstance(key, str) or not key.strip() or len(key) > 256:
+                raise ValueError("Acquisition selection idempotency key is invalid")
+            with self._connection() as connection:
+                rows = connection.execute(
+                    "SELECT payload FROM local_documents "
+                    "WHERE collection = ?",
+                    ("acquisition_selections",),
+                ).fetchall()
+            for row in rows:
+                existing = self._loads(row["payload"])
+                if existing.get("idempotency_key") == key:
+                    return self.public(existing)
+        with self._write_lock, self._connection() as connection:
+            self._upsert_with(
+                connection, "acquisition_selections", identifier, document
+            )
+        return self.public(document)
+
+    @_transactional
+    def delete_acquisition_document(self, collection: str, document_id: str) -> bool:
+        collection = _validate_acquisition_collection(collection)
+        if not isinstance(document_id, str) or not document_id.strip():
+            raise ValueError("Invalid acquisition document ID")
+        with self._write_lock, self._connection() as connection:
+            result = connection.execute(
+                "DELETE FROM local_documents WHERE collection = ? AND document_key = ?",
+                (collection, self._key(document_id)),
+            )
+        return result.rowcount > 0
+
+    @_transactional
+    def advance_acquisition_pagination(
+        self, run_id: str, *, expected_generation: int, now: str
+    ) -> dict[str, Any] | None:
+        run = self._get("acquisition_runs", run_id)
+        pagination = (run or {}).get("pagination") or {}
+        if (not run or run.get("state") != "completed"
+                or pagination.get("generation") != expected_generation
+                or pagination.get("exhausted") is not False
+                or int(pagination.get("next_offset", 5000)) >= 5000):
+            return None
+        pagination["generation"] = expected_generation + 1
+        run.update(state="queued", phase="queued", error=None, error_code=None,
+                   stop_reason=None, updated_at=now)
+        with self._connection() as connection:
+            self._upsert_with(connection, "acquisition_runs", run_id, run)
+        return self.public(run)
+
+    @_transactional
+    def claim_acquisition_channel(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        now: str,
+        lease_expires_at: str,
+    ) -> dict[str, Any] | None:
+        channel = self._get("acquisition_channels", channel_id)
+        if channel is None:
+            return None
+        subscription = dict(channel.get("subscription") or {})
+        if not subscription.get("enabled"):
+            return None
+        active_run_id = subscription.get("active_run_id")
+        active_lease = subscription.get("lease_expires_at")
+        if active_run_id and not (
+            isinstance(active_lease, str) and active_lease <= now
+        ):
+            return None
+        next_run_at = subscription.get("next_run_at")
+        if isinstance(next_run_at, str) and next_run_at > now:
+            return None
+        subscription.update(
+            active_run_id=run_id,
+            lease_expires_at=lease_expires_at,
+            last_status="queued",
+            last_error=None,
+        )
+        channel["subscription"] = subscription
+        channel["updated_at"] = now
+        with self._write_lock, self._connection() as connection:
+            self._upsert_with(connection, "acquisition_channels", channel_id, channel)
+        return self.public(channel)
+
+    @_transactional
+    def claim_acquisition_reconciliation(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        now: str,
+        lease_expires_at: str,
+    ) -> dict[str, Any] | None:
+        """Claim one terminal subscription run for durable reconciliation.
+
+        The read and write deliberately stay inside ``BEGIN IMMEDIATE``. The
+        scheduler lease protects run creation, while this second lease protects
+        the multi-document finalization/replay step after a run is complete.
+        """
+        channel = self._get("acquisition_channels", channel_id)
+        if channel is None:
+            return None
+        subscription = dict(channel.get("subscription") or {})
+        if subscription.get("active_run_id") != run_id:
+            return None
+        active_lease = subscription.get("reconcile_lease_expires_at")
+        reconcile_run_id = subscription.get("reconcile_run_id")
+        if reconcile_run_id and not (
+            isinstance(active_lease, str) and active_lease <= now
+        ):
+            return None
+        subscription.update(
+            reconcile_run_id=run_id,
+            reconcile_lease_token=uuid.uuid4().hex,
+            reconcile_lease_expires_at=lease_expires_at,
+        )
+        channel["subscription"] = subscription
+        channel["updated_at"] = now
+        with self._write_lock, self._connection() as connection:
+            self._upsert_with(connection, "acquisition_channels", channel_id, channel)
+        return self.public(channel)
+
+    @_transactional
+    def complete_acquisition_reconciliation(
+        self,
+        channel_id: str,
+        *,
+        run_id: str,
+        lease_token: str,
+        now: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Commit finalizer state only while this process owns its lease."""
+        if not isinstance(lease_token, str) or not lease_token.strip():
+            raise ValueError("Reconciliation lease token is required")
+        channel = self._get("acquisition_channels", channel_id)
+        if channel is None:
+            return None
+        subscription = dict(channel.get("subscription") or {})
+        if (
+            subscription.get("active_run_id") != run_id
+            or subscription.get("reconcile_run_id") != run_id
+            or subscription.get("reconcile_lease_token") != lease_token
+            or not isinstance(subscription.get("reconcile_lease_expires_at"), str)
+            or subscription["reconcile_lease_expires_at"] <= now
+        ):
+            return None
+        subscription.update(deepcopy(updates))
+        channel["subscription"] = subscription
+        channel["updated_at"] = now
+        with self._write_lock, self._connection() as connection:
+            self._upsert_with(connection, "acquisition_channels", channel_id, channel)
+        return self.public(channel)
 
     def _find(
         self, collection: str, predicate: Callable[[dict[str, Any]], bool]

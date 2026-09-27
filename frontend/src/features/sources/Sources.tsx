@@ -52,6 +52,7 @@ export function Sources({
     Record<string, CrawlerLoginStatus>
   >({});
   const [crawlerLoginBusy, setCrawlerLoginBusy] = useState<string | null>(null);
+  const [crawlerConnectionIds, setCrawlerConnectionIds] = useState<Record<string, string>>({});
   const [crawlerLoginErrors, setCrawlerLoginErrors] = useState<
     Record<string, string>
   >({});
@@ -92,7 +93,9 @@ export function Sources({
     const sourceIds = activeCrawlerLoginIds.split(",");
     const poll = async () => {
       const results = await Promise.allSettled(
-        sourceIds.map((sourceId) => api.crawlerLoginStatus(sourceId)),
+        sourceIds.map((sourceId) =>
+          api.crawlerLoginStatus(sourceId, crawlerConnectionIds[sourceId] || "default"),
+        ),
       );
       if (!active) return;
       setCrawlerLogins((current) => {
@@ -111,7 +114,7 @@ export function Sources({
       active = false;
       window.clearInterval(timer);
     };
-  }, [activeCrawlerLoginIds]);
+  }, [activeCrawlerLoginIds, crawlerConnectionIds]);
 
   const connectTikTok = () => {
     const username = tiktokUsername.trim().replace(/^@/, "");
@@ -153,9 +156,10 @@ export function Sources({
     }
   };
   const startCrawlerLogin = async (sourceId: string) => {
+    const connectionId = crawlerConnectionIds[sourceId]?.trim() || "default";
     setCrawlerLoginBusy(sourceId);
     try {
-      const session = await api.startCrawlerLogin(sourceId);
+      const session = await api.startCrawlerLogin(sourceId, 1200, connectionId);
       setCrawlerLogins((current) => ({ ...current, [sourceId]: session }));
       setCrawlerLoginErrors((current) => ({ ...current, [sourceId]: "" }));
     } catch (error) {
@@ -171,9 +175,10 @@ export function Sources({
     }
   };
   const stopCrawlerLogin = async (sourceId: string) => {
+    const connectionId = crawlerConnectionIds[sourceId]?.trim() || "default";
     setCrawlerLoginBusy(sourceId);
     try {
-      const session = await api.stopCrawlerLogin(sourceId);
+      const session = await api.stopCrawlerLogin(sourceId, connectionId);
       setCrawlerLogins((current) => ({ ...current, [sourceId]: session }));
       setCrawlerLoginErrors((current) => ({ ...current, [sourceId]: "" }));
     } catch (error) {
@@ -488,6 +493,28 @@ export function Sources({
                   </button>
                   {hasCbceProfile && (
                     <>
+                      <label className="source-oauth-username" htmlFor={`crawler-connection-${source.id}`}>
+                        Connection profile (tùy chọn)
+                      </label>
+                      <input
+                        id={`crawler-connection-${source.id}`}
+                        className="source-oauth-input"
+                        value={crawlerConnectionIds[source.id] || ""}
+                        onChange={(event) =>
+                          setCrawlerConnectionIds((current) => ({
+                            ...current,
+                            [source.id]: event.target.value,
+                          }))
+                        }
+                        placeholder="default hoặc bilibili-main"
+                        maxLength={128}
+                        autoComplete="off"
+                        disabled={crawlerLoginActive || crawlerLoginBusy === source.id}
+                        aria-describedby={`crawler-connection-helper-${source.id}`}
+                      />
+                      <small id={`crawler-connection-helper-${source.id}`} className="source-oauth-helper">
+                        Mỗi tên dùng một profile trình duyệt riêng; không phải cookie.
+                      </small>
                       {crawlerLoginErrors[source.id] && (
                         <span className="source-oauth-error" role="alert">
                           {crawlerLoginErrors[source.id]}

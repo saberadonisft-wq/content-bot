@@ -31,7 +31,7 @@ def prepare_sync_candidate(voice, clip, proposal: dict, *, source: Path, checksu
             trim_end_ms=proposal['trim_end_ms'], rate=proposal['suggested_rate'],
             cache_dir=cache_dir / 'audio', cancel=cancel, lease_stack=leases)
         output = cache_dir / 'audio' / prepared['filename']
-        inspected = inspect_dubbed_speech(output, normalized_text(clip.spoken_text, voice.pronunciation), checksum=prepared['checksum'],
+        inspected = inspect_dubbed_speech(output, normalized_text(clip.spoken_text, voice.pronunciation, voice.text_normalization), checksum=prepared['checksum'],
             cache_dir=cache_dir / 'evidence', model_dir=model_dir, whisper_model=whisper_model, cancel=cancel)
     result = {'audio': prepared, 'inspection': inspected, 'issues': list(inspected['issues']),
               'state': 'needs_review', 'playback_rate': 1, 'applied': False}

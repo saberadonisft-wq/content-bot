@@ -21,10 +21,17 @@ dependencies = [
   "numpy==2.3.5; python_version < '3.12'",
   "numpy==2.5.1; python_version >= '3.12'",
   "onnxruntime==1.28.0",
+  "rapidocr-onnxruntime==1.2.3",
+  "av==18.0.0",
 ]
 
 [project.optional-dependencies]
 alignment = ["faster-whisper==1.2.1"]
+alignment-gpu = [
+  "faster-whisper==1.2.1",
+  "nvidia-cublas-cu12==12.9.2.10",
+  "nvidia-cuda-nvrtc-cu12==12.9.86",
+]
 browser = ["playwright==1.61.0"]
 dev = ["pytest==8.4.2", "pytest-asyncio==0.26.0", "ruff==0.16.1", "mongomock==4.3.0", "httpx2==2.12.0"]
 

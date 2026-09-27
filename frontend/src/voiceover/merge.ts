@@ -31,7 +31,7 @@ export function mergeVoiceDocument(base: VoiceDocument | null, local: VoiceDocum
     clips: Object.values(merged.clips).filter((clip): clip is VoiceDocument['clips'][number] => !!clip)
       .sort((a, b) => a.start_ms - b.start_ms) };
   if (result.clips.some(clip => clip.sync?.alignment)) {
-    const generationChanged = !equal([result.profile, result.pronunciation], [remote.profile, remote.pronunciation]);
+    const generationChanged = !equal([result.profile, result.pronunciation, result.text_normalization ?? 'off'], [remote.profile, remote.pronunciation, remote.text_normalization ?? 'off']);
     result.clips = refreshTiming(result.clips.map(clip => generationChanged && clip.sync?.alignment
       ? { ...clip, sync: { ...clip.sync, alignment: null } } : clip));
   }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 from contextlib import asynccontextmanager
 
@@ -8,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api import insights, items, runs, subtitles, videos
+from .api import acquisition, insights, items, runs, subtitles, videos
 from .api.catalog import build_catalog_router
 from .api.comments import build_comments_router
 from .api.crawler_data import build_crawler_data_router
@@ -23,6 +24,7 @@ from .config import settings
 from .services.http_pool import PoolScope, use_pool_scope
 from .services.subtitle_jobs import (
     SubtitleJobQueueFull,
+    SubtitleJobStorageError,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,17 @@ async def job_queue_full_handler(_request, _error):
             "detail": "Hàng đợi xử lý đang đầy hoặc ứng dụng đang đóng. Vui lòng thử lại sau."
         },
         headers={"Retry-After": "2"},
+    )
+
+
+async def job_storage_error_handler(_request, error):
+    full = error.errno in {errno.ENOSPC, errno.EDQUOT}
+    return JSONResponse(
+        status_code=507 if full else 503,
+        content={"detail": (
+            "Không đủ dung lượng để lưu tác vụ. Hãy giải phóng dung lượng rồi thử lại."
+            if full else "Không lưu được tác vụ. Hãy kiểm tra quyền ghi thư mục dữ liệu rồi thử lại."
+        )},
     )
 
 
@@ -122,6 +135,7 @@ def create_app(services_factory=None, *, scheduler: bool = True) -> FastAPI:
         return getattr(services, name)
 
     application.add_exception_handler(SubtitleJobQueueFull, job_queue_full_handler)
+    application.add_exception_handler(SubtitleJobStorageError, job_storage_error_handler)
     application.middleware("http")(verify_auth_token_middleware)
     application.middleware("http")(request_http_scope)
     for api_router in (
@@ -130,6 +144,7 @@ def create_app(services_factory=None, *, scheduler: bool = True) -> FastAPI:
         insights.router,
         subtitles.router,
         videos.router,
+        acquisition.router,
     ):
         application.include_router(api_router)
     application.include_router(
@@ -162,7 +177,8 @@ def create_app(services_factory=None, *, scheduler: bool = True) -> FastAPI:
     application.include_router(credentials_router)
     application.include_router(
         build_voiceover_router(lambda: resource("voiceover_manager"),
-            sync_service_provider=lambda: resource("gemini_subtitle_service"))
+            sync_service_provider=lambda: resource("gemini_subtitle_service"),
+            separation_jobs_provider=lambda: resource("separation_jobs"))
     )
     application.add_middleware(
         CORSMiddleware,

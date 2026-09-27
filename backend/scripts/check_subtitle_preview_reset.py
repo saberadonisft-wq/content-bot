@@ -1,8 +1,8 @@
 """Browser regression: real workspace and libass worker must forget the previous video."""
 import json
-from io import BytesIO
 import subprocess
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
 import imageio_ffmpeg

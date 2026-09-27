@@ -200,3 +200,40 @@ def test_login_api_starts_and_stops_visible_session(
         assert status.json()["state"] == "waiting_for_user"
         stopped = client.delete("/api/v1/crawler/profiles/douyin/login")
         assert stopped.json()["state"] == "cancelled"
+
+
+def test_login_manager_keeps_connection_profiles_and_observations_separate(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    opened: list[str] = []
+
+    async def fake_login(source_id: str, **kwargs) -> None:
+        del source_id
+        opened.append(kwargs["account_ref"])
+
+    async def fake_probe(source_id: str, **kwargs):
+        del source_id
+        assert kwargs["account_ref"] == "account one"
+        return {"schema_version": "cbce.dom-structure.v1", "element_count": 1}
+
+    monkeypatch.setattr("app.services.crawler_login.open_manual_login", fake_login)
+    monkeypatch.setattr("app.services.crawler_login.probe_dom", fake_probe)
+
+    async def run():
+        manager = CrawlerLoginManager()
+        await manager.start(
+            "weibo", timeout_seconds=60, connection_id=" Account One "
+        )
+        custom_key = next(key for key in manager._tasks if key != "weibo")
+        await manager._tasks[custom_key]
+        return manager.status("weibo", connection_id="account one")
+
+    result = asyncio.run(run())
+
+    assert opened == ["account one"]
+    assert result.connection_id == "account one"
+    assert result.observation_ready is True
+    assert list(
+        (tmp_path / "data/cbce-dom-observations").glob("weibo-*-latest.json")
+    )

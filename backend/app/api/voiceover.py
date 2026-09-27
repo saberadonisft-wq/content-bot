@@ -5,12 +5,19 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
+from ..config import settings
 from ..middleware.auth import get_current_user
+from ..services.subtitle_jobs import SubtitleJobManager
 from ..services.subtitle_render import SubtitleRenderError
+from ..services.vocal_audio import ffmpeg as separation_ffmpeg
+from ..services.vocal_separator import SEPARATOR_VERSION
+from ..services.vocal_separator_supervisor import run_vocal_separation_job
 from ..services.voiceover.audio import convert_reference
 from ..services.voiceover.manager import VoiceManager
 from ..services.voiceover.mix import export_voice_audio
@@ -18,6 +25,7 @@ from ..services.voiceover.models import (
     AudioExportRequest,
     PreviewRequest,
     StartJob,
+    TextPreviewRequest,
     VoiceClip,
     VoiceDocument,
     VoiceProfile,
@@ -28,12 +36,28 @@ from ..services.voiceover.packages import (
     import_package,
 )
 from ..services.voiceover.quiet_analysis import analyze_quiet_edges
-from ..services.voiceover.store import read_json, write_json
+from ..services.voiceover.separation_store import (
+    SeparationStore,
+    SeparationStoreError,
+    sha256_file,
+)
+from ..services.voiceover.store import digest, normalized_text, read_json, write_json
+from .media_paths import _uploaded_video_path
+
+
+class SeparationRequest(BaseModel):
+    method: Literal["demucs", "center_reduction"] = "demucs"
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+
+
+class BackgroundStemSelection(BaseModel):
+    gain: float = Field(default=1, ge=0, le=2)
 
 
 def build_voiceover_router(
     manager: VoiceManager | Callable[[], VoiceManager],
     *, sync_service_provider=None,
+    separation_jobs_provider: Callable[[], SubtitleJobManager] | None = None,
 ) -> APIRouter:
     manager_provider = manager if callable(manager) else lambda: manager
     router = APIRouter(prefix="/api/v1/voiceover", tags=["voiceover"])
@@ -44,6 +68,92 @@ def build_voiceover_router(
             from ..services.voiceover.sync_generation import finish_generation_sync
             manager.sync_runner = lambda active_manager, owner_id, job, persist: finish_generation_sync(
                 active_manager, sync_service_provider(), owner_id, job, persist, settings=settings)
+
+    def separation_store(manager) -> SeparationStore:
+        return SeparationStore(
+            manager.store.root / "separation-cache",
+            max_entries=settings.content_bot_separation_cache_max_entries,
+            max_bytes=settings.content_bot_separation_cache_max_bytes,
+        )
+
+    def separation_public(project: str, manifest: dict) -> dict:
+        return {
+            "stem_id": manifest["id"],
+            "method": manifest.get("method"),
+            "model": manifest.get("model"),
+            "device": manifest.get("device"),
+            "source_fingerprint": manifest.get("source_fingerprint"),
+            "source_audio_checksum": manifest.get("source_audio_checksum"),
+            "warnings": manifest.get("warnings", []),
+            "stems": {
+                name: {
+                    "checksum": value["checksum"],
+                    "duration_ms": value["metadata"]["duration_ms"],
+                    "sample_rate": value["metadata"]["sample_rate"],
+                    "channels": value["metadata"]["channels"],
+                    "url": f"/projects/{project}/separations/stems/{manifest['id']}/{name}",
+                }
+                for name, value in manifest.get("stems", {}).items()
+            },
+        }
+
+    def _separation_job_runner(owner: str, project: str, request: SeparationRequest,
+                               manager: VoiceManager):
+        document = manager.store.get_document(owner, project)
+        source_fingerprint = document.video_fingerprint
+        model_name = settings.content_bot_demucs_model if request.method == "demucs" else None
+        cache_key = digest({
+            "version": SEPARATOR_VERSION,
+            "source_fingerprint": source_fingerprint,
+            "method": request.method,
+            "device": request.device,
+            "model": model_name,
+        })
+
+        def run(context):
+            store = separation_store(manager)
+            cached = store.find_cached(owner, cache_key=cache_key)
+            if cached:
+                context.update(100, "cache", "Đã dùng lại stem tách nền đã kiểm tra")
+                return separation_public(project, cached)
+            video = _uploaded_video_path(project)
+            owner_root = manager.store.owner_root(owner)
+            owner_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="separation-source-", dir=owner_root) as temp:
+                audio = Path(temp) / "source.wav"
+                separation_ffmpeg(
+                    ["-i", video, "-map", "0:a:0", "-vn", "-ac", "2", "-ar", "44100",
+                     "-c:a", "pcm_s16le", audio],
+                    context=context,
+                    timeout_seconds=settings.content_bot_separation_timeout_seconds,
+                )
+                source_audio_checksum = sha256_file(audio)
+                cached = store.find_cached(owner, cache_key=cache_key)
+                if cached:
+                    context.update(100, "cache", "Đã dùng lại stem tách nền đã kiểm tra")
+                    return separation_public(project, cached)
+                with tempfile.TemporaryDirectory(prefix="separation-output-", dir=owner_root) as output:
+                    result = run_vocal_separation_job(
+                        audio,
+                        Path(output),
+                        context=context,
+                        timeout_seconds=settings.content_bot_separation_timeout_seconds,
+                        prefer_demucs=request.method == "demucs",
+                        device=request.device,
+                        model_name=model_name or "htdemucs",
+                        model_repo=settings.content_bot_demucs_model_repo,
+                    )
+                    manifest = store.publish(
+                        owner,
+                        source_fingerprint=source_fingerprint,
+                        source_audio_checksum=source_audio_checksum,
+                        cache_key=cache_key,
+                        result=result,
+                    )
+                    context.update_details({"stem_id": manifest["id"], "method": manifest["method"]})
+                    return separation_public(project, manifest)
+
+        return run
 
     def owner(user=Depends(get_current_user)):
         return str(user["sub"])
@@ -181,6 +291,121 @@ def build_voiceover_router(
             reverse=True,
         )[:10]
 
+    @router.get("/projects/{project}/separations")
+    def list_separations(project: str, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
+        document = checked(lambda: store.get_document(user, project))
+        separations = separation_store(manager)
+        root = separations._directory(user)
+        rows = []
+        for path in root.glob("[a-f0-9]*.json"):
+            try:
+                manifest = separations.get(user, path.stem)
+            except (OSError, ValueError, SeparationStoreError):
+                continue
+            if manifest.get("source_fingerprint") == document.video_fingerprint:
+                rows.append(separation_public(project, manifest))
+        return sorted(rows, key=lambda row: row["stem_id"], reverse=True)[:20]
+
+    @router.post("/projects/{project}/separations")
+    def start_separation(project: str, request: SeparationRequest, user=Depends(owner)):
+        if separation_jobs_provider is None:
+            raise HTTPException(503, "Bộ xử lý tách nền chưa được khởi động.")
+        manager = manager_provider()
+        checked(lambda: manager.store.get_document(user, project))
+        model = settings.content_bot_demucs_model if request.method == "demucs" else None
+        key = digest({
+            "owner": user,
+            "project": project,
+            "version": SEPARATOR_VERSION,
+            "source": manager.store.get_document(user, project).video_fingerprint,
+            "method": request.method,
+            "device": request.device,
+            "model": model,
+        })
+        jobs = separation_jobs_provider()
+        return checked(lambda: jobs.submit(
+            "separation",
+            key,
+            _separation_job_runner(user, project, request, manager),
+            details={"project_id": project, "owner": user},
+        ))
+
+    @router.get("/projects/{project}/separations/jobs/{job_id}")
+    def get_separation_job(project: str, job_id: str, user=Depends(owner)):
+        if separation_jobs_provider is None:
+            raise HTTPException(503, "Bộ xử lý tách nền chưa được khởi động.")
+        manager = manager_provider()
+        checked(lambda: manager.store.get_document(user, project))
+        job = separation_jobs_provider().get(job_id)
+        if (not job or job.get("kind") != "separation"
+                or job.get("details", {}).get("project_id") != project
+                or job.get("details", {}).get("owner") != user):
+            raise HTTPException(404, "Không tìm thấy tác vụ tách nền.")
+        return job
+
+    @router.post("/projects/{project}/separations/jobs/{job_id}/cancel")
+    def cancel_separation_job(project: str, job_id: str, user=Depends(owner)):
+        if separation_jobs_provider is None:
+            raise HTTPException(503, "Bộ xử lý tách nền chưa được khởi động.")
+        manager = manager_provider()
+        checked(lambda: manager.store.get_document(user, project))
+        job = separation_jobs_provider().get(job_id)
+        if (not job or job.get("kind") != "separation"
+                or job.get("details", {}).get("project_id") != project
+                or job.get("details", {}).get("owner") != user):
+            raise HTTPException(404, "Không tìm thấy tác vụ tách nền.")
+        return separation_jobs_provider().cancel(job_id)
+
+    @router.get("/projects/{project}/separations/stems/{stem_id}/{kind}")
+    def get_separation_stem(project: str, stem_id: str, kind: str, user=Depends(owner)):
+        manager = manager_provider()
+        document = checked(lambda: manager.store.get_document(user, project))
+        try:
+            separation = separation_store(manager).get(user, stem_id)
+            if separation.get("source_fingerprint") != document.video_fingerprint:
+                raise SeparationStoreError("Stem không thuộc video hiện tại.")
+            path = separation_store(manager).file(user, stem_id, kind)
+        except (OSError, ValueError, SeparationStoreError) as exc:
+            raise HTTPException(404, "Không tìm thấy stem tách nền.") from exc
+        return FileResponse(path, media_type="audio/wav", filename=f"{kind}.wav")
+
+    @router.post("/projects/{project}/background-stems/{stem_id}/select")
+    def select_background_stem(project: str, stem_id: str, request: BackgroundStemSelection,
+                               user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
+        document = checked(lambda: store.get_document(user, project))
+        try:
+            manifest = separation_store(manager).get(user, stem_id)
+            value = manifest["stems"]["background"]
+            if manifest.get("source_fingerprint") != document.video_fingerprint:
+                raise SeparationStoreError("Stem không thuộc video hiện tại.")
+        except (OSError, ValueError, SeparationStoreError, KeyError) as exc:
+            raise HTTPException(409, "Stem tách nền đã cũ hoặc không hợp lệ.") from exc
+        document.mix.background_stem_id = stem_id
+        document.mix.background_stem_checksum = value["checksum"]
+        document.mix.background_source_fingerprint = manifest["source_fingerprint"]
+        document.mix.background_gain = request.gain
+        return checked(lambda: store.save_document(user, document))
+
+    @router.delete("/projects/{project}/background-stems/selection")
+    def clear_background_stem(project: str, user=Depends(owner)):
+        manager = manager_provider()
+        store = manager.store
+        document = checked(lambda: store.get_document(user, project))
+        document.mix.background_stem_id = None
+        document.mix.background_stem_checksum = None
+        document.mix.background_source_fingerprint = None
+        document.mix.background_gain = 1
+        return checked(lambda: store.save_document(user, document))
+
+    @router.post('/text-preview')
+    def text_preview(request: TextPreviewRequest, user=Depends(owner)):
+        text = normalized_text(request.text,request.pronunciation,request.text_normalization)
+        return {'text':text,'normalizer':request.text_normalization,'changed':text != request.text}
+
     @router.post("/preview")
     def preview(request: PreviewRequest, user=Depends(owner)):
         manager = manager_provider()
@@ -190,6 +415,8 @@ def build_voiceover_router(
             project_id=project,
             video_fingerprint="preview",
             profile=request.profile,
+            pronunciation=request.pronunciation,
+            text_normalization=request.text_normalization,
             clips=[
                 VoiceClip(
                     id="preview",

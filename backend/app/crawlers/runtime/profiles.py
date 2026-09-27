@@ -33,6 +33,23 @@ class ProfileRef:
     owned: bool = True
 
 
+def normalize_account_ref(account_ref: str = "default") -> str:
+    """Return a bounded, path-independent browser account identity.
+
+    Account references are deliberately normalized before they are hashed into
+    a profile directory.  Callers never get to choose a filesystem segment,
+    and equivalent references cannot accidentally create multiple sessions.
+    """
+    if not isinstance(account_ref, str):
+        raise TypeError("Account reference must be a string")
+    normalized = " ".join(account_ref.strip().casefold().split())
+    if not normalized or len(normalized) > 512:
+        raise ValueError("Account reference must contain 1-512 characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise ValueError("Account reference cannot contain control characters")
+    return normalized
+
+
 class ProfileNamespace:
     def __init__(
         self,
@@ -55,9 +72,7 @@ class ProfileNamespace:
         canonical = self.registry.resolve_id(source_id)
         if self.registry.get(canonical) is None or not _SAFE_ID.fullmatch(canonical):
             raise ValueError(f"Unknown or unsafe source ID: {source_id!r}")
-        normalized_account = " ".join(account_ref.strip().casefold().split())
-        if not normalized_account or len(normalized_account) > 512:
-            raise ValueError("Account reference must contain 1-512 characters")
+        normalized_account = normalize_account_ref(account_ref)
         account_key = hashlib.sha256(normalized_account.encode("utf-8")).hexdigest()[:24]
         source_root = (self.root / canonical).resolve()
         if (source_root / _DELETE_MARKER).exists():

@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +47,28 @@ class Settings(BaseSettings):
     content_bot_media_probe_timeout_seconds: int = 120
     content_bot_thumbnail_timeout_seconds: int = 90
     content_bot_subtitle_job_concurrency: int = 1
+    content_bot_subtitle_ocr_device_policy: Literal["auto", "cpu", "cuda"] = "auto"
+    content_bot_subtitle_ocr_prefetch_frames: bool = True
+    content_bot_subtitle_ocr_glyph_cache: bool = True
+    content_bot_subtitle_ocr_selective_refinement: bool = True
+    content_bot_subtitle_ocr_recognition_reuse: bool = True
+    content_bot_subtitle_ocr_refinement_batch_size: int = Field(default=4, ge=1, le=8)
+    content_bot_subtitle_ocr_verify_interval_ms: int = Field(default=500, ge=50, le=1000)
+    content_bot_subtitle_ocr_min_reuse_confidence: float = Field(default=0.85, ge=0.7, le=1.0)
+    content_bot_subtitle_ocr_decode_threads: int = Field(default=2, ge=0, le=8)
+    content_bot_subtitle_ocr_crop_before_bgr: bool = True
+    content_bot_subtitle_ocr_gpu_site_packages: Path = Path(
+        "backend/runtimes/ocr_gpu/site-packages"
+    )
+    content_bot_subtitle_ocr_worker_timeout_seconds: int = Field(
+        default=1800, ge=60, le=86400
+    )
+    content_bot_separation_job_concurrency: int = 1
+    content_bot_separation_timeout_seconds: int = Field(default=7200, ge=30, le=86400)
+    content_bot_demucs_model: str = "htdemucs"
+    content_bot_demucs_model_repo: Path | None = None
+    content_bot_separation_cache_max_entries: int = Field(default=64, ge=1, le=10000)
+    content_bot_separation_cache_max_bytes: int = Field(default=4 * 1024 * 1024 * 1024, ge=1)
     content_bot_alignment_engine: str = "energy"
     content_bot_alignment_whisper_model: str = "small"
     content_bot_alignment_whisper_device: str = "auto"
@@ -156,6 +179,12 @@ class Settings(BaseSettings):
     tiktok_open_id: str = ""
     tiktok_authorized_username: str = ""
     tiktok_granted_scopes: str = ""
+    # Keep the local development checkout compatible with the existing UI. A
+    # production rollout can set this false before enabling a canary.
+    content_bot_acquisition_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("CONTENT_BOT_ACQUISITION_ENABLED"),
+    )
     content_bot_cbce_enabled: bool = False
     content_bot_cbce_profile_root: Path = Path("data/browser-profiles-v2")
     content_bot_cbce_event_queue_size: int = 100
@@ -203,6 +232,11 @@ class Settings(BaseSettings):
                 return self.content_bot_sqlite_path.resolve()
             return (PROJECT_ROOT / self.content_bot_sqlite_path).resolve()
         return self.data_dir / "content-bot.db"
+
+    @property
+    def subtitle_ocr_gpu_site_packages(self) -> Path:
+        path = self.content_bot_subtitle_ocr_gpu_site_packages
+        return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
 
 settings = Settings()

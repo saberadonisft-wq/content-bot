@@ -10,10 +10,11 @@ from app.crawlers.runtime import CancellationToken, CrawlerErrorCode, CrawlerFai
 
 
 class Node:
-    def __init__(self, *, text="", attrs=None, count=1) -> None:
+    def __init__(self, *, text="", attrs=None, count=1, visible=True) -> None:
         self.text = text
         self.attrs = attrs or {}
         self._count = count
+        self.visible = visible
 
     @property
     def first(self):
@@ -21,6 +22,9 @@ class Node:
 
     @property
     def last(self):
+        return self
+
+    def nth(self, _index):
         return self
 
     async def count(self):
@@ -31,6 +35,9 @@ class Node:
 
     async def inner_text(self):
         return self.text
+
+    async def is_visible(self):
+        return self.visible
 
 
 class Card:
@@ -43,6 +50,8 @@ class Card:
             return self.title
         if selector == "a[href*='/video/']":
             return self.link
+        if selector in ("img", "time", "[datetime]", ".bili-video-card__info--date", ".bili-video-card__info--bottom"):
+            return Node(count=0)
         raise AssertionError(selector)
 
 
@@ -72,6 +81,17 @@ class Page:
             return Node()
         if selector == ".vui_pagenation--btn-side":
             return self.side
+        raise AssertionError(selector)
+
+
+class LoginPage:
+    def locator(self, selector):
+        if selector == ".video-list .upload-video-card":
+            return Node(count=0)
+        if selector == ".vui_pagenation.video-pagination":
+            return Node(count=0)
+        if selector == ".login-tip-content":
+            return Node(count=1, visible=True)
         raise AssertionError(selector)
 
 
@@ -128,3 +148,15 @@ def test_creator_provider_ends_without_phantom_page() -> None:
     page = asyncio.run(run())
     assert page.next_cursor is None
     assert page.has_more is False
+
+
+def test_creator_provider_reports_login_gate_instead_of_parser_failure() -> None:
+    async def run():
+        provider = BilibiliDomCreatorProvider(None)
+        provider._page = LoginPage()
+        with pytest.raises(CrawlerFailure) as captured:
+            await provider._wait_for_creator_layout()
+        return captured.value
+
+    error = asyncio.run(run())
+    assert error.code is CrawlerErrorCode.AUTH_REQUIRED

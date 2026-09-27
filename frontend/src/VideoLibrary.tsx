@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Download, FileKey, Film, Link2, LoaderCircle, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { Check, Download, FileKey, Film, Link2, LoaderCircle, Pause, Play, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { api, type VideoDownloadJob, type VideoDownloadQuality, type VideoLibraryItem } from "./api";
 import { getAuthHeader } from "./transport/client";
 import { downloadLabel, durationLabel, extractVideoLinks, formatBytes, mediaUrl, videoMatches } from "./video-library/model";
@@ -17,6 +17,7 @@ export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
   const [quality, setQuality] = useState<VideoDownloadQuality>("1080");
   const [autoDownload, setAutoDownload] = useState(true);
   const [cookies, setCookies] = useState<File | null>(null);
+  const [connectionId, setConnectionId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const submissionLock = useRef(false);
   const [formError, setFormError] = useState("");
@@ -84,7 +85,12 @@ export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
     setMessage("");
     try {
       if (cookies && cookies.size > 1_000_000) throw new Error("File cookies tối đa 1 MB.");
-      const records = await api.downloadVideos(urls, selectedQuality, cookies ? await cookies.text() : undefined);
+      const records = await api.downloadVideos(
+        urls,
+        selectedQuality,
+        connectionId.trim() ? undefined : (cookies ? await cookies.text() : undefined),
+        connectionId,
+      );
       setJobs(current => [...records, ...current.filter(job => !records.some(record => record.id === job.id))]);
       const completed = records.filter(job => job.state === "succeeded").length;
       setMessage(completed === records.length ? "Video này đã có trong thư viện." : `Đã nhận ${records.length} link. Tiến độ tải hiển thị bên dưới.`);
@@ -106,6 +112,14 @@ export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
     } catch (error) { setError(errorMessage(error)); }
     finally { setActionIds(current => current.filter(id => id !== job.id)); }
   };
+  const pause = async (job: VideoDownloadJob) => {
+    setActionIds(current => [...current, job.id]);
+    try {
+      const paused = await api.pauseVideoDownload(job.id);
+      setJobs(current => current.map(item => item.id === paused.id ? paused : item));
+    } catch (error) { setError(errorMessage(error)); }
+    finally { setActionIds(current => current.filter(id => id !== job.id)); }
+  };
   const retry = async (job: VideoDownloadJob) => {
     if (submissionLock.current) return;
     submissionLock.current = true;
@@ -113,7 +127,10 @@ export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
     setFormError("");
     try {
       if (cookies && cookies.size > 1_000_000) throw new Error("File cookies tối đa 1 MB.");
-      const resumed = await api.retryVideoDownload(job.id, cookies ? await cookies.text() : undefined);
+      const cookieText = connectionId.trim() || job.connection_id ? undefined : (cookies ? await cookies.text() : undefined);
+      const resumed = job.state === "paused"
+        ? await api.resumeVideoDownload(job.id, cookieText, connectionId.trim() || job.connection_id || undefined)
+        : await api.retryVideoDownload(job.id, cookieText, connectionId.trim() || job.connection_id || undefined);
       setJobs(current => current.map(item => item.id === resumed.id ? resumed : item));
       setRefresh(value => value + 1);
     } catch (error) { setFormError(errorMessage(error)); }
@@ -180,6 +197,15 @@ export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
       setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
     } catch (error) { setError(errorMessage(error)); }
   };
+  const selectThumbnail = async (video: VideoLibraryItem) => {
+    try {
+      const result = await api.selectVideoThumbnail(video.id);
+      setVideos(current => current.map(item => videoKey(item) === videoKey(video)
+        ? { ...item, thumbnail_url: result.thumbnail_url }
+        : item));
+      setMessage(`Đã chọn thumbnail ở ${result.best_timestamp_s.toFixed(1)} giây cho “${video.title || video.filename}”.`);
+    } catch (error) { setError(errorMessage(error)); }
+  };
   const openPreview = (video: VideoLibraryItem) => {
     if (video.type === "scraped") { window.open(mediaUrl(video.video_url), "_blank", "noopener,noreferrer"); return; }
     setPreview(video);
@@ -234,8 +260,9 @@ export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
         <label className="vl-quality" htmlFor="vl-quality">Chất lượng <select id="vl-quality" value={quality} onChange={event => setQuality(event.target.value as VideoDownloadQuality)} disabled={submitting}>
           <option value="1080">Tối đa 1080p</option><option value="720">Tối đa 720p</option><option value="480">Tối đa 480p</option><option value="best">Cao nhất có thể</option>
         </select></label>
+        <label className="vl-quality" htmlFor="vl-connection">Profile Bilibili <input id="vl-connection" value={connectionId} maxLength={128} autoComplete="off" placeholder="Tùy chọn" disabled={submitting} onChange={event => setConnectionId(event.target.value)} /></label>
       </div>
-      <p className="vl-help" id="vl-link-help">Nhận cả link rút gọn b23.tv và nội dung chia sẻ có kèm link. Mỗi link tải một video; chất lượng tùy nguồn và tài khoản.</p>
+      <p className="vl-help" id="vl-link-help">Nhận cả link rút gọn b23.tv và nội dung chia sẻ có kèm link. Profile chỉ áp dụng cho Bilibili; chất lượng tùy nguồn và tài khoản.</p>
       <details className="vl-cookies"><summary><FileKey size={15} /> Video cần đăng nhập?</summary>
         <div><p>Chọn file cookies định dạng Netscape (.txt) xuất từ tài khoản của bạn trên nền tảng đó. Bản tạm chỉ dùng cho lượt tải này và được xóa khi xử lý xong.</p>
           <input ref={fileInput} aria-label="File cookies đăng nhập" type="file" accept=".txt" disabled={submitting} onChange={event => { setCookies(event.target.files?.[0] ?? null); setFormError(""); }} />
@@ -269,8 +296,11 @@ export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
             }}>Chọn cookies</button>
           </div>}
         </div>
-        {["queued", "running"].includes(job.state) ? <button className="vl-button vl-icon" type="button" aria-label={`Hủy tải ${job.title || job.platform}`} disabled={actionIds.includes(job.id)} onClick={() => void cancel(job)}><X size={18} /></button>
-          : ["failed", "canceled", "paused"].includes(job.state) ? <button className="vl-button vl-secondary" type="button" disabled={submitting} onClick={() => void retry(job)}><RefreshCw size={14} /> {job.state === "paused" ? "Tiếp tục" : "Thử lại"}</button> : null}
+        {["queued", "running"].includes(job.state) ? <div className="vl-recovery-actions">
+          <button className="vl-button vl-text" type="button" aria-label={`Tạm dừng tải ${job.title || job.platform}`} disabled={actionIds.includes(job.id)} onClick={() => void pause(job)}><Pause size={14} /> Tạm dừng</button>
+          <button className="vl-button vl-icon" type="button" aria-label={`Hủy tải ${job.title || job.platform}`} disabled={actionIds.includes(job.id)} onClick={() => void cancel(job)}><X size={18} /></button>
+        </div>
+          : ["failed", "canceled", "paused"].includes(job.state) ? <button className="vl-button vl-secondary" type="button" disabled={submitting} onClick={() => void retry(job)}>{job.state === "paused" ? <Play size={14} /> : <RefreshCw size={14} />} {job.state === "paused" ? "Tiếp tục" : "Thử lại"}</button> : null}
       </li>)}</ul>
     </section>}
 
@@ -304,7 +334,7 @@ export function VideoLibrary({ embedded = false }: { embedded?: boolean }) {
       {deleteNotice && <p className={deleteNotice.failed ? "vl-error" : "vl-success"} role={deleteNotice.failed ? "alert" : "status"}>{deleteNotice.text}</p>}
       {error && <div className="vl-error" role="alert">{error} <button className="vl-button vl-text" type="button" onClick={() => setRefresh(value => value + 1)}>Thử lại</button></div>}
       {loading ? <div className="vl-empty" role="status"><LoaderCircle className="spin" size={28} /> Đang tải thư viện…</div>
-        : filtered.length ? <><div className="vl-grid">{filtered.slice(0, visibleCount).map(video => <VideoCard key={videoKey(video)} video={video} selected={selectedKeys.has(videoKey(video))} selectionDisabled={deleting} onToggleSelect={() => toggleVideo(video)} onDelete={remove} onDownload={save} onPreview={openPreview} />)}</div>
+        : filtered.length ? <><div className="vl-grid">{filtered.slice(0, visibleCount).map(video => <VideoCard key={videoKey(video)} video={video} selected={selectedKeys.has(videoKey(video))} selectionDisabled={deleting} onToggleSelect={() => toggleVideo(video)} onDelete={remove} onDownload={save} onSelectThumbnail={selectThumbnail} onPreview={openPreview} />)}</div>
           {filtered.length > visibleCount && <button className="vl-button vl-secondary vl-load-more" type="button" onClick={() => setVisibleCount(count => count + 24)}>Xem thêm video</button>}</>
         : !error && <div className="vl-empty"><Film size={36} /><h3>{videos.length ? "Không tìm thấy video" : "Thư viện đang trống"}</h3><p>{videos.length ? "Thử từ khóa khác hoặc thay đổi bộ lọc." : "Dán link Bilibili hoặc một video khác ở trên để bắt đầu."}</p></div>}
     </section>

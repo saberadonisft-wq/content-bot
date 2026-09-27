@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from itertools import pairwise
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
@@ -145,7 +146,7 @@ def evaluate_quality(raw: str, cues: list[dict], chunk: dict) -> tuple[dict, lis
     for index, count in references.items():
         if count != 1:
             errors.append(f"Candidate {index}: matched {count} source displays; expected exactly one (unsupported/merged content).")
-    if any(a["start_ms"] > b["start_ms"] for a, b in zip(candidates, candidates[1:])):
+    if any(a["start_ms"] > b["start_ms"] for a, b in pairwise(candidates)):
         errors.append("Candidate segments are not in chronological order.")
     return report.model_dump(), errors
 

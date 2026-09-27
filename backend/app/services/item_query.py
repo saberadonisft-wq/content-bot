@@ -80,6 +80,9 @@ def item_output(item: dict, match: dict, analysis: dict | None = None) -> ItemOu
         trend_score=match.get("trend_score", 0), match_reasons=match.get("match_reasons", []),
         insights=analysis if analysis is not None else analyze_item(item),
         first_seen_at=item["first_seen_at"], last_seen_at=item["last_seen_at"],
+        caption_original=item.get("caption_original"),
+        caption_edited=item.get("caption_edited"),
+        caption_edited_at=item.get("caption_edited_at"),
     )
 
 

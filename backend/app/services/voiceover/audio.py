@@ -11,7 +11,7 @@ from pathlib import Path
 import imageio_ffmpeg
 
 
-def audio_metadata(path: Path) -> dict:
+def audio_metadata(path: Path, *, allow_silence: bool = False) -> dict:
     """Bounded-memory PCM validation and multi-resolution waveform peaks."""
     checksum = hashlib.sha256()
     with path.open("rb") as f:
@@ -32,7 +32,7 @@ def audio_metadata(path: Path) -> dict:
                 values.byteswap()
             peaks.append(round(max(abs(v) for v in values) / 32768, 3))
             total += len(values)
-        if total != frames or max(peaks, default=0) < 0.0001:
+        if total != frames or (not allow_silence and max(peaks, default=0) < 0.0001):
             raise ValueError("Audio bị cắt hoặc không có tín hiệu.")
     levels = [peaks]
     while len(levels[-1]) > 64:

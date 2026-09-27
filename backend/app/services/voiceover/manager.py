@@ -177,7 +177,7 @@ class VoiceManager:
                 {
                     "id": clip.id,
                     "generation_hash": key,
-                    "text": normalized_text(clip.spoken_text, document.pronunciation),
+                    "text": normalized_text(clip.spoken_text, document.pronunciation, document.text_normalization),
                 }
             )
         return {

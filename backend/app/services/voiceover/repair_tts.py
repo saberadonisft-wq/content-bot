@@ -52,7 +52,7 @@ def generate_repair_batch(manager, owner, voice, budget, candidates: list[dict],
         for index, (candidate, clip) in enumerate(zip(candidates, staged, strict=True)):
             key = digest({'repair_receipt': receipt, 'index': index, 'input': candidate})
             entries.append({'id': key, 'generation_hash': key,
-                            'text': normalized_text(clip.spoken_text, voice.pronunciation)})
+                            'text': normalized_text(clip.spoken_text, voice.pronunciation, voice.text_normalization)})
         manifest['clips'] = entries
         write_json(root / 'manifest.json', manifest)
         write_json(root / 'attempts.json', {'receipt_id': receipt, 'candidates': candidates,

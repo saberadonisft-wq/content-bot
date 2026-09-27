@@ -97,7 +97,7 @@ def run_repair_audio(store, *, owner, identifier, media, voice, subtitles, clip_
     write_json(target, record)
     if progress:
         progress(15, 'repair_audio', 'Đang kiểm tra lời đọc vừa tạo')
-    inspected = inspect_dubbed_speech(path, normalized_text(proposed.spoken_text, voice.pronunciation),
+    inspected = inspect_dubbed_speech(path, normalized_text(proposed.spoken_text, voice.pronunciation, voice.text_normalization),
         checksum=metadata['checksum'], model_dir=model_dir, whisper_model=dubbed_whisper_model,
         cache_dir=store.owner_root(owner) / 'dubbed-speech')
     result_row.update(dubbed_audio=inspected, issues=inspected['issues'])

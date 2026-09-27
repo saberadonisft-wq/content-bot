@@ -53,8 +53,8 @@ export function useVoiceover(project: string | null, fingerprint: string | undef
     const previous = current.current;
     const edited = fn(previous);
     const prior = new Map(previous.clips.map(c => [c.id, c]));
-    const generationChanged = JSON.stringify([edited.profile, edited.pronunciation])
-      !== JSON.stringify([previous.profile, previous.pronunciation]);
+    const generationChanged = JSON.stringify([edited.profile, edited.pronunciation, edited.text_normalization ?? 'off'])
+      !== JSON.stringify([previous.profile, previous.pronunciation, previous.text_normalization ?? 'off']);
     const clips = edited.clips.map(clip => {
       if (generationChanged && clip.sync?.alignment) clip = { ...clip, sync: { ...clip.sync, alignment: null } };
       const old = prior.get(clip.id);

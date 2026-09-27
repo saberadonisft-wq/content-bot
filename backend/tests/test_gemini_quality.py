@@ -1,12 +1,15 @@
 import json
 
 import pytest
-
-from app.services.gemini_merge import decode_chunk
-from app.services.gemini_quality import cached_quality_valid, evaluate_quality, quality_stamp
-from app.services.gemini_subtitles import GeminiSubtitleError
 from test_gemini_pipeline import cue, pipeline_fixture
 
+from app.services.gemini_merge import decode_chunk
+from app.services.gemini_quality import (
+    cached_quality_valid,
+    evaluate_quality,
+    quality_stamp,
+)
+from app.services.gemini_subtitles import GeminiSubtitleError
 
 CHUNK = {"chunk_id": "c1", "media_start_ms": 948938, "media_end_ms": 1081782}
 

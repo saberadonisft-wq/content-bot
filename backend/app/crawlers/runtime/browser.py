@@ -90,6 +90,7 @@ class BrowserSession:
         *,
         owner_id: str,
         close_timeout_seconds: float = 10,
+        ownership_registry: object | None = None,
     ) -> None:
         if close_timeout_seconds <= 0:
             raise ValueError("Browser close timeout must be positive")
@@ -99,6 +100,8 @@ class BrowserSession:
         self.state = BrowserSessionState.NEW
         self._lock = ProfileLock(request.profile, owner_id=owner_id)
         self._handle: BrowserHandle | None = None
+        self._ownership_registry = ownership_registry
+        self._registered_ownership: object | None = None
 
     @property
     def handle(self) -> BrowserHandle:
@@ -118,12 +121,14 @@ class BrowserSession:
             cancellation.raise_if_cancelled()
             if self._handle.closed:
                 raise RuntimeError("Browser driver returned a closed handle")
+            self._register_process_ownership(self._handle)
             self.state = BrowserSessionState.OPEN
             return self._handle
         except BaseException:
             self.state = BrowserSessionState.FAILED
             if self._handle is not None and not self._handle.closed:
                 await self._ensure_closed(self._handle)
+            self._unregister_process_ownership()
             self._lock.release()
             raise
 
@@ -137,8 +142,33 @@ class BrowserSession:
         handle = self._handle
         if handle is not None and not handle.closed:
             await self._ensure_closed(handle)
+        self._unregister_process_ownership()
         self._lock.release()
         self.state = BrowserSessionState.CLOSED
+
+    def _register_process_ownership(self, handle: BrowserHandle) -> None:
+        ownership = getattr(handle, "process_ownership", None)
+        if ownership is None:
+            return
+        if self._ownership_registry is None:
+            # Import lazily so the provider-neutral crawler runtime does not
+            # require application services for sessions that expose no PID.
+            from app.services.system_hygiene import BROWSER_PROCESS_OWNERSHIP
+
+            self._ownership_registry = BROWSER_PROCESS_OWNERSHIP
+        register = getattr(self._ownership_registry, "register", None)
+        if not callable(register):
+            raise TypeError("ownership_registry must expose register()")
+        register(ownership)
+        self._registered_ownership = ownership
+
+    def _unregister_process_ownership(self) -> None:
+        if self._registered_ownership is None or self._ownership_registry is None:
+            return
+        unregister = getattr(self._ownership_registry, "unregister", None)
+        if callable(unregister):
+            unregister(self._registered_ownership)
+        self._registered_ownership = None
 
     async def _ensure_closed(self, handle: BrowserHandle) -> None:
         try:

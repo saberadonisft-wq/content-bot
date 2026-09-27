@@ -16,6 +16,10 @@ from app.crawlers.runtime import (
     ProfileInUse,
     ProfileNamespace,
 )
+from app.services.system_hygiene import (
+    BrowserProcessOwnership,
+    BrowserProcessOwnershipRegistry,
+)
 
 
 class FakeHandle:
@@ -39,6 +43,13 @@ class FakeHandle:
         self.force_close_calls += 1
         self._closed = True
 
+
+class OwnedFakeHandle(FakeHandle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.process_ownership = BrowserProcessOwnership(
+            pid=987, creation_time="fixture-created", parent_pid=12
+        )
 
 class FakeDriver:
     def __init__(self, handle: FakeHandle | None = None, *, fail: bool = False) -> None:
@@ -118,6 +129,24 @@ def test_browser_close_timeout_forces_owned_handle_closed(tmp_path: Path) -> Non
     assert handle.close_calls == 1
     assert handle.force_close_calls == 1
     assert handle.closed is True
+
+
+def test_browser_session_registers_and_releases_driver_process_identity(tmp_path: Path) -> None:
+    async def run():
+        registry = BrowserProcessOwnershipRegistry()
+        handle = OwnedFakeHandle()
+        session = BrowserSession(
+            FakeDriver(handle), launch_request(tmp_path), owner_id="run-owned",
+            ownership_registry=registry,
+        )
+        await session.open(CancellationToken())
+        during = registry.snapshot()
+        await session.close()
+        return during, registry.snapshot()
+
+    during, after = asyncio.run(run())
+    assert during == (BrowserProcessOwnership(987, "fixture-created", 12),)
+    assert after == ()
 
 
 def test_browser_session_rejects_external_profile_and_cancelled_open(tmp_path: Path) -> None:

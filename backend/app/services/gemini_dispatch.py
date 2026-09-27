@@ -37,8 +37,8 @@ def classify_failure(response: httpx.Response, operation: str, *, now: datetime 
     details = error.get("details", [])
     details = details if isinstance(details, list) else []
     reasons = {str(d.get("reason", "")) for d in details if isinstance(d, dict)}
-    if code == 429:
-        wait = 3.0
+    if code == 429 or (code == 503 and operation == "generateContent"):
+        wait = 3.0 if code == 429 else 0.0
         header = response.headers.get("Retry-After", "")
         try:
             wait = max(wait, float(header))
@@ -67,6 +67,8 @@ def classify_failure(response: httpx.Response, operation: str, *, now: datetime 
                     quota_kind = "daily"
                 elif quota_kind != "daily" and ("perminute" in metric.lower() or "per_minute" in metric.lower()):
                     quota_kind = "minute"
+        if code == 503:
+            return ApiFailure(code, operation, "overloaded", wait)
         if quota_kind == "daily":
             # Never hammer a daily limit. Unknown reset timezone: conservative 24h cooldown.
             wait = max(wait, 86400)
@@ -75,11 +77,15 @@ def classify_failure(response: httpx.Response, operation: str, *, now: datetime 
         return ApiFailure(code, operation, "authentication")
     if code == 403:
         return ApiFailure(code, operation, "permission")
-    if operation == "generateContent":
-        if code == 503:
-            return ApiFailure(code, operation, "overloaded")
-        if code in (400, 404) and ("model" in message and any(s in message for s in ("not found", "does not exist", "not supported for generatecontent", "does not support"))):
-            return ApiFailure(code, operation, "model_unavailable")
+    if (
+        operation == "generateContent"
+        and code in (400, 404)
+        and "model" in message
+        and any(s in message for s in (
+            "not found", "does not exist", "not supported for generatecontent", "does not support"
+        ))
+    ):
+        return ApiFailure(code, operation, "model_unavailable")
     return ApiFailure(code, operation, "transient" if code >= 500 else "request")
 
 

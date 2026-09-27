@@ -1,8 +1,8 @@
 import { useSubtitleImport } from "./subtitles/useSubtitleImport";
-import { GeminiReviewPanel } from "./subtitles/GeminiReviewPanel";
 import { SubtitleVersionsPanel } from "./subtitles/SubtitleVersionsPanel";
 import { GeminiAdvancedOptions } from "./subtitles/GeminiAdvancedOptions";
 import { GeminiChunkProgress } from "./subtitles/GeminiChunkProgress";
+import { SubtitlePipelineBar, type SubtitlePipelineStage } from "./subtitles/SubtitlePipelineBar";
 import { useRenderedVideoDownload } from "./subtitles/useRenderedVideoDownload";
 import type { DesktopSelectedVideo } from "./desktopLiveWall";
 import {
@@ -13,16 +13,20 @@ AudioLines,
 Check,
 Circle,
 Copy,
+Download,
 EyeOff,
 FileText,
 Image,
+Languages,
 LayoutTemplate,
 LoaderCircle,
+Mic,
 Minus,
 Moon,
 Move,
 RectangleHorizontal,
 RefreshCw,
+ScanText,
 Sparkles,
 Square,
 Trash2,
@@ -41,6 +45,7 @@ type GeminiSubtitleJob,
 type MediaMetadata,
 type SubtitleBurnOptions,
 type SubtitleCueV2,
+type SubtitleDocumentV2,
 type GeminiSubtitleOptions,
 type SubtitleAlignmentOptions,
 type SubtitleJob,
@@ -55,8 +60,15 @@ SubtitleWorkspace,
 type SubtitleWorkspaceHandle,
 } from "./subtitles/SubtitleWorkspace";
 import { VirtualSubtitleList } from "./subtitles/VirtualSubtitleList";
+import { SourceSubtitleEditor } from './subtitles/SourceSubtitleEditor';
+import { SceneSplitPanel } from './subtitles/SceneSplitPanel';
+import { useSourceDocument } from './subtitles/source-document';
+import { useExtractionJobs } from './subtitles/useExtractionJobs';
+import { useAsrRuntime } from './subtitles/useAsrRuntime';
+import { asrReadiness as getAsrReadiness } from './subtitles/asr-readiness';
 import {
 readSavedDraft,
+DEFAULT_EXTRACTION_SETTINGS,
 type SavedSubtitleDraft,
 } from "./subtitles/draft";
 import {
@@ -83,6 +95,8 @@ type OverlayLayout,
 type SubtitleMaskEffect,
 type SubtitleMaskRegion,
 type SubtitleMaskShape,
+type ExtractionMode,
+type SubtitleOcrRegion,
 type VideoClip,
 } from "./subtitles/types";
 import { SUBTITLE_DRAFT_KEY,useDraftPersistence } from "./subtitles/useDraftPersistence";
@@ -96,6 +110,12 @@ splitVideoClip,
 import { VoicePanel } from "./voiceover/VoicePanel";
 import { useVoiceover } from "./voiceover/useVoiceover";
 import "./voiceover/voiceover.css";
+
+const documentMetadata = (document: SubtitleDocumentV2): NonNullable<SavedSubtitleDraft['documentMeta']> => {
+  const { segments, ...metadata } = document;
+  void segments;
+  return { ...metadata, revision: document.revision ?? 0, run_id: document.run_id ?? null };
+};
 
 type StudioTab = "upload" | "transcript" | "style" | "mask" | "video" | "position" | "voice";
 
@@ -185,13 +205,16 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const [rawText, setRawText] = useState(initialDraft?.rawText ?? "");
   const {
     cues,
-    commit: commitCueHistory,
+    document: subtitleDocument,
+    applyDocument,
+    commit: commitCues,
     reset: resetCues,
-    undo: undoHistory,
-    redo: redoHistory,
+    undo,
+    redo,
     canUndo,
     canRedo,
-  } = useSubtitleHistory(initialDraft?.cues ?? []);
+  } = useSubtitleHistory({ ...createSubtitleDocument(initialDraft?.cues ?? []), ...initialDraft?.documentMeta,
+    source_revision: initialDraft?.documentMeta?.source_revision ?? initialDraft?.translatedSourceRevision ?? null });
   const [selectedCueId, setSelectedCueId] = useState<string | null>(
     initialDraft?.selectedCueId ?? null,
   );
@@ -223,6 +246,29 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     initialDraft?.activeRenderJobId ?? null,
   );
   const [renderJob, setRenderJob] = useState<SubtitleRenderJob | null>(null);
+  const initialExtraction = initialDraft?.extractionSettings ?? DEFAULT_EXTRACTION_SETTINGS;
+  const [extractionMode, setExtractionMode] = useState<ExtractionMode>(initialExtraction.mode);
+  const [ocrRegion, setOcrRegion] = useState<SubtitleOcrRegion>(initialExtraction.region);
+  const [ocrLanguage, setOcrLanguage] = useState(initialExtraction.ocrLanguage);
+  const [ocrSampleFps, setOcrSampleFps] = useState(initialExtraction.sampleFps);
+  const [ocrAutoProbe, setOcrAutoProbe] = useState(initialExtraction.autoProbe ?? false);
+  const [asrLanguage, setAsrLanguage] = useState(initialExtraction.asrLanguage);
+  const [asrModel, setAsrModel] = useState(initialExtraction.asrModel);
+  const [asrDevice, setAsrDevice] = useState<'auto' | 'cpu' | 'cuda'>(initialExtraction.asrDevice ?? 'auto');
+  const [asrComputeType, setAsrComputeType] = useState(initialExtraction.asrComputeType ?? 'auto');
+  const asrRuntime = useAsrRuntime(extractionMode === 'asr');
+  const asrReadiness = getAsrReadiness(asrRuntime.status, asrModel, asrDevice, asrComputeType);
+  const asrCanRun = asrReadiness.canRun;
+  const asrComputeTypes = (asrDevice === 'auto' ? asrReadiness.device : asrRuntime.status?.devices.find(device => device.id === asrDevice))?.compute_types ?? [];
+  const [translateBilingual, setTranslateBilingual] = useState(initialExtraction.bilingual);
+  const [translateModel, setTranslateModel] = useState(initialExtraction.model);
+  const source = useSourceDocument(initialDraft?.sourceDocument ?? null);
+  const sourceDocumentRef = useRef(source.document);
+  useEffect(() => { sourceDocumentRef.current = source.document; }, [source.document]);
+  const translatedSourceRevision = subtitleDocument.source_revision ?? null;
+  const [sourceSaving, setSourceSaving] = useState(false);
+  const [sourceVersionReload, setSourceVersionReload] = useState(0);
+  const [isExportingSourceSrt, setIsExportingSourceSrt] = useState<boolean>(false);
   const [options, setOptions] = useState<SubtitleBurnOptions>(
     initialDraft?.options ?? DEFAULT_OPTIONS,
   );
@@ -267,18 +313,30 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   const [notice, setNotice] = useState<string | null>(null);
 
   const sortedCues = useMemo(() => sortCues(cues), [cues]);
-  const [documentMeta, setDocumentMeta] = useState<{ revision: number; run_id: string | null }>(initialDraft?.documentMeta ?? { revision: 0, run_id: null });
-  const commitCues = useCallback((...args: Parameters<typeof commitCueHistory>) => {
-    commitCueHistory(...args);
-    setDocumentMeta(meta => ({ ...meta, revision: meta.revision + 1 }));
-  }, [commitCueHistory]);
-  const undo = useCallback(() => { undoHistory(); setDocumentMeta(meta => ({ ...meta, revision: meta.revision + 1 })); }, [undoHistory]);
-  const redo = useCallback(() => { redoHistory(); setDocumentMeta(meta => ({ ...meta, revision: meta.revision + 1 })); }, [redoHistory]);
+  const documentMeta = useMemo(() => documentMetadata(subtitleDocument), [subtitleDocument]);
   const voice = useVoiceover(videoId, mediaMetadata?.fingerprint, sortedCues);
-  const subtitleDocument = useMemo(
-    () => ({ ...createSubtitleDocument(sortedCues), ...documentMeta }),
-    [sortedCues, documentMeta],
-  );
+  const extractionSettings = useMemo(() => ({ mode: extractionMode, region: ocrRegion, ocrLanguage,
+    sampleFps: ocrSampleFps, autoProbe: ocrAutoProbe, asrLanguage, asrModel, asrDevice, asrComputeType, bilingual: translateBilingual, model: translateModel }),
+    [extractionMode, ocrRegion, ocrLanguage, ocrSampleFps, ocrAutoProbe, asrLanguage, asrModel, asrDevice, asrComputeType, translateBilingual, translateModel]);
+  const extraction = useExtractionJobs({ videoId, document: subtitleDocument, source: source.document,
+    configuration: JSON.stringify(extractionSettings), initial: initialDraft?.pendingExtraction,
+    onError: setError, onNotice: setNotice,
+    onSource: (document, result) => {
+      source.dispatch({ type: 'replace', document });
+      if (result.region) setOcrRegion(result.region);
+      setWarnings(result.warnings ?? []);
+      setNotice('Đã trích xuất nguồn. Kiểm tra nội dung rồi chọn dịch.');
+    },
+    onTranslation: document => {
+      applyDocument(document);
+      setSelectedCueId(document.segments[0]?.id ?? null);
+      setNotice('Đã cập nhật bản dịch từ phụ đề nguồn.');
+    },
+  });
+  const extractionJob = extraction.job;
+  const extractionRunning = extraction.running;
+  const videoIdRef = useRef(videoId);
+  useEffect(() => { videoIdRef.current = videoId; }, [videoId]);
   const alignmentSnapshotRef = useRef<typeof subtitleDocument | null>(null);
   const generationSnapshotRef = useRef<typeof subtitleDocument | null>(null);
   const renderOptions = useMemo(
@@ -488,12 +546,11 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
           if (result) {
             const nextCues = sortCues(result.document.segments);
             if (subtitleDocument === alignmentSnapshotRef.current) {
-              commitCues(nextCues);
-              setDocumentMeta({ revision: result.document.revision ?? 0, run_id: result.document.run_id ?? null });
+              applyDocument(result.document);
             } else {
               setNotice("Đã lưu kết quả căn trong Phiên bản phụ đề. Bản đang chỉnh được giữ vì đã thay đổi hoặc phiên làm việc được khôi phục.");
             }
-            setWarnings(result.warnings);
+            setWarnings(result.warnings ?? []);
             setSelectedCueId((current) =>
               current && nextCues.some((cue) => cue.id === current)
                 ? current
@@ -544,10 +601,9 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
           if (job.result) {
             const nextCues = sortCues(job.result.document.segments);
             if (cues.length === 0 && subtitleDocument === generationSnapshotRef.current) {
-              setDocumentMeta({ revision: job.result.document.revision ?? 0, run_id: job.result.document.run_id ?? null });
-              commitCues(nextCues);
+              applyDocument(job.result.document);
               setRawText(job.result.srt);
-              setWarnings(job.result.warnings);
+              setWarnings(job.result.warnings ?? []);
               setSelectedCueId(nextCues[0]?.id ?? null);
             }
           }
@@ -614,6 +670,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         rawText,
         cues,
         documentMeta,
+        sourceDocument: source.document, translatedSourceRevision, extractionSettings, pendingExtraction: extraction.pending,
         selectedCueId,
         activeGeminiJobId,
         lastGeminiJobId: generationJob?.id ?? (initialDraft?.videoId === videoId ? initialDraft?.lastGeminiJobId : null) ?? null,
@@ -633,7 +690,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     activeAlignmentJobId,
     activeRenderJobId,
     cues,
-    documentMeta,
+    documentMeta, source.document, translatedSourceRevision, extractionSettings, extraction.pending,
     mediaDurationMs,
     options,
     overlayId,
@@ -682,6 +739,9 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
         return;
       }
     }
+    extraction.reset();
+    source.dispatch({ type: 'reset', document: null });
+    setSourceSaving(false);
     uploadControllerRef.current?.abort();
     const controller = new AbortController();
     uploadControllerRef.current = controller;
@@ -703,8 +763,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     setGenerationJob(null);
     setActiveRenderJobId(null);
     setRenderJob(null);
-    resetCues([]);
-    setDocumentMeta({ revision: 0, run_id: null });
+    resetCues();
     setVideoClips([]);
     setSelectedVideoClipId(null);
     setLastDeletedVideoClip(null);
@@ -808,11 +867,12 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
   };
 
   const { parsing, parse: handleParse } = useSubtitleImport({
-    text: rawText, durationMs: mediaDurationMs, onError: setError,
+    text: rawText, durationMs: mediaDurationMs, scope: videoId, snapshot: subtitleDocument,
+    onError: setError, onNotice: setNotice,
     onParsed: (result) => {
       const nextCues = sortCues(result.document.segments);
-      commitCues(nextCues);
-      setWarnings(result.warnings);
+      applyDocument(result.document);
+      setWarnings(result.warnings ?? []);
       setSelectedCueId(nextCues[0]?.id ?? null);
       if (nextCues.length === 0) {
         setError("Không tìm thấy cue hợp lệ. Kiểm tra JSON hoặc mốc thời gian đầu vào.");
@@ -861,6 +921,197 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     } catch (cancelError: unknown) {
       setError(getErrorMessage(cancelError, "Không gửi được yêu cầu hủy job Gemini."));
     }
+  };
+
+  const preserveBeforeExtraction = async (signal: AbortSignal) => {
+    if (!videoId) return;
+    if (source.document) await api.saveSubtitleVersion(videoId, source.document, 'Nguồn trước khi chạy tác vụ', signal, true);
+    if (signal.aborted) return;
+    if (subtitleDocument.segments.length) await api.saveSubtitleVersion(videoId, subtitleDocument, 'Phụ đề trước khi chạy tác vụ', signal, true);
+  };
+  const handleExtractOcr = async () => {
+    if (!videoId || !mediaMetadata) return;
+    await extraction.start('ocr', async signal => {
+      await preserveBeforeExtraction(signal);
+      signal.throwIfAborted();
+      return api.extractSubtitlesOcr(videoId, ocrRegion,
+        { source_language: ocrLanguage, sample_fps: ocrSampleFps, auto_probe: ocrAutoProbe }, signal);
+    });
+  };
+  const handleExtractAsr = async () => {
+    if (!videoId || !mediaMetadata) return;
+    if (!mediaMetadata.has_audio) { setError('Video không có âm thanh. Hãy dùng OCR hoặc Gemini.'); return; }
+    await extraction.start('asr', async signal => {
+      await preserveBeforeExtraction(signal);
+      signal.throwIfAborted();
+      return api.extractSubtitlesAsr(videoId, { source_language: asrLanguage, model: asrModel, device: asrDevice, compute_type: asrComputeType }, signal);
+    });
+  };
+  const handleTranslateGemini = async () => {
+    if (!videoId || !source.document?.segments.length) return;
+    const sourceDocument = source.document;
+    await extraction.start('translation', async signal => {
+      await preserveBeforeExtraction(signal);
+      signal.throwIfAborted();
+      return api.translateSubtitlesWithGemini(videoId, sourceDocument,
+        { target_language: 'vi', bilingual: translateBilingual,
+          model: translateModel || geminiModel || geminiStatus?.model || undefined }, null, signal);
+    });
+  };
+  const handleCancelExtraction = extraction.cancel;
+  const handleSaveSource = async () => {
+    if (!videoId || !source.document || sourceSaving) return;
+    const savedVideo = videoId;
+    const before = source.document;
+    setSourceSaving(true);
+    try {
+      const saved = await api.saveSubtitleVersion(videoId, before, `Nguồn đã chỉnh · bản ${before.revision ?? 0}`);
+      if (videoIdRef.current === savedVideo) {
+        if (sourceDocumentRef.current === before && saved.document?.media_fingerprint
+            && saved.document.media_fingerprint !== before.media_fingerprint) {
+          source.dispatch({ type: 'replace', document: { ...before, media_fingerprint: saved.document.media_fingerprint } });
+        }
+        setSourceVersionReload(n => n + 1); setNotice('Đã lưu bản nguồn.');
+      }
+    } catch (error) { if (videoIdRef.current === savedVideo) setError(String(error)); }
+    finally { if (videoIdRef.current === savedVideo) setSourceSaving(false); }
+  };
+
+  const handleExportSourceSrt = async () => {
+    if (!source.document?.segments.length) {
+      setError("Chưa có phụ đề để xuất file SRT nguồn.");
+      return;
+    }
+    setIsExportingSourceSrt(true);
+    setError(null);
+    try {
+      const res = await api.exportSourceSrt(source.document, videoId || undefined);
+      const blob = new Blob([res.srt], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const baseName = videoFile?.name ? videoFile.name.replace(/\.[^/.]+$/, "") : (projectName || "subtitles");
+      a.href = url;
+      a.download = `${baseName}_source.srt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (exportErr: unknown) {
+      setError(getErrorMessage(exportErr, "Không thể xuất file SRT nguồn."));
+    } finally {
+      setIsExportingSourceSrt(false);
+    }
+  };
+
+  const handleResumeGeneration = async () => {
+    if (!generationJob || generationRunning) return;
+    generationControllerRef.current?.abort();
+    const controller = new AbortController();
+    generationControllerRef.current = controller;
+    generationSnapshotRef.current = null;
+    try {
+      const job = await api.resumeGeminiSubtitleJob(generationJob.id, controller.signal);
+      if (!controller.signal.aborted) {
+        setGenerationJob(job);
+        setActiveGeminiJobId(job.id);
+      }
+    } catch (resumeError: unknown) {
+      if (!controller.signal.aborted) setError(getErrorMessage(resumeError, "Không thể tiếp tục tác vụ Gemini."));
+    }
+  };
+
+  const hasSourceCues = Boolean(source.document?.segments.length);
+  const translationReady = Boolean(
+    hasSourceCues &&
+      translatedSourceRevision !== null &&
+      translatedSourceRevision === (source.document?.revision ?? 0) &&
+      (subtitleDocument.source_run_id == null || subtitleDocument.source_run_id === source.document?.run_id),
+  );
+  const pipelineRunning = extractionRunning || generationRunning;
+  const pipelineActionKind: "gemini" | "translation" | "extract" = extractionMode === "gemini"
+    ? "gemini"
+    : hasSourceCues
+      ? "translation"
+      : "extract";
+  const generationResumeAvailable = pipelineActionKind === "gemini" &&
+    !generationRunning &&
+    Boolean(generationJob && (generationJob.state === "failed" || generationJob.state === "canceled") && generationJob.details?.resume_available);
+  const pipelineFailed = !pipelineRunning && Boolean(
+    (pipelineActionKind === "gemini" && generationJob?.state === "failed") ||
+      (pipelineActionKind !== "gemini" && extractionJob?.state === "failed" &&
+        (pipelineActionKind === "translation"
+          ? extractionJob.kind === "translation"
+          : extractionJob.kind === (extractionMode === "asr" ? "asr" : "ocr"))),
+  );
+  const pipelineStage: SubtitlePipelineStage = pipelineFailed
+    ? "error"
+    : pipelineRunning
+      ? generationRunning ? "extracting" : extractionJob?.kind === "translation" ? "translating" : "extracting"
+      : translationReady
+        ? "complete"
+        : hasSourceCues
+          ? "ready-to-translate"
+          : "idle";
+  const pipelineProgress = pipelineRunning
+    ? generationRunning
+      ? Math.round((generationJob?.progress ?? 0) * 0.5)
+      : extractionJob?.kind === "translation"
+        ? 50 + Math.round((extractionJob.progress ?? 0) * 0.5)
+        : Math.round((extractionJob?.progress ?? 0) * 0.5)
+    : translationReady
+      ? 100
+      : hasSourceCues
+        ? 50
+        : 0;
+  const pipelineMessage = pipelineFailed
+    ? generationJob?.error || extractionJob?.error || "Tác vụ chưa hoàn tất. Hãy thử lại."
+    : pipelineRunning
+      ? extraction.submitting
+        ? "Đang chuẩn bị tác vụ…"
+        : generationRunning
+          ? generationJob?.message || "Gemini đang tìm phụ đề…"
+          : extractionJob?.message || "Đang tìm phụ đề…"
+      : translationReady
+        ? `Đã tìm và dịch ${cues.length} đoạn.`
+        : hasSourceCues
+          ? `Đã tìm thấy ${source.document?.segments.length ?? 0} đoạn · sẵn sàng dịch.`
+          : !videoId
+            ? "Tải video trước để bắt đầu."
+            : !mediaMetadata
+              ? "Đang đọc thông tin video…"
+              : "Chọn một cách tìm phụ đề rồi bắt đầu từ thanh này.";
+  const pipelineActionLabel = pipelineRunning
+    ? "Dừng"
+    : pipelineActionKind === "gemini"
+      ? generationResumeAvailable
+        ? "Tiếp tục Gemini"
+        : cues.length ? "Tạo lại với Gemini" : "Tìm bằng Gemini"
+      : pipelineActionKind === "translation"
+        ? extractionJob?.kind === "translation" && extractionJob.details?.resume_available
+          ? "Tiếp tục dịch"
+          : translationReady ? "Dịch lại" : "Dịch tiếng Việt"
+        : extractionMode === "asr"
+          ? cues.length ? "Nghe lại & tìm" : "Nghe & tìm phụ đề"
+          : cues.length ? "Quét lại & tìm" : "Quét & tìm phụ đề";
+  const pipelineActionDisabled = pipelineRunning
+    ? false
+    : !videoId ||
+      (pipelineActionKind === "gemini" && !canGenerate) ||
+      (pipelineActionKind === "translation" && !hasSourceCues) ||
+      (pipelineActionKind === "extract" && (!mediaMetadata || (extractionMode === "asr" && (!asrCanRun || !mediaMetadata.has_audio))));
+  const handleSubtitlePipelineAction = () => {
+    if (pipelineRunning) {
+      if (generationRunning) void handleCancelGeneration();
+      else void handleCancelExtraction();
+      return;
+    }
+    if (pipelineActionKind === "gemini") {
+      if (generationResumeAvailable) void handleResumeGeneration();
+      else void handleGenerateWithGemini();
+    }
+    else if (pipelineActionKind === "translation") void handleTranslateGemini();
+    else if (extractionMode === "asr") void handleExtractAsr();
+    else void handleExtractOcr();
   };
 
   const handleCueChange = useCallback(
@@ -1100,7 +1351,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     setLastDeletedVideoClip(null);
     setRenderedVideoUrl(null);
     setError(null);
-  }, [videoClips]);
+  }, [setSelectedVideoClipId, videoClips]);
 
   const deleteSelectedVideoClip = useCallback(() => {
     const selectedIndex = videoClips.findIndex((clip) => clip.id === selectedVideoClipId);
@@ -1121,7 +1372,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     setRenderedVideoUrl(null);
     workspaceRef.current?.seekTo(nextSelection?.start_ms ?? 0);
     setError(null);
-  }, [selectedVideoClipId, videoClips]);
+  }, [selectedVideoClipId, setSelectedVideoClipId, videoClips]);
 
   const restoreDeletedVideoClip = useCallback(() => {
     if (!lastDeletedVideoClip) return;
@@ -1131,7 +1382,7 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
     setSelectedVideoClipId(lastDeletedVideoClip.id);
     setLastDeletedVideoClip(null);
     setRenderedVideoUrl(null);
-  }, [lastDeletedVideoClip]);
+  }, [lastDeletedVideoClip, setSelectedVideoClipId]);
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try {
@@ -1305,10 +1556,278 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
           {activeTab === "transcript" && (
             <div className="studio-panel-section is-transcript">
               <div className="studio-panel-heading">
-                <h2>Tạo phụ đề</h2>
-                <p>Gemini xem cả hình ảnh, chữ trên video và nghe audio để tạo phụ đề tiếng Việt theo ngữ cảnh.</p>
+                <h2>Phụ đề</h2>
+                <p>Tìm phụ đề nguồn, kiểm tra nhanh rồi dịch sang tiếng Việt trong cùng một luồng.</p>
               </div>
-              <section className="subtitle-generation-panel" aria-labelledby="gemini-generation-title">
+
+              <SubtitlePipelineBar
+                stage={pipelineStage}
+                progress={pipelineProgress}
+                message={pipelineMessage}
+                actionLabel={pipelineActionLabel}
+                actionDisabled={pipelineActionDisabled}
+                running={pipelineRunning}
+                onAction={handleSubtitlePipelineAction}
+              />
+
+              <details className="subtitle-pipeline-advanced">
+                <summary>Tùy chọn tìm phụ đề</summary>
+                <p className="subtitle-pipeline-advanced-note">Thanh trên là luồng nhanh. Mở phần này khi cần đổi phương thức hoặc chạy lại riêng OCR, ASR hay Gemini.</p>
+              <div className="subtitle-mode-tabs" role="tablist" aria-label="Phương thức trích xuất phụ đề">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={extractionMode === "ocr"}
+                  className={`subtitle-mode-tab ${extractionMode === "ocr" ? "is-active" : ""}`}
+                  onClick={() => setExtractionMode("ocr")}
+                >
+                  <ScanText size={15} />
+                  <span>OCR (Trên hình)</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={extractionMode === "asr"}
+                  className={`subtitle-mode-tab ${extractionMode === "asr" ? "is-active" : ""}`}
+                  onClick={() => setExtractionMode("asr")}
+                >
+                  <Mic size={15} />
+                  <span>ASR (Lời thoại)</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={extractionMode === "gemini"}
+                  className={`subtitle-mode-tab ${extractionMode === "gemini" ? "is-active" : ""}`}
+                  onClick={() => setExtractionMode("gemini")}
+                >
+                  <Sparkles size={15} />
+                  <span>Gemini Video</span>
+                </button>
+              </div>
+
+              {extractionMode === "ocr" && (
+                <section className="subtitle-generation-panel" aria-labelledby="ocr-extraction-title">
+                  <div className="subtitle-generation-heading">
+                    <div>
+                      <strong id="ocr-extraction-title"><ScanText size={17} /> RapidOCR (Phụ đề trên hình)</strong>
+                      <span>Nhận diện phụ đề cứng từ khung hình video. Kéo khung xanh lá trên video để chọn vùng.</span>
+                    </div>
+                    {extractionRunning && extractionJob?.kind === "ocr" ? (
+                      <button
+                        type="button"
+                        className="studio-icon-button is-danger"
+                        aria-label="Hủy trích xuất OCR"
+                        title="Hủy tác vụ OCR đang chạy"
+                        onClick={() => void handleCancelExtraction()}
+                      >
+                        <Square size={14} fill="currentColor" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="studio-primary-button subtitle-generation-start"
+                        disabled={!videoId || extractionRunning}
+                        onClick={() => void handleExtractOcr()}
+                      >
+                        <ScanText size={17} />
+                        {cues.length ? "Trích xuất lại OCR" : "Trích xuất OCR"}
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="subtitle-generation-options is-ocr">
+                    <div>
+                      <label htmlFor="ocr-lang-select">Ngôn ngữ nguồn</label>
+                      <select
+                        id="ocr-lang-select"
+                        value={ocrLanguage}
+                        disabled={extractionRunning}
+                        onChange={(e) => setOcrLanguage(e.target.value)}
+                      >
+                        <option value="zh">Tiếng Trung (zh)</option>
+                        <option value="en">Tiếng Anh (en)</option>
+                        <option value="ja">Tiếng Nhật (ja)</option>
+                        <option value="ko">Tiếng Hàn (ko)</option>
+                        <option value="vi">Tiếng Việt (vi)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label htmlFor="ocr-fps-select">Tần suất quét (FPS)</label>
+                      <select
+                        id="ocr-fps-select"
+                        value={ocrSampleFps}
+                        disabled={extractionRunning}
+                        onChange={(e) => setOcrSampleFps(Number(e.target.value))}
+                      >
+                        <option value="2">2 fps (Nhanh)</option>
+                        <option value="3">3 fps (Mặc định)</option>
+                        <option value="4">4 fps (Chính xác cao)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="subtitle-ocr-presets">
+                    <label className="studio-toggle-row"><input type="checkbox" checked={ocrAutoProbe}
+                      disabled={extractionRunning} onChange={event => setOcrAutoProbe(event.target.checked)} />
+                      Tự dò vùng trước khi trích xuất
+                    </label>
+                    <small>Vùng OCR ({ocrRegion.x.toFixed(0)}%, {ocrRegion.y.toFixed(0)}%, {ocrRegion.width.toFixed(0)}% × {ocrRegion.height.toFixed(0)}%):</small>
+                    <div className="subtitle-ocr-preset-buttons">
+                      <button
+                        type="button"
+                        className="studio-secondary-button is-compact"
+                        disabled={extractionRunning}
+                        title="Quét phụ đề ở đáy màn hình"
+                        onClick={() => setOcrRegion({ x: 10, y: 72, width: 80, height: 18 })}
+                      >
+                        Đáy
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-secondary-button is-compact"
+                        disabled={extractionRunning}
+                        title="Quét phụ đề ở đỉnh màn hình"
+                        onClick={() => setOcrRegion({ x: 10, y: 8, width: 80, height: 18 })}
+                      >
+                        Đỉnh
+                      </button>
+                      <button
+                        type="button"
+                        className="studio-secondary-button is-compact"
+                        disabled={extractionRunning}
+                        title="Quét chữ trên toàn màn hình"
+                        onClick={() => setOcrRegion({ x: 5, y: 5, width: 90, height: 90 })}
+                      >
+                        Toàn màn hình
+                      </button>
+                    </div>
+                  </div>
+
+                  {!videoId && <small>Hãy tải video trước khi chạy OCR.</small>}
+
+                  {extractionJob && extractionJob.kind === "ocr" && (
+                    <div className={`subtitle-job-progress state-${extractionJob.state}`} aria-live="polite">
+                      <div>
+                        <span>{extractionJob.message}</span>
+                        <strong>{extractionJob.progress}%</strong>
+                      </div>
+                      <progress max={100} value={extractionJob.progress} />
+                      {extractionJob.state === "succeeded" && extractionJob.result && (
+                        <small>
+                          Đã trích xuất {extractionJob.result.segment_count} phụ đề nguồn.
+                        </small>
+                      )}
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {extractionMode === "asr" && (
+                <section className="subtitle-generation-panel" aria-labelledby="asr-extraction-title">
+                  <div className="subtitle-generation-heading">
+                    <div>
+                      <strong id="asr-extraction-title"><Mic size={17} /> Faster-Whisper (Nhận diện lời thoại)</strong>
+                      <span>Trích xuất phụ đề từ âm thanh bằng AI Whisper cục bộ trên máy.</span>
+                    </div>
+                    {extractionRunning && extractionJob?.kind === "asr" ? (
+                      <button
+                        type="button"
+                        className="studio-icon-button is-danger"
+                        aria-label="Hủy trích xuất ASR"
+                        title="Hủy tác vụ ASR đang chạy"
+                        onClick={() => void handleCancelExtraction()}
+                      >
+                        <Square size={14} fill="currentColor" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="studio-primary-button subtitle-generation-start"
+                        disabled={!videoId || !asrCanRun || Boolean(mediaMetadata && !mediaMetadata.has_audio) || extractionRunning}
+                        onClick={() => void handleExtractAsr()}
+                      >
+                        <Mic size={17} />
+                        {cues.length ? "Nhận diện lại ASR" : "Nghe lời thoại (ASR)"}
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="subtitle-generation-options is-asr">
+                    <div>
+                      <label htmlFor="asr-lang-select">Ngôn ngữ nói</label>
+                      <select
+                        id="asr-lang-select"
+                        value={asrLanguage}
+                        disabled={extractionRunning}
+                        onChange={(e) => setAsrLanguage(e.target.value)}
+                      >
+                        <option value="zh">Tiếng Trung (zh)</option>
+                        <option value="en">Tiếng Anh (en)</option>
+                        <option value="ja">Tiếng Nhật (ja)</option>
+                        <option value="ko">Tiếng Hàn (ko)</option>
+                        <option value="vi">Tiếng Việt (vi)</option>
+                        <option value="auto">Tự động phát hiện</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label htmlFor="asr-model-select">Model Whisper</label>
+                      <select
+                        id="asr-model-select"
+                        value={asrModel}
+                        disabled={extractionRunning}
+                        onChange={(e) => setAsrModel(e.target.value)}
+                      >
+                        {(asrRuntime.status?.models.length ? asrRuntime.status.models : [{id: asrModel, state: 'missing'}]).map(model =>
+                          <option key={model.id} value={model.id}>{model.id} · {model.state === 'ready' ? 'Đã cài' : 'Chưa cài đầy đủ'}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="subtitle-generation-options">
+                    <label className="studio-field"><span>Thiết bị</span><select value={asrDevice} disabled={extractionRunning}
+                      onChange={event => { setAsrDevice(event.target.value as 'auto' | 'cpu' | 'cuda'); setAsrComputeType('auto'); }}>
+                      <option value="auto">Tự động</option>
+                      {asrRuntime.status?.devices.map(device => <option key={device.id} value={device.id}>{device.id === 'cuda' ? 'GPU NVIDIA' : 'CPU'}</option>)}
+                    </select></label>
+                    <label className="studio-field"><span>Kiểu tính toán</span><select value={asrComputeType}
+                      disabled={extractionRunning} onChange={event => setAsrComputeType(event.target.value)}>
+                      <option value="auto">Tự động</option>
+                      {asrComputeTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                    </select></label>
+                  </div>
+                  <div role="status">
+                    {asrRuntime.loading ? 'Đang kiểm tra model và thiết bị…' : asrRuntime.error || asrRuntime.status?.message ||
+                      asrReadiness.message}
+                    <button type="button" className="studio-text-button" disabled={asrRuntime.loading || extractionRunning}
+                      onClick={asrRuntime.refresh}>Kiểm tra lại</button>
+                  </div>
+                  {mediaMetadata && !mediaMetadata.has_audio && (
+                    <small role="alert" className="subtitle-generation-warn">
+                      ⚠️ Video này không có âm thanh; vui lòng chọn OCR (Trên hình) hoặc Gemini.
+                    </small>
+                  )}
+                  {!videoId && <small>Hãy tải video trước khi chạy ASR.</small>}
+
+                  {extractionJob && extractionJob.kind === "asr" && (
+                    <div className={`subtitle-job-progress state-${extractionJob.state}`} aria-live="polite">
+                      <div>
+                        <span>{extractionJob.message}</span>
+                        <strong>{extractionJob.progress}%</strong>
+                      </div>
+                      <progress max={100} value={extractionJob.progress} />
+                      {extractionJob.state === "succeeded" && extractionJob.result && (
+                        <small>
+                          Đã nhận diện {extractionJob.result.segment_count} câu thoại · {extractionJob.result.detected_language} · {extractionJob.result.device} ({extractionJob.result.compute_type}).
+                        </small>
+                      )}
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {extractionMode === "gemini" && (
+                <section className="subtitle-generation-panel" aria-labelledby="gemini-generation-title">
                 <div className="subtitle-generation-heading">
                   <div>
                     <strong id="gemini-generation-title"><Sparkles size={17} /> Gemini AI</strong>
@@ -1456,40 +1975,145 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
                   </div>
                 )}
               </section>
-              {videoId && <SubtitleVersionsPanel key={`versions-${videoId}`} videoId={videoId} document={subtitleDocument} reloadKey={`${generationJob?.result?.version_id ?? ""}:${alignmentJob?.result?.version_id ?? ""}`}
-                onDocument={document => { commitCues(document.segments); setDocumentMeta({ revision: document.revision ?? 0, run_id: document.run_id ?? null }); }} />}
-              {videoId && sortedCues.length > 0 && <GeminiReviewPanel key={videoId} videoId={videoId} document={subtitleDocument}
-                durationMs={mediaDurationMs} selectedCueId={selectedCueId} initialModel={geminiModel || geminiStatus?.model || "gemini-3.6-flash"}
-                onDocument={document => { commitCues(document.segments); setDocumentMeta({ revision: document.revision ?? 0, run_id: document.run_id ?? null }); }}
-                onSeek={ms => workspaceRef.current?.seekTo(ms)} />}
-              <div className="subtitle-manual-divider"><span>Hoặc nhập phụ đề thủ công</span></div>
-              <button
-                type="button"
-                className={`studio-copy-prompt ${copiedPrompt ? "is-success" : ""}`}
-                onClick={() => void handleCopyPrompt()}
-              >
-                {copiedPrompt ? <Check size={17} /> : <Copy size={17} />}
-                {copiedPrompt ? "Đã sao chép" : "Sao chép prompt JSON V2"}
-              </button>
-              <label className="studio-textarea-field">
-                <span>Kết quả Gemini, SRT hoặc VTT</span>
-                <textarea
-                  rows={6}
-                  value={rawText}
-                  placeholder='Dán JSON bắt đầu bằng { "schema_version": 2, … }'
-                  onChange={(event) => setRawText(event.target.value)}
-                />
-              </label>
-              <button
-                type="button"
-                className="studio-primary-button"
-                disabled={parsing || !rawText.trim()}
-                aria-busy={parsing}
-                onClick={() => void handleParse()}
-              >
-                {parsing ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}
-                {parsing ? "Đang phân tích" : "Phân tích phụ đề"}
-              </button>
+              )}
+
+              </details>
+
+              {source.document && <SourceSubtitleEditor key={`source-${videoId}`} source={source}
+                durationMs={mediaDurationMs} frameTiming={frameTiming}
+                onSeek={ms => workspaceRef.current?.seekTo(ms)} onSave={() => void handleSaveSource()} saving={sourceSaving} />}
+              {!source.document && cues.length > 0 && <button type="button" className="studio-secondary-button"
+                onClick={() => source.dispatch({ type: 'replace', document: subtitleDocument })}>
+                Dùng phụ đề hiện có làm nguồn dịch
+              </button>}
+              {source.document && translatedSourceRevision !== null &&
+                (translatedSourceRevision !== (source.document.revision ?? 0) ||
+                  subtitleDocument.source_run_id != null && subtitleDocument.source_run_id !== source.document.run_id) &&
+                <p role="status">Nguồn đã thay đổi. Bản dịch hiện tại cần cập nhật.</p>}
+              {!!source.document?.segments.length && (
+                <details className="subtitle-pipeline-translation-details">
+                  <summary>Thiết lập dịch & xuất SRT</summary>
+                <section className="subtitle-translation-card" aria-labelledby="gemini-translation-title">
+                  <div className="subtitle-generation-heading">
+                    <div>
+                      <strong id="gemini-translation-title"><Languages size={17} /> Dịch sang tiếng Việt (Gemini AI)</strong>
+                      <span>Dịch bản nguồn đã chỉnh, giữ mốc thời gian và ID của từng đoạn.</span>
+                    </div>
+                    {extractionRunning && extractionJob?.kind === "translation" ? (
+                      <button
+                        type="button"
+                        className="studio-icon-button is-danger"
+                        aria-label="Hủy dịch Gemini"
+                        title="Hủy dịch đang chạy"
+                        onClick={() => void handleCancelExtraction()}
+                      >
+                        <Square size={14} fill="currentColor" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="studio-primary-button subtitle-generation-start"
+                        disabled={extractionRunning || !videoId}
+                        onClick={() => void handleTranslateGemini()}
+                      >
+                        <Languages size={17} />
+                        {extractionJob?.kind === 'translation' && extractionJob.details?.resume_available ? 'Tiếp tục dịch' : 'Dịch sang tiếng Việt'}
+                      </button>
+                    )}
+                  </div>
+
+                  {extractionJob?.kind === 'translation' && extractionJob.state === 'failed' && extractionJob.details?.resume_available &&
+                    <p role="status">Các nhóm đã dịch được giữ lại. Tiếp tục sẽ dùng cache còn khớp với bản nguồn hiện tại.</p>}
+                  {documentMeta.translation_models?.length ? <p>Model đã dùng: {documentMeta.translation_models.join(', ')}</p> : null}
+                  <div className="subtitle-generation-options is-translate">
+                    <label className="subtitle-generation-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={translateBilingual}
+                        disabled={extractionRunning}
+                        onChange={(e) => setTranslateBilingual(e.target.checked)}
+                      />
+                      <span>Song ngữ (giữ câu gốc làm dòng phụ)</span>
+                    </label>
+                    <div className="subtitle-generation-model">
+                      <label htmlFor="translate-model-select">Model Gemini</label>
+                      <select
+                        id="translate-model-select"
+                        value={translateModel || geminiModel || geminiStatus?.model || ""}
+                        disabled={extractionRunning || geminiModelsLoading || !geminiModels.length}
+                        onChange={(e) => setTranslateModel(e.target.value)}
+                      >
+                        {geminiModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.display_name || model.id}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="subtitle-translation-actions">
+                    <button
+                      type="button"
+                      className="studio-secondary-button"
+                      disabled={isExportingSourceSrt}
+                      onClick={() => void handleExportSourceSrt()}
+                      title="Tải về file phụ đề SRT chứa văn bản gốc đã trích xuất"
+                    >
+                      <Download size={15} />
+                      {isExportingSourceSrt ? "Đang xuất SRT nguồn…" : "Xuất SRT nguồn"}
+                    </button>
+                  </div>
+
+                  {extractionJob && extractionJob.kind === "translation" && (
+                    <div className={`subtitle-job-progress state-${extractionJob.state}`} aria-live="polite">
+                      <div>
+                        <span>{extractionJob.message}</span>
+                        <strong>{extractionJob.progress}%</strong>
+                      </div>
+                      <progress max={100} value={extractionJob.progress} />
+                      {extractionJob.details && extractionJob.details.translated_count != null && (
+                        <small>
+                          Đã dịch {extractionJob.details.translated_count} / {extractionJob.details.total_cues || cues.length} đoạn.
+                        </small>
+                      )}
+                    </div>
+                  )}
+                </section>
+                </details>
+              )}
+              {videoId && <SubtitleVersionsPanel key={`versions-${videoId}`} videoId={videoId} document={subtitleDocument} sourceDocument={source.document} reloadKey={`${generationJob?.result?.version_id ?? ""}:${alignmentJob?.result?.version_id ?? ""}:${extraction.versionReload}:${sourceVersionReload}`}
+                onDocument={document => { if (document.document_role === 'source') source.dispatch({ type: 'replace', document }); else applyDocument(document); }} />}
+              <details className="subtitle-generation-advanced subtitle-manual-import">
+                <summary>Nhập phụ đề thủ công</summary>
+                <button
+                  type="button"
+                  className={`studio-copy-prompt ${copiedPrompt ? "is-success" : ""}`}
+                  onClick={() => void handleCopyPrompt()}
+                >
+                  {copiedPrompt ? <Check size={17} /> : <Copy size={17} />}
+                  {copiedPrompt ? "Đã sao chép" : "Sao chép prompt JSON V2"}
+                </button>
+                <label className="studio-textarea-field">
+                  <span>Kết quả Gemini, SRT hoặc VTT</span>
+                  <textarea
+                    rows={6}
+                    value={rawText}
+                    placeholder='Dán JSON bắt đầu bằng { "schema_version": 2, … }'
+                    onChange={(event) => setRawText(event.target.value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="studio-primary-button"
+                  disabled={parsing || !rawText.trim()}
+                  aria-busy={parsing}
+                  onClick={() => void handleParse()}
+                >
+                  {parsing ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}
+                  {parsing ? "Đang phân tích" : "Phân tích phụ đề"}
+                </button>
+              </details>
               {sortedCues.length > 0 && (
                 <div className="subtitle-alignment-panel">
                   <div className="subtitle-alignment-heading">
@@ -1761,6 +2385,19 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
               <div className="studio-field-grid"><label className="studio-field"><span>Trim đầu (s)</span><input type="number" min={0} step={0.001} value={options.trim_start ?? 0} onChange={(event) => setOptions({ ...options, trim_start: Number(event.target.value) })} /></label><label className="studio-field"><span>Trim cuối (s)</span><input type="number" min={0} step={0.001} value={options.trim_end ?? ""} placeholder="Tự động" onChange={(event) => setOptions({ ...options, trim_end: event.target.value ? Number(event.target.value) : null })} /></label></div>
               <label className="studio-field"><span>Tỉ lệ khung</span><select value={options.aspect_ratio} onChange={(event) => setOptions({ ...options, aspect_ratio: event.target.value as SubtitleBurnOptions["aspect_ratio"] })}><option value="original">Gốc</option><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option></select></label>
               <label className="studio-field"><span>Chuyển động</span><select value={options.animation} onChange={(event) => setOptions({ ...options, animation: event.target.value as SubtitleBurnOptions["animation"] })}><option value="none">Không — timing 1 ms</option><option value="fade">Fade — timing 10 ms</option><option value="rise">Rise — timing 10 ms</option><option value="pan">Pan — timing 10 ms</option><option value="typewriter">Typewriter — timing 10 ms</option></select><small>Preview và video xuất cùng dùng libass; chế độ không hiệu ứng vẫn giữ timestamp 1 ms.</small></label>
+              <SceneSplitPanel
+                videoId={videoId}
+                durationMs={mediaDurationMs}
+                videoClips={videoClips}
+                subtitleDocument={subtitleDocument}
+                onApplySegments={(segments) => {
+                  setVideoClips(segments);
+                  setSelectedVideoClipId(segments[0]?.id ?? null);
+                  setLastDeletedVideoClip(null);
+                  setRenderedVideoUrl(null);
+                  setNotice(`Đã áp dụng ${segments.length} chunk theo cảnh vào timeline.`);
+                }}
+              />
             </div>
           )}
 
@@ -1802,6 +2439,10 @@ export function SubtitleStudio({ onBack, onOpenSettings }: SubtitleStudioProps) 
             overlayLayout={overlayLayout}
             subtitleMasks={subtitleMasks}
             selectedMaskId={selectedMaskId}
+            ocrRegion={ocrRegion}
+            onOcrRegionChange={setOcrRegion}
+            showOcrBox={extractionMode === "ocr" && activeTab === "transcript"}
+            ocrDisabled={extractionRunning}
             videoClips={videoClips}
             selectedVideoClipId={selectedVideoClipId}
             canRestoreVideoClip={Boolean(lastDeletedVideoClip)}

@@ -97,7 +97,7 @@ export default function App() {
     const requestedTab = params.get("tab");
     if (requestedView === "videos") return "videos";
     if (requestedView === "sources") return "connections";
-    return ["channels", "live", "connections", "videos"].includes(requestedTab ?? "")
+    return ["channels", "acquisition", "live", "connections", "videos"].includes(requestedTab ?? "")
       ? (requestedTab as LibraryTab)
       : "channels";
   });

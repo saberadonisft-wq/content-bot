@@ -41,6 +41,8 @@ ALLOWED_TIMING_SOURCES = frozenset(
         "forced_alignment",
         "imported_srt",
         "imported_vtt",
+        "ocr",
+        "asr",
     }
 )
 LANGUAGE_PATTERN = re.compile(r"^[A-Za-z0-9-]{2,32}$")
@@ -626,13 +628,13 @@ def parse_subtitles_text(raw_text: str) -> list[dict[str, Any]]:
     return [cue_to_legacy(cue) for cue in document["segments"]]
 
 
-def subtitles_to_srt(subtitles: list[dict[str, Any]]) -> str:
+def subtitles_to_srt(subtitles: list[dict[str, Any]], *, use_source: bool = False) -> str:
     blocks = []
     for idx, sub in enumerate(subtitles, 1):
         start_ms, end_ms = cue_times_ms(sub)
         s_time = ms_to_srt_time(start_ms)
         e_time = ms_to_srt_time(end_ms)
-        text = str(sub["text"])
+        text = str(sub.get("source_text") if use_source and sub.get("source_text") else sub.get("text", ""))
         blocks.append(f"{idx}\n{s_time} --> {e_time}\n{text}\n")
     return "\n".join(blocks)
 

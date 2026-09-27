@@ -36,6 +36,19 @@ def test_profile_namespace_rejects_legacy_overlap_and_path_like_source(tmp_path:
         profiles.profile("../../youtube")
 
 
+def test_profile_namespace_hashes_connection_owned_account_refs(tmp_path: Path) -> None:
+    profiles = namespace(tmp_path)
+
+    first = profiles.profile("bilibili", " Account One ")
+    same = profiles.profile("bilibili", "account   one")
+    second = profiles.profile("bilibili", "Account Two")
+
+    assert first.account_key == same.account_key
+    assert first.path == same.path
+    assert first.account_key != second.account_key
+    assert "account one" not in str(first.path)
+
+
 def test_profile_lock_allows_one_owner_and_releases_cleanly(tmp_path: Path) -> None:
     profile = namespace(tmp_path).profile("youtube")
     first = ProfileLock(profile, owner_id="run-one")

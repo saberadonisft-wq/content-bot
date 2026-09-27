@@ -10,6 +10,15 @@ const options = {
 } as SubtitleBurnOptions;
 
 describe("subtitle draft migration", () => {
+  it('preserves the source revision and actual translation models across reload', () => {
+    const documentMeta = { revision: 12, run_id: 'translation-run', document_role: 'translation',
+      media_fingerprint: 'source-media',
+      source_revision: 3, source_run_id: 'source-run', translation_models: ['gemini-3.7-flash'] };
+    const draft = normalizeSavedDraft({ documentMeta, translatedSourceRevision: 3,
+      cues: [{ id: 'c1', start_ms: 0, end_ms: 1000, text: 'Xin chào', source_text: 'Hello' }] }, options);
+    expect(draft?.documentMeta).toEqual(documentMeta);
+    expect(draft?.translatedSourceRevision).toBe(3);
+  });
   it('preserves independent speech bounds and their provenance across restart', () => {
     const evidence = { method: 'asr_observed', audio_identity: 'a'.repeat(64), transcript_sha256: 'b'.repeat(64),
       start_ms: 800, end_ms: 2100, algorithm: 'pilot', transcript_complete: true };

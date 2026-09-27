@@ -4,11 +4,11 @@ import threading
 import time
 
 import pytest
+from test_gemini_pipeline import cue, pipeline_fixture
 
 from app.api import subtitles as api
 from app.schemas import GeminiSubtitleRequest
 from app.services.subtitle_jobs import SubtitleJobManager, SubtitleJobRecord
-from test_gemini_pipeline import cue, pipeline_fixture
 
 
 def wait_for(manager, job_id, predicate):
@@ -157,8 +157,9 @@ def test_application_start_resumes_same_job_and_only_missing_real_pipeline_chunk
 
 @pytest.mark.parametrize("change", ["media", "policy", "missing"])
 def test_incompatible_recipe_fails_without_generation_or_startup_failure(tmp_path, monkeypatch, application_services, change):
-    from app.services.gemini_subtitles import gemini_generation_cache_key
     from types import SimpleNamespace
+
+    from app.services.gemini_subtitles import gemini_generation_cache_key
 
     monkeypatch.setattr(api.settings, "content_bot_data_dir", tmp_path)
     options = {"model": "gemini-3.6-flash", "pipeline_policy": {"version": 1}}

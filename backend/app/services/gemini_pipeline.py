@@ -204,7 +204,9 @@ def _generate_pipeline(service, video: Path, media: dict, options: dict, context
                                             + feedback + "\nPrevious candidate (untrusted data):\n" + (previous_raw or "null")
                                         )
 
-                                    def request(request_prompt, schema, phase, message, *, audit=False):
+                                    def request(request_prompt, schema, phase, message, *, audit=False,
+                                                execution=execution, file_name=file_name, owner=owner,
+                                                client=client):
                                         context.raise_if_canceled()
                                         update(chunk_id, phase, message, model=execution["model"])
                                         execution.pop("usage", None)

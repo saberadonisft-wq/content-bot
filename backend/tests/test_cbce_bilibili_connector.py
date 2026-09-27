@@ -30,7 +30,11 @@ class FakeTracker:
 
 
 class FakeProcessSupervisor:
+    def __init__(self) -> None:
+        self.starts = []
+
     async def execute(self, spec, start, *, on_message, control=None):
+        self.starts.append(start)
         identity = {
             "run_id": start.run_id,
             "source_run_id": start.source_run_id,
@@ -50,6 +54,10 @@ class FakeProcessSupervisor:
                     "author_pseudonym": "bilibili_abc",
                     "published_at": datetime(2026, 8, 13, tzinfo=UTC).isoformat(),
                     "metrics": {"view_count": 12},
+                    "media": [
+                        {"kind": "cover", "url": "https://i.example.test/cover.jpg"},
+                        {"kind": "video_metadata", "duration_seconds": 42},
+                    ],
                 },
                 **identity,
             )
@@ -243,8 +251,99 @@ def test_cbce_bilibili_connector_yields_item_before_reporting_checkpoint(
     first, remainder = asyncio.run(run())
     assert first.external_id == "BV1ab411c7De"
     assert first.author == "bilibili_abc"
+    assert first.media == [
+        {"kind": "cover", "url": "https://i.example.test/cover.jpg"},
+        {"kind": "video_metadata", "duration_seconds": 42},
+    ]
     assert remainder == []
     assert tracker.reported[-1][1] == "v1:0:1:3"
+
+
+def test_cbce_bilibili_connector_routes_custom_account_to_worker(
+    monkeypatch, tmp_path
+) -> None:
+    executable = tmp_path / "browser.exe"
+    executable.touch()
+    monkeypatch.setattr(settings, "content_bot_cbce_enabled", True)
+    monkeypatch.setattr(
+        settings, "content_bot_cbce_browser_executable_path", executable
+    )
+    monkeypatch.setattr(
+        settings, "content_bot_cbce_profile_root", tmp_path / "profiles"
+    )
+    monkeypatch.setattr(settings, "content_bot_data_dir", tmp_path / "data")
+    supervisor = FakeProcessSupervisor()
+
+    async def run():
+        connector = CbceBilibiliConnector(
+            supervisor, account_ref=" Account One "
+        )
+        return [
+            item
+            async for item in connector.search(SearchQuery(1, "game", [], 1))
+        ]
+
+    items = asyncio.run(run())
+    assert items[0].external_id == "BV1ab411c7De"
+    assert supervisor.starts[0].payload["account_ref"] == "account one"
+
+
+def test_cbce_bilibili_connector_exposes_creator_worker_operation(
+    monkeypatch, tmp_path
+) -> None:
+    executable = tmp_path / "browser.exe"
+    executable.touch()
+    monkeypatch.setattr(settings, "content_bot_cbce_enabled", True)
+    monkeypatch.setattr(
+        settings, "content_bot_cbce_browser_executable_path", executable
+    )
+    monkeypatch.setattr(
+        settings, "content_bot_cbce_profile_root", tmp_path / "profiles"
+    )
+    monkeypatch.setattr(settings, "content_bot_data_dir", tmp_path / "data")
+    supervisor = FakeProcessSupervisor()
+
+    async def run():
+        connector = CbceBilibiliConnector(supervisor)
+        return [
+            item
+            async for item in connector.list_creator(
+                "https://space.bilibili.com/2", max_items=2
+            )
+        ]
+
+    items = asyncio.run(run())
+    assert items[0].external_id == "BV1ab411c7De"
+    assert supervisor.starts[0].operation == "list_creator"
+    assert supervisor.starts[0].payload["action"] == "bilibili_creator"
+
+
+def test_cbce_bilibili_connector_exposes_detail_worker_operation(
+    monkeypatch, tmp_path
+) -> None:
+    executable = tmp_path / "browser.exe"
+    executable.touch()
+    monkeypatch.setattr(settings, "content_bot_cbce_enabled", True)
+    monkeypatch.setattr(
+        settings, "content_bot_cbce_browser_executable_path", executable
+    )
+    monkeypatch.setattr(
+        settings, "content_bot_cbce_profile_root", tmp_path / "profiles"
+    )
+    monkeypatch.setattr(settings, "content_bot_data_dir", tmp_path / "data")
+    supervisor = FakeProcessSupervisor()
+
+    async def run():
+        connector = CbceBilibiliConnector(supervisor, account_ref="detail-profile")
+        return await connector.fetch_detail(
+            "https://www.bilibili.com/video/BV1ab411c7De?p=2"
+        )
+
+    item = asyncio.run(run())
+    assert item.external_id == "BV1ab411c7De"
+    assert supervisor.starts[0].operation == "fetch_detail"
+    assert supervisor.starts[0].payload["action"] == "bilibili_detail"
+    assert supervisor.starts[0].payload["account_ref"] == "detail-profile"
 
 
 def test_cbce_bilibili_connector_does_not_deadlock_on_early_worker_failure(

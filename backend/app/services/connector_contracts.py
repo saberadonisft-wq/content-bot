@@ -122,6 +122,7 @@ class RawContentItem:
     published_at: datetime | None = None
     metrics: dict[str, int] = field(default_factory=dict)
     raw_payload: dict[str, Any] = field(default_factory=dict)
+    media: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SourceConnector(abc.ABC):

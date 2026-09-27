@@ -23,6 +23,7 @@ from app.services.subtitle_render import (
     _video_filter_graph,
     encoder_candidates,
     precision_render_cache_key,
+    precision_render_visual_cache_key,
     render_precision_video,
 )
 from app.services.subtitle_track import subtitles_to_matroska
@@ -93,6 +94,24 @@ def test_render_cache_key_changes_for_timing_style_and_profile() -> None:
     )
     masks = [{"id": "mask-1", "shape": "rectangle", "effect": "blur"}]
     assert precision_render_cache_key(_document(), media, _options(), None, masks) != base
+
+
+def test_visual_render_cache_key_ignores_audio_only_options() -> None:
+    media = {"fingerprint": "a" * 64, "audio_hash": "b" * 64}
+    visual_base = precision_render_visual_cache_key(_document(), media, _options())
+
+    assert (
+        precision_render_visual_cache_key(
+            _document(), media, _options(volume=0.6, fade_in_ms=300)
+        )
+        == visual_base
+    )
+    assert (
+        precision_render_visual_cache_key(
+            _document(), media, _options(font_color="#FF0000")
+        )
+        != visual_base
+    )
 
 
 def test_encoder_selection_has_runtime_fallback_order() -> None:
@@ -764,6 +783,137 @@ def test_precision_render_switches_on_first_valid_frame_and_is_atomic(
     )
     assert second["cache_hit"] is True
     assert second["output_filename"] == first["output_filename"]
+
+
+def test_precision_render_reuses_video_for_audio_only_change(tmp_path: Path) -> None:
+    source = tmp_path / "audio-source.mp4"
+    subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=320x180:r=30:d=1.2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=1.2",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    media = probe_media(source)
+    output_dir = tmp_path / "output"
+    fonts_dir = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo"
+
+    first = render_precision_video(
+        source,
+        _document(101, 801),
+        media,
+        _options(),
+        output_dir,
+        video_id="f" * 12,
+        fonts_dir=fonts_dir,
+        timeout_seconds=60,
+    )
+    second = render_precision_video(
+        source,
+        _document(101, 801),
+        media,
+        _options(volume=0.6, fade_out_ms=200),
+        output_dir,
+        video_id="f" * 12,
+        fonts_dir=fonts_dir,
+        timeout_seconds=60,
+    )
+
+    assert first["video_cache_hit"] is False
+    assert second["audio_only_reuse"] is True
+    assert second["video_cache_hit"] is True
+    assert second["encoder"] == "copy"
+    assert second["output_filename"] != first["output_filename"]
+
+
+def test_precision_render_reuses_video_after_multiple_cuts_for_audio_change(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "cut-audio-source.mp4"
+    subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=320x180:r=30:d=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=3",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    media = probe_media(source)
+    options = _options(
+        video_segments=[
+            {"start_ms": 0, "end_ms": 900},
+            {"start_ms": 1800, "end_ms": 2700},
+        ]
+    )
+    fonts_dir = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "arimo"
+    first = render_precision_video(
+        source,
+        _document(101, 801),
+        media,
+        options,
+        tmp_path / "output",
+        video_id="c" * 12,
+        fonts_dir=fonts_dir,
+        timeout_seconds=60,
+    )
+    second = render_precision_video(
+        source,
+        _document(101, 801),
+        media,
+        {**options, "volume": 0.4, "fade_in_ms": 120},
+        tmp_path / "output",
+        video_id="c" * 12,
+        fonts_dir=fonts_dir,
+        timeout_seconds=60,
+    )
+
+    assert first["duration_ms"] == 1800
+    assert second["audio_only_reuse"] is True
+    assert second["video_cache_hit"] is True
+    assert second["encoder"] == "copy"
 
 
 @pytest.mark.parametrize(

@@ -4,7 +4,18 @@ export type SubtitleTimingSource =
   | "asr_word"
   | "forced_alignment"
   | "imported_srt"
-  | "imported_vtt";
+  | "imported_vtt"
+  | "ocr"
+  | "asr";
+
+export type SubtitleOcrRegion = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type ExtractionMode = "ocr" | "asr" | "gemini";
 
 export type AlignmentMethod = 'asr_observed' | 'ctc_aligned' | 'energy_estimated' | 'interpolated' | 'manual';
 export type SpeechEvidence = {
@@ -48,6 +59,11 @@ export type SubtitleCueV2 = {
 
 export type SubtitleDocumentV2 = {
   schema_version: 2;
+  media_fingerprint?: string | null;
+  document_role?: 'source' | 'translation' | null;
+  source_revision?: number | null;
+  source_run_id?: string | null;
+  translation_models?: string[];
   revision?: number;
   run_id?: string | null;
   language: string;

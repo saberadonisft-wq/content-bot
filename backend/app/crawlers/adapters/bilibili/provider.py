@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from ...runtime import (
     CancellationToken,
@@ -174,7 +174,7 @@ class BilibiliDetailAdapter:
                 CrawlerErrorCode.UNSUPPORTED,
                 "Bilibili detail target is not a video.",
             )
-        self._target = parsed.canonical_url
+        self._target = parsed.media_url
         self._cancellation = cancellation
         await self.provider.open(context, cancellation)
 
@@ -325,9 +325,8 @@ def _normalize_media_metadata(
 ) -> Mapping[str, object] | None:
     kind = str(item.get("kind") or "").strip()
     if kind == "cover":
-        url = str(item.get("url") or "").strip()
-        parsed = urlsplit(url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username:
+        url = normalize_bilibili_cover_url(item.get("url"))
+        if url is None:
             return None
         return {"kind": "cover", "url": url}
     if kind == "video_metadata":
@@ -339,3 +338,26 @@ def _normalize_media_metadata(
         ):
             return {"kind": "video_metadata", "duration_seconds": duration}
     return None
+
+
+def normalize_bilibili_cover_url(value: object) -> str | None:
+    """Keep only public HTTPS cover URLs emitted by the visible provider."""
+
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if url.startswith("//"):
+        url = f"https:{url}"
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+    ):
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))

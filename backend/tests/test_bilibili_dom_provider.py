@@ -57,6 +57,8 @@ class FakeCard:
             return self.title
         if selector == ".bili-video-card__stats--item span":
             return self.view
+        if selector in ("img", "time", "[datetime]", ".bili-video-card__info--date", ".bili-video-card__info--bottom"):
+            return FakeNode(count=0)
         raise AssertionError(selector)
 
 
@@ -196,6 +198,28 @@ def test_dom_provider_moves_to_next_term_only_after_last_page_is_consumed() -> N
     page = asyncio.run(run())
     assert page.next_cursor == "v1:1:1:0"
     assert page.has_more is True
+
+
+@pytest.mark.parametrize(
+    ("attributes", "expected_url"),
+    [
+        ({}, None),
+        ({"src": "data:image/gif;base64,AAAA"}, None),
+        ({"data-src": "//i0.hdslb.com/bfs/archive/cover.jpg"}, "https://i0.hdslb.com/bfs/archive/cover.jpg"),
+        ({"srcset": "//i0.hdslb.com/bfs/archive/cover.jpg 1x"}, "https://i0.hdslb.com/bfs/archive/cover.jpg"),
+        ({"data-srcset": "//i0.hdslb.com/bfs/archive/cover.jpg 2x"}, "https://i0.hdslb.com/bfs/archive/cover.jpg"),
+    ],
+)
+def test_search_card_optional_cover_does_not_drop_video(attributes, expected_url):
+    class ImageCard(FakeCard):
+        def locator(self, selector):
+            if selector == "img":
+                return FakeNode(attributes=attributes)
+            return super().locator(selector)
+
+    video = asyncio.run(BilibiliDomSearchProvider(None)._extract_card(ImageCard("BV1ab411c7De", "1")))
+    assert video.video_id == "BV1ab411c7De"
+    assert video.media == (({"kind": "cover", "url": expected_url},) if expected_url else ())
 
 
 def test_dom_detail_provider_extracts_only_observed_public_fields() -> None:

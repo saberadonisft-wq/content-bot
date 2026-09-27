@@ -110,15 +110,19 @@ def test_render_endpoint_submits_progress_and_attachable_result(
         lambda _data_dir, _overlay_id: overlay_path,
     )
     received: dict = {}
+    monkeypatch.setattr(subtitles_api.settings, "content_bot_data_dir", tmp_path)
 
     def fake_render(*_args, **kwargs):
         received.update(kwargs)
         received['options'] = _args[3]
         kwargs["progress"](65, "encoding", "Đang mã hóa video")
+        filename = f"subtitled_{'a' * 12}_{'b' * 12}.mp4"
+        _args[4].mkdir(parents=True, exist_ok=True)
+        (_args[4] / filename).write_bytes(b'fixture render output')
         return {
             "video_id": "a" * 12,
-            "output_filename": "subtitled_fixture.mp4",
-            "subtitled_video_url": "/api/v1/subtitles/renders/subtitled_fixture.mp4",
+            "output_filename": filename,
+            "subtitled_video_url": f"/api/v1/subtitles/renders/{filename}",
             "cache_hit": False,
             "duration_ms": 5000,
         }

@@ -3,6 +3,8 @@ import { formatTimecode, keyboardTargetMs, parseTimecode } from "./time";
 import type { FrameTiming } from "./types";
 
 type TimecodeInputProps = {
+  disabled?: boolean;
+  showKeyboardHint?: boolean;
   label: string;
   valueMs: number;
   minimumMs?: number;
@@ -12,6 +14,8 @@ type TimecodeInputProps = {
 };
 
 export function TimecodeInput({
+  disabled,
+  showKeyboardHint = true,
   label,
   valueMs,
   minimumMs = 0,
@@ -68,21 +72,24 @@ export function TimecodeInput({
     <div className="subtitle-time-field">
       <label htmlFor={inputId}>{label}</label>
       <input
+        disabled={disabled}
         id={inputId}
         className="subtitle-time-input"
         type="text"
         inputMode="numeric"
         value={draft}
         spellCheck={false}
+        title="↑↓: 1 ms · Shift: 10 ms · Ctrl: 100 ms · Alt: 1 khung hình"
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commitDraft}
         onKeyDown={handleKeyDown}
       />
-      <span id={errorId} className="subtitle-field-helper" role={error ? "alert" : undefined}>
+      {(error || showKeyboardHint) && <span id={errorId} className="subtitle-field-helper"
+        title={error ?? undefined} role={error ? "alert" : undefined}>
         {error ?? "↑↓ 1 ms · Shift 10 · Ctrl 100 · Alt 1 frame"}
-      </span>
+      </span>}
     </div>
   );
 }

@@ -8,6 +8,8 @@ export const TIMING_SOURCE_LABELS: Record<SubtitleTimingSource, string> = {
   forced_alignment: "Aligned",
   imported_srt: "Imported SRT",
   imported_vtt: "Imported VTT",
+  ocr: "OCR",
+  asr: "ASR",
 };
 
 export const speechEvidenceLabel = (cue: SubtitleCueV2): string => {

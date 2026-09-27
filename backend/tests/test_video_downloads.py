@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+import multiprocessing
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +17,22 @@ from app import main
 from app.services import video_download_worker, video_downloads
 from app.services.subtitle_jobs import SubtitleJobQueueFull
 from app.services.video_downloads import VideoDownloadManager, normalize_video_url
+
+
+def _submit_from_process(root, ready, start, output):
+    manager = VideoDownloadManager(Path(root), max_workers=1)
+    manager._schedule = lambda *_args: None
+    ready.set()
+    if not start.wait(10):
+        raise RuntimeError("process coordination barrier timed out")
+    try:
+        record = manager.submit(
+            ["https://www.bilibili.com/video/BVprocess001"],
+            intent_keys=["selection-process-race"],
+        )[0]
+        output.put(record["id"])
+    finally:
+        manager.shutdown()
 
 
 def settled(manager, job_id):
@@ -121,6 +140,21 @@ def test_success_deduplication_metadata_restart_and_deleted_file(tmp_path, worke
         assert result["title"] == "Video thử nghiệm"
         assert (manager.upload_dir / result["filename"]).read_bytes() == b"complete video"
         assert manager.metadata()[job["id"]]["duration"] == 12.5
+        attached = manager.attach_provenance(
+            job["id"],
+            {
+                "candidate_id": "candidate-1",
+                "source_id": "bilibili",
+                "provider_id": "yt-dlp",
+                "external_id": "BV1test",
+                "media_id": "BV1test:p2",
+                "part_index": 2,
+                "creator_id": "creator-1",
+                "source_url": url,
+            },
+        )
+        assert attached["provenance"]["media_id"] == "BV1test:p2"
+        assert manager.metadata()[job["id"]]["provenance"]["part_index"] == 2
         assert manager.submit([url])[0]["id"] == job["id"]
         assert len(created) == 1
     finally:
@@ -134,6 +168,270 @@ def test_success_deduplication_metadata_restart_and_deleted_file(tmp_path, worke
         assert settled(restarted, new_job["id"])["state"] == "succeeded"
     finally:
         restarted.shutdown()
+
+
+def test_intent_key_reuses_persisted_job_after_restart(tmp_path, workers):
+    manager = VideoDownloadManager(tmp_path)
+    url = "https://www.bilibili.com/video/BVintent001?p=1"
+    intent_key = "candidate-1:480"
+    try:
+        first = manager.submit([url], quality="480", intent_keys=[intent_key])[0]
+        assert first["intent_key"] == intent_key
+        assert settled(manager, first["id"])["state"] == "succeeded"
+    finally:
+        manager.shutdown()
+
+    restarted = VideoDownloadManager(tmp_path)
+    try:
+        second = restarted.submit(
+            [url], quality="480", intent_keys=[intent_key]
+        )[0]
+        assert second["id"] == first["id"]
+        assert len(restarted.list()) == 1
+        (restarted.upload_dir / second["filename"]).unlink()
+        third = restarted.submit(
+            [url], quality="480", intent_keys=[intent_key]
+        )[0]
+        assert third["id"] == first["id"]
+        assert settled(restarted, third["id"])["state"] == "succeeded"
+    finally:
+        restarted.shutdown()
+
+
+def test_intent_key_cannot_be_reused_for_another_media_key(tmp_path, workers):
+    manager = VideoDownloadManager(tmp_path)
+    try:
+        first = manager.submit(
+            ["https://www.bilibili.com/video/BVintent002"],
+            intent_keys=["same-intent"],
+        )[0]
+        assert settled(manager, first["id"])["state"] == "succeeded"
+        with pytest.raises(ValueError, match="intent key"):
+            manager.submit(
+                ["https://www.bilibili.com/video/BVintent003"],
+                intent_keys=["same-intent"],
+            )
+    finally:
+        manager.shutdown()
+
+
+def test_separate_processes_reserve_one_persisted_intent(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    ready_events = [context.Event(), context.Event()]
+    output = context.Queue()
+    processes = [
+        context.Process(
+            target=_submit_from_process,
+            args=(str(tmp_path), ready, start, output),
+        )
+        for ready in ready_events
+    ]
+    try:
+        for process in processes:
+            process.start()
+        assert all(ready.wait(10) for ready in ready_events)
+        start.set()
+        for process in processes:
+            process.join(15)
+        assert all(process.exitcode == 0 for process in processes)
+        ids = [output.get(timeout=3) for _ in processes]
+        assert ids[0] == ids[1]
+        assert len(list((tmp_path / "downloads" / "jobs").glob("*.json"))) == 1
+    finally:
+        start.set()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+        output.close()
+
+
+def test_publication_manifest_recovers_after_move_before_state_save(tmp_path):
+    manager = VideoDownloadManager(tmp_path)
+    manager._schedule = lambda *_args: None
+    job = manager.submit(["https://www.bilibili.com/video/BVmanifest001"])[0]
+    manager.shutdown()
+
+    record_path = manager.jobs_dir / f"{job['id']}.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record.update(state="running", phase="extracting", filename="", error=None)
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    manager.upload_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{job['id']}.mp4"
+    (manager.upload_dir / filename).write_bytes(b"already published")
+    manifest_path = manager.work_root / job["id"] / ".publication.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "job_id": job["id"],
+                "filename": filename,
+                "title": "Recovered video",
+                "duration": 12.5,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restarted = VideoDownloadManager(tmp_path)
+    try:
+        recovered = restarted.get(job["id"])
+        assert recovered["state"] == "succeeded"
+        assert recovered["filename"] == filename
+        assert recovered["title"] == "Recovered video"
+        assert not manifest_path.exists()
+    finally:
+        restarted.shutdown()
+
+
+def test_connection_profile_jobs_are_separate_and_never_persist_runtime_path(tmp_path, workers):
+    created, _ = workers
+    manager = VideoDownloadManager(tmp_path)
+    url = "https://www.bilibili.com/video/BVprofile001"
+    try:
+        public = manager.submit([url])[0]
+        private = manager.submit([url], connection_id=" Account One ")[0]
+        assert private["id"] != public["id"]
+        assert private["connection_id"] == "account one"
+        assert private["uses_connection"] is True
+        assert settled(manager, public["id"])["state"] == "succeeded"
+        assert settled(manager, private["id"])["state"] == "succeeded"
+        profile_worker = next(
+            worker for worker in created
+            if worker.payload and worker.payload.get("account_ref") == "account one"
+        )
+        assert profile_worker.payload["profile_root"]
+        assert all(
+            "profile_root" not in json.loads(path.read_text(encoding="utf-8"))
+            for path in manager.jobs_dir.glob("*.json")
+        )
+    finally:
+        manager.shutdown()
+
+
+def test_connection_profile_is_restricted_to_bilibili(tmp_path, workers):
+    manager = VideoDownloadManager(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="Bilibili"):
+            manager.submit(
+                ["https://www.youtube.com/watch?v=profile001"],
+                connection_id="account one",
+            )
+        assert manager.list() == []
+    finally:
+        manager.shutdown()
+
+
+def test_cookie_file_and_connection_profile_cannot_be_combined(tmp_path, workers):
+    manager = VideoDownloadManager(tmp_path)
+    cookie_text = "# Netscape HTTP Cookie File\n"
+    try:
+        with pytest.raises(ValueError, match="không dùng đồng thời"):
+            manager.submit(
+                ["https://www.bilibili.com/video/BVprofile002"],
+                cookie_text=cookie_text,
+                connection_id="account one",
+            )
+        assert manager.list() == []
+    finally:
+        manager.shutdown()
+
+
+def test_worker_uses_the_isolated_chromium_profile_for_connection_cookies(
+    tmp_path, monkeypatch, capsys
+):
+    profile = tmp_path / "profile"
+    default_profile = profile / "Default"
+    default_profile.mkdir(parents=True)
+    destination = tmp_path / "work"
+    destination.mkdir()
+    captured = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            captured.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            assert download is True
+            output = destination / "video.BVprofile001.22.mp4"
+            output.write_bytes(b"video")
+            for hook in captured["post_hooks"]:
+                hook(str(output))
+            return {
+                "id": "BVprofile001",
+                "title": "Profile video",
+                "duration": 4,
+                "extractor_key": "BiliBili",
+            }
+
+    monkeypatch.setattr(
+        video_download_worker.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))
+        ],
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "imageio_ffmpeg",
+        SimpleNamespace(get_ffmpeg_exe=lambda: "ffmpeg"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "yt_dlp",
+        SimpleNamespace(YoutubeDL=FakeYoutubeDL),
+    )
+    monkeypatch.setattr(video_download_worker, "verify_video_file", lambda *_args: None)
+
+    video_download_worker.download(
+        {
+            "url": "https://www.bilibili.com/video/BVprofile001",
+            "quality": "720",
+            "directory": str(destination),
+            "cookie_file": None,
+        },
+        connection_profile=SimpleNamespace(path=profile),
+    )
+
+    assert captured["cookiesfrombrowser"] == (
+        "chromium", str(default_profile), None, None
+    )
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["event"] == "complete"
+
+
+def test_video_file_verifier_requires_a_decodable_video_stream(tmp_path, monkeypatch):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"not-empty")
+    ffmpeg = tmp_path / "ffmpeg.exe"
+    ffmpeg.write_bytes(b"fake executable")
+    captured = {}
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(video_download_worker.subprocess, "run", run)
+    video_download_worker.verify_video_file(media, str(ffmpeg))
+
+    assert captured["command"][captured["command"].index("-map") + 1] == "0:v:0"
+    assert captured["kwargs"]["timeout"] == 30
+
+    monkeypatch.setattr(
+        video_download_worker.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+    with pytest.raises(RuntimeError, match="video stream"):
+        video_download_worker.verify_video_file(media, str(ffmpeg))
 
 
 def test_cancel_active_and_queued_never_publishes_and_cleans_cookies(tmp_path, workers):
@@ -157,6 +455,28 @@ def test_cancel_active_and_queued_never_publishes_and_cleans_cookies(tmp_path, w
         assert not list(work.glob("cookies*.txt"))
         assert "test-secret" not in "".join(path.read_text() for path in manager.jobs_dir.glob("*.json"))
         assert not manager.upload_dir.exists()
+    finally:
+        release.set()
+        manager.shutdown()
+
+
+def test_pause_and_resume_keeps_the_same_download_job(tmp_path, workers):
+    created, options = workers
+    entered, release = threading.Event(), threading.Event()
+    options.update(entered=entered, release=release)
+    manager = VideoDownloadManager(tmp_path, max_workers=1)
+    try:
+        job = manager.submit(["https://b23.tv/pause-resume"])[0]
+        assert entered.wait(1)
+        paused = manager.pause(job["id"])
+        assert paused["id"] == job["id"]
+        assert paused["state"] == "paused"
+        assert settled(manager, job["id"])["state"] == "paused"
+        options.clear()
+        resumed = manager.retry(job["id"])
+        assert resumed["id"] == job["id"]
+        assert settled(manager, job["id"])["state"] == "succeeded"
+        assert len(created) == 2
     finally:
         release.set()
         manager.shutdown()
@@ -219,17 +539,33 @@ def test_download_api_library_metadata_and_delete(tmp_path, workers, application
     response = client.post("/api/v1/videos/downloads", json={"urls": ["https://b23.tv/abc"]})
     assert response.status_code == 202
     job = settled(manager, response.json()[0]["id"])
+    manager.attach_provenance(
+        job["id"],
+        {
+            "candidate_id": "candidate-1",
+            "source_id": "bilibili",
+            "provider_id": "yt-dlp",
+            "external_id": "BVapi001",
+            "media_id": "BVapi001:p1",
+            "part_index": 1,
+            "source_url": "https://www.bilibili.com/video/BVapi001?p=1",
+        },
+    )
     assert client.get("/api/v1/videos/downloads").json()[0]["state"] == "succeeded"
     video = next(video for video in client.get("/api/v1/videos").json() if video["id"] == job["id"])
     assert video["downloaded"] is True
     assert video["title"] == "Video thử nghiệm" and video["platform"] == "Bilibili"
+    assert video["source_id"] == "bilibili" and video["media_id"] == "BVapi001:p1"
+    assert video["part_index"] == 1
     assert video["type"] == "original"  # Existing subtitle/video routes remain compatible.
     assert client.get(video["video_url"]).status_code == 200
     assert client.delete(f"/api/v1/videos/{job['id']}?type=original").status_code == 204
     assert client.post("/api/v1/videos/downloads", json={"urls": ["http://127.0.0.1/x"]}).status_code == 422
     assert client.post("/api/v1/videos/downloads", json={"urls": ["https://b23.tv/a"], "cookie_text": "bad"}).status_code == 422
     assert client.post("/api/v1/videos/downloads/no-such-job/cancel").status_code == 404
+    assert client.post("/api/v1/videos/downloads/no-such-job/pause").status_code == 404
     assert client.post("/api/v1/videos/downloads/no-such-job/retry", json={}).status_code == 404
+    assert client.post("/api/v1/videos/downloads/no-such-job/resume", json={}).status_code == 404
     retry = client.post(f"/api/v1/videos/downloads/{job['id']}/retry", json={})
     assert retry.status_code == 202 and retry.json()["id"] == job["id"]
     assert settled(manager, job["id"])["state"] == "succeeded"

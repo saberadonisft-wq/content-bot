@@ -109,7 +109,7 @@
   .vl-job-title { align-items: flex-start; flex-direction: column; gap: var(--space-1); }
   .vl-job-title strong { max-width: 100%; }
   .vl-quality { flex-wrap: wrap; }
-  .vl-card-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .vl-card-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .vl-card-actions > .vl-secondary { grid-column: 1 / -1; }
   .vl-card-actions > .vl-icon { width: 100%; }
 }

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 
-
 SOURCE_RULES = """SOURCE SUBTITLE CONTRACT (highest priority):
 One readable source subtitle display event = exactly one translated segment.
 First identify every appearance/change/disappearance of the original subtitles.

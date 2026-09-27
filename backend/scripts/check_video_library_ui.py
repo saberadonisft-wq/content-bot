@@ -45,6 +45,15 @@ def main():
 
         def respond(route):
             path = urlparse(route.request.url).path
+            if path.endswith("/thumbnail/select") and route.request.method == "POST":
+                video_id = path.split("/")[-2]
+                route.fulfill(json={
+                    "thumbnail_path": f"/tmp/{video_id}_selected.jpg",
+                    "best_timestamp_s": 12.3,
+                    "score": 42.0,
+                    "thumbnail_url": f"/api/v1/videos/{video_id}/thumbnail?type=selected",
+                })
+                return
             if path.endswith("/thumbnail"):
                 route.fulfill(content_type="image/svg+xml", body='<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#d7e4ee"/><path d="M0 300L200 140L350 260L500 100L640 250V360H0Z" fill="#9db5c9"/></svg>')
                 return
@@ -102,6 +111,8 @@ def main():
         page.get_by_label("Lọc loại video").select_option("original")
         expect(page.locator(".vl-card")).to_have_count(1)
         page.get_by_label("Lọc loại video").select_option("all")
+        page.get_by_role("button", name="Chọn thumbnail: Khám phá thế giới Neverness to Everness", exact=True).click()
+        expect(page.get_by_role("status").filter(has_text="Đã chọn thumbnail ở 12.3 giây")).to_be_visible()
         page.evaluate("navigator.clipboard.writeText('【Video chia sẻ】 https://b23.tv/abc。')")
         page.locator("#vl-links").focus()
         page.keyboard.press("Control+V")

@@ -34,6 +34,15 @@ def test_bilibili_worker_request_is_bounded_and_deduplicates_terms(tmp_path) -> 
     assert request.profile_root == (tmp_path / "profiles-v2").resolve()
 
 
+def test_bilibili_worker_request_accepts_connection_owned_account_ref(tmp_path) -> None:
+    values = payload(tmp_path)
+    values["account_ref"] = " Account One "
+
+    request = BilibiliWorkerRequest.from_payload(values)
+
+    assert request.account_ref == "account one"
+
+
 def test_tieba_worker_request_uses_same_bounded_search_contract(tmp_path) -> None:
     values = payload(tmp_path)
     values["action"] = "tieba_search"
@@ -132,7 +141,7 @@ def test_bilibili_detail_worker_request_canonicalizes_public_video(tmp_path) -> 
     request = _request_from_payload(values)
 
     assert isinstance(request, BilibiliDetailWorkerRequest)
-    assert request.target_url == "https://www.bilibili.com/video/BV1ab411c7De"
+    assert request.target_url == "https://www.bilibili.com/video/BV1ab411c7De?p=2"
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,13 @@
+# Measured worker overlay: Python 3.13 / Windows x64 / ONNX Runtime 1.26.0.
+# Install with --no-deps into a separate path. The backend venv supplies ORT's
+# common requirements (flatbuffers, numpy>=1.21.6, packaging, protobuf); these
+# stay on the base path so the worker does not shadow the backend's NumPy ABI.
+# Every CUDA extra and native library dependency is pinned below.
+onnxruntime-gpu==1.26.0
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cudnn-cu12==9.26.0.51
+nvidia-cufft-cu12==11.4.1.4
+nvidia-curand-cu12==10.3.10.19
+nvidia-nvjitlink-cu12==12.9.86

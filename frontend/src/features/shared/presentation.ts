@@ -2,6 +2,7 @@
 import {
   Database,
   Monitor,
+  Search,
   Video,
   Waypoints
 } from "lucide-react";
@@ -12,9 +13,10 @@ import {
   SourceRun
 } from "../../api";
 
-export type LibraryTab = "channels" | "live" | "connections" | "videos";
+export type LibraryTab = "channels" | "acquisition" | "live" | "connections" | "videos";
 export const LIBRARY_TABS: { id: LibraryTab; label: string; icon: typeof Database }[] = [
   { id: "channels", label: "Kênh theo dõi", icon: Waypoints },
+  { id: "acquisition", label: "Cào video", icon: Search },
   { id: "live", label: "Trực tiếp", icon: Monitor },
   { id: "connections", label: "Kết nối nền tảng", icon: Database },
   { id: "videos", label: "Video", icon: Video },

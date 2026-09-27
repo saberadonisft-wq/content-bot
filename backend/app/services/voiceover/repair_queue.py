@@ -73,7 +73,7 @@ def select_repairs(voice, subtitles: dict, audit: dict, media: dict) -> tuple[li
             # Estimate from this voice's measured utterance, including pronunciation expansion.
             # The real waveform still decides; max_syllables cannot certify a fit.
             available_ms = source['end_ms'] - source['start_ms']
-            count = len(normalized_text(clip.spoken_text, voice.pronunciation).split())
+            count = len(normalized_text(clip.spoken_text, voice.pronunciation, voice.text_normalization).split())
             item['max_syllables'] = min(len(clip.spoken_text.split()) - 1,
                                        math.floor(count * available_ms * 1.1 / actual_ms))
             if item['max_syllables'] < 1:

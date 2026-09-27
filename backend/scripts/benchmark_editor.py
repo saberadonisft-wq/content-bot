@@ -1,17 +1,20 @@
-"""Profile the production editor with 500/2000 synthetic subtitle and voice cues."""
+"""Profile the production editor with configurable synthetic subtitle and voice cues."""
 
 import argparse
 import base64
 import io
 import json
 import math
+import platform
 import struct
+import subprocess
 import sys
 import time
 import wave
 from pathlib import Path
 from urllib.parse import urlparse
 
+import imageio_ffmpeg
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -46,10 +49,30 @@ def main():
     )
     parser.add_argument("--memory-rounds", type=int, default=4)
     parser.add_argument("--seeks-per-round", type=int, default=20)
+    parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument(
+        "--counts",
+        type=int,
+        nargs="+",
+        default=[500, 2000],
+        help="Cue counts to profile; pass 5000 for the large-editor acceptance run.",
+    )
     args = parser.parse_args()
-    if min(args.memory_rounds, args.seeks_per_round) < 1:
-        parser.error("Memory rounds and seeks must be positive")
-    video_bytes = (args.output.parent / "fixture.mp4").read_bytes()
+    if min(args.memory_rounds, args.seeks_per_round, args.repetitions, *args.counts) < 1:
+        parser.error("Memory rounds, seeks, and cue counts must be positive")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    duration_seconds = max(args.counts) + 100
+    fixture = args.output.parent / f"editor-fixture-{duration_seconds}s.mp4"
+    if not fixture.exists():
+        subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", f"color=c=gray:s=32x32:r=2:d={duration_seconds}",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart", str(fixture)],
+            check=True, capture_output=True, timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    video_bytes = fixture.read_bytes()
     audio = io.BytesIO()
     with wave.open(audio, "wb") as wav:
         wav.setparams((1, 2, 24_000, 0, "NONE", "not compressed"))
@@ -77,7 +100,8 @@ def main():
                 "--enable-precise-memory-info",
             ],
         )
-        for count in (500, 2000):
+        for run_index in range(len(args.counts) * args.repetitions):
+            count = args.counts[run_index % len(args.counts)]
             cues = [
                 {
                     "id": f"cue-{i}",
@@ -95,10 +119,10 @@ def main():
                 "version": 2,
                 "videoId": video_id,
                 "projectName": f"Fixture {count}",
-                "mediaDurationMs": 2_100_000,
+                "mediaDurationMs": duration_seconds * 1000,
                 "cues": cues,
                 "selectedCueId": "cue-0",
-                "videoClips": [{"id": "video-1", "start_ms": 0, "end_ms": 2_100_000}],
+                "videoClips": [{"id": "video-1", "start_ms": 0, "end_ms": duration_seconds * 1000}],
             }
             voice = {
                 "schema_version": 1,
@@ -175,8 +199,10 @@ def main():
                 }
                 if parsed.path.endswith("/auth/me"):
                     data = user
+                elif parsed.path.endswith("/versions"):
+                    data = {"versions": [], "total": 0, "offset": 0, "limit": 20}
                 elif parsed.path.endswith(
-                    ("/sources", "/keywords", "/jobs", "/profiles")
+                    ("/sources", "/keywords", "/jobs", "/profiles", "/separations")
                 ):
                     data = []
                 elif parsed.path.endswith("/voiceover/status"):
@@ -197,14 +223,14 @@ def main():
                     data = {
                         "fingerprint": "fixture",
                         "file_size_bytes": len(video_bytes),
-                        "duration_ms": 2_100_000,
+                        "duration_ms": duration_seconds * 1000,
                         "source_start_ms": 0,
                         "time_base_numerator": 1,
                         "time_base_denominator": 16384,
                         "frame_rate_numerator": 2,
                         "frame_rate_denominator": 1,
                         "average_fps": 2,
-                        "frame_count": 4200,
+                        "frame_count": duration_seconds * 2,
                         "is_vfr": False,
                         "frame_pts_ms": [],
                         "frame_index_source": "average_fps",
@@ -296,6 +322,18 @@ def main():
                 )
             renderer_ready_ms = (time.perf_counter() - start) * 1000
             mounted_rows = page.locator(".subtitle-cue-editor").count()
+            assert 0 < mounted_rows <= 8, mounted_rows
+            # Reach the actual final cue: a requested count alone is not evidence
+            # that draft migration retained the whole large document.
+            page.locator(".subtitle-virtual-list").evaluate("el => {el.scrollTop=el.scrollHeight;}")
+            page.wait_for_function(
+                "text => Array.from(document.querySelectorAll('.subtitle-cue-editor textarea')).some(el => el.value === text)",
+                arg=cues[-1]["text"],
+            )
+            tail_rows = page.locator(".subtitle-cue-editor").count()
+            assert 0 < tail_rows <= 8, tail_rows
+            page.locator(".subtitle-virtual-list").evaluate("el => {el.scrollTop=0;}")
+            page.wait_for_function("document.querySelector('.subtitle-cue-editor textarea')?.value==='Nội dung kiểm tra số 0'")
             page.evaluate("window.resetFrames()")
             page.get_by_role("button", name="Phát", exact=True).click()
             page.wait_for_timeout(3500)
@@ -305,23 +343,30 @@ def main():
             page.evaluate("window.resetFrames()")
             # Exercise timeline scrolling, subtitle list virtualization and a real pointer drag.
             block = page.locator(".voice-clip").first
+            before_left = block.evaluate("el => parseFloat(el.style.left)")
             box = block.bounding_box()
-            if box:
-                page.mouse.move(
-                    box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-                )
-                page.mouse.down()
-                page.mouse.move(
-                    box["x"] + box["width"] / 2 + 20,
-                    box["y"] + box["height"] / 2,
-                    steps=10,
-                )
-                page.mouse.up()
+            assert box, "Voice clip must be visible for the drag benchmark"
+            page.mouse.move(
+                box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            )
+            page.mouse.down()
+            page.mouse.move(
+                box["x"] + box["width"] / 2 + 20,
+                box["y"] + box["height"] / 2,
+                steps=60,
+            )
+            page.mouse.up()
+            page.wait_for_function(
+                "before => parseFloat(document.querySelector('.voice-clip').style.left) > before",
+                arg=before_left,
+            )
             page.locator("summary").filter(has_text="Trộn âm thanh").click()
             slider = page.get_by_label("Âm lượng giọng", exact=True)
             slider.focus()
+            initial_volume = float(slider.input_value())
             for _ in range(5):
                 slider.press("ArrowLeft")
+            assert float(slider.input_value()) < initial_volume
             page.wait_for_timeout(100)
             edits = page.evaluate("structuredClone(profile)")
             page.evaluate("window.resetFrames()")
@@ -353,6 +398,8 @@ def main():
             def summarize(data):
                 frames = sorted(data["frames"])
                 return {
+                    "frame_count": len(frames),
+                    "observed_ms": sum(frames),
                     "fps": 1000 / (sum(frames) / len(frames)),
                     "frame_interval_p95_ms": frames[int(len(frames) * 0.95)],
                     "long_tasks": data["longTasks"],
@@ -361,9 +408,12 @@ def main():
             results.append(
                 {
                     "cues": count,
+                    "repetition": run_index // len(args.counts) + 1,
                     "ready_ms": ready_ms,
                     "renderer_ready_ms": renderer_ready_ms,
                     "mounted_subtitle_rows": mounted_rows,
+                    "mounted_tail_rows": tail_rows,
+                    "last_cue_verified": cues[-1]["id"],
                     "playback": summarize(playback),
                     "drag_and_volume": summarize(edits),
                     "interactions": summarize(interactions),
@@ -378,9 +428,14 @@ def main():
             page.close()
         report = {
             "browser": browser.version,
+            "platform": platform.platform(),
+            "fixture": str(fixture),
+            "media_duration_seconds": duration_seconds,
             "url": args.url,
             "memory_rounds": args.memory_rounds,
             "seeks_per_round": args.seeks_per_round,
+            "cue_counts": args.counts,
+            "repetitions": args.repetitions,
             "mode": "editor; synthetic 32px/2fps video and voice; "
             + (
                 "native preview fallback"

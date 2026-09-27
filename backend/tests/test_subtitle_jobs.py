@@ -71,6 +71,80 @@ def test_job_progress_result_and_deduplication_are_persisted(tmp_path: Path) -> 
     restored.shutdown()
 
 
+def test_successful_ocr_cpu_fallback_does_not_mask_a_later_cuda_retry(tmp_path):
+    manager = SubtitleJobManager(tmp_path, max_workers=1)
+    try:
+        first = manager.submit(
+            "ocr",
+            "same-video",
+            lambda _: {
+                "runtime": {
+                    "requested_device": "auto",
+                    "effective_device": "cpu",
+                    "fallback_reason": "ocr_cuda_init_failed",
+                }
+            },
+        )
+        _wait_for_state(manager, first["id"], {"succeeded"})
+    finally:
+        manager.shutdown()
+
+    restored = SubtitleJobManager(tmp_path, max_workers=1)
+    try:
+        retry = restored.submit(
+            "ocr",
+            "same-video",
+            lambda _: {"runtime": {"effective_device": "cuda"}},
+        )
+        assert retry["id"] != first["id"]
+        completed = _wait_for_state(restored, retry["id"], {"succeeded"})
+        assert completed["result"]["runtime"]["effective_device"] == "cuda"
+
+        attached = restored.submit(
+            "ocr",
+            "same-video",
+            lambda _: pytest.fail("A successful CUDA result should still dedupe"),
+        )
+        assert attached["id"] == retry["id"]
+    finally:
+        restored.shutdown()
+
+
+def test_successful_ocr_cpu_fallback_can_be_retried_in_same_manager(tmp_path):
+    manager = SubtitleJobManager(tmp_path, max_workers=1)
+    try:
+        first = manager.submit(
+            "ocr",
+            "same-video",
+            lambda _: {
+                "runtime": {
+                    "requested_device": "auto",
+                    "effective_device": "cpu",
+                    "fallback_reason": "ocr_cuda_init_failed",
+                }
+            },
+        )
+        _wait_for_state(manager, first["id"], {"succeeded"})
+
+        retry = manager.submit(
+            "ocr",
+            "same-video",
+            lambda _: {"runtime": {"effective_device": "cuda"}},
+        )
+        assert retry["id"] != first["id"]
+        completed = _wait_for_state(manager, retry["id"], {"succeeded"})
+        assert completed["result"]["runtime"]["effective_device"] == "cuda"
+
+        attached = manager.submit(
+            "ocr",
+            "same-video",
+            lambda _: pytest.fail("A successful CUDA result should still dedupe"),
+        )
+        assert attached["id"] == retry["id"]
+    finally:
+        manager.shutdown()
+
+
 def test_running_job_can_be_canceled_cooperatively(tmp_path: Path) -> None:
     manager = SubtitleJobManager(tmp_path, max_workers=1)
 

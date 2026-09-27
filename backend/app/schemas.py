@@ -251,11 +251,38 @@ class ItemOutput(BaseModel):
     insights: ContentInsights
     first_seen_at: datetime
     last_seen_at: datetime
+    caption_original: str | None = None
+    caption_edited: str | None = None
+    caption_edited_at: datetime | None = None
 
 
 class PagedItems(BaseModel):
     items: list[ItemOutput]
     total: int
+
+
+class CaptionCleanRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class CaptionCleanResponse(BaseModel):
+    original_text: str
+    cleaned_text: str
+    hashtags: list[str] = Field(default_factory=list, max_length=100)
+    safe_filename: str = Field(min_length=1, max_length=80)
+    changed: bool
+
+
+class CaptionApplyRequest(BaseModel):
+    original_text: str | None = Field(default=None, max_length=20_000)
+    edited_text: str = Field(min_length=1, max_length=20_000)
+
+
+class CaptionApplyResponse(BaseModel):
+    item_id: int
+    caption_original: str
+    caption_edited: str
+    caption_edited_at: datetime
 
 
 class TrendPoint(BaseModel):
@@ -278,6 +305,8 @@ TimingSource = Literal[
     "forced_alignment",
     "imported_srt",
     "imported_vtt",
+    "ocr",
+    "asr",
 ]
 
 
@@ -356,6 +385,11 @@ class SubtitleCueV2(BaseModel):
 
 class SubtitleDocumentV2(BaseModel):
     schema_version: Literal[2] = 2
+    media_fingerprint: str | None = Field(default=None, min_length=1, max_length=128)
+    document_role: Literal['source', 'translation'] | None = None
+    source_revision: StrictInt | None = Field(default=None, ge=0)
+    source_run_id: str | None = Field(default=None, max_length=64)
+    translation_models: list[str] = Field(default_factory=list, max_length=10)
     revision: StrictInt = Field(default=0, ge=0)
     run_id: str | None = Field(default=None, max_length=64)
     language: str = Field(
@@ -581,9 +615,55 @@ class GeminiSubtitleRequest(BaseModel):
     current_document: SubtitleDocumentV2 | None = None
 
 
+class SubtitleOcrRegion(BaseModel):
+    x: float = Field(default=10.0, ge=0.0, le=100.0)
+    y: float = Field(default=75.0, ge=0.0, le=100.0)
+    width: float = Field(default=80.0, ge=1.0, le=100.0)
+    height: float = Field(default=15.0, ge=1.0, le=100.0)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> SubtitleOcrRegion:
+        if self.x + self.width > 100.000_001:
+            raise ValueError("Region width exceeds bounds")
+        if self.y + self.height > 100.000_001:
+            raise ValueError("Region height exceeds bounds")
+        return self
+
+
+class SubtitleOcrRequest(BaseModel):
+    video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
+    region: SubtitleOcrRegion = Field(default_factory=SubtitleOcrRegion)
+    auto_probe: bool = Field(default=False)
+    source_language: str | None = Field(default=None, max_length=32)
+    sample_fps: float = Field(default=5.0, ge=1.0, le=30.0)
+    min_duration_ms: StrictInt = Field(default=300, ge=50, le=10_000)
+    max_gap_ms: StrictInt = Field(default=250, ge=50, le=5_000)
+
+
+class SubtitleAsrRequest(BaseModel):
+    video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
+    source_language: str | None = Field(default=None, max_length=32)
+    model: str = Field(default="small", max_length=64)
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    compute_type: str = "auto"
+
+
+class SubtitleTranslateRequest(BaseModel):
+    video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
+    document: SubtitleDocumentV2
+    bilingual: bool = True
+    target_language: str = Field(default="vi", max_length=32)
+    model: str | None = Field(default=None, max_length=128)
+    batch_size: StrictInt = Field(default=20, ge=1, le=100)
+
+
+class SubtitleExportSourceRequest(BaseModel):
+    document: SubtitleDocumentV2
+
+
 class SubtitleJobResponse(BaseModel):
     id: str = Field(pattern=r"^[a-f0-9]{20}$")
-    kind: Literal["alignment", "generation", "render", "review"]
+    kind: Literal["alignment", "generation", "render", "review", "ocr", "asr", "translation", "separation", "scene"]
     dedupe_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: Literal["queued", "running", "succeeded", "failed", "canceled"]
     progress: StrictInt = Field(ge=0, le=100)
@@ -608,6 +688,51 @@ class SubtitleVideoSegment(BaseModel):
     def validate_segment_range(self) -> SubtitleVideoSegment:
         if self.end_ms <= self.start_ms:
             raise ValueError("end_ms must be after start_ms")
+        return self
+
+
+class SubtitleSceneDetectRequest(BaseModel):
+    video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
+    threshold: float = Field(default=27, ge=1, le=100, allow_inf_nan=False)
+    min_scene_len_s: float = Field(default=1.5, ge=0.5, le=30, allow_inf_nan=False)
+    target_duration_s: float = Field(default=45, ge=5, le=180, allow_inf_nan=False)
+    min_duration_s: float = Field(default=25, ge=1, le=180, allow_inf_nan=False)
+    max_duration_s: float = Field(default=75, ge=5, le=300, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_chunk_durations(self) -> SubtitleSceneDetectRequest:
+        if self.min_duration_s > self.target_duration_s:
+            raise ValueError("min_duration_s must not exceed target_duration_s")
+        if self.target_duration_s > self.max_duration_s:
+            raise ValueError("target_duration_s must not exceed max_duration_s")
+        return self
+
+
+class SubtitleSceneExportChunk(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    start_ms: StrictInt = Field(ge=0)
+    end_ms: StrictInt = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> SubtitleSceneExportChunk:
+        if self.end_ms <= self.start_ms:
+            raise ValueError("end_ms must be after start_ms")
+        return self
+
+
+class SubtitleSceneExportRequest(BaseModel):
+    video_id: str = Field(pattern=r"^[a-f0-9]{12,32}$")
+    source_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    chunks: list[SubtitleSceneExportChunk] = Field(min_length=1, max_length=100)
+    document: SubtitleDocumentV2 | None = None
+
+    @model_validator(mode="after")
+    def validate_chunks(self) -> SubtitleSceneExportRequest:
+        previous_end = -1
+        for chunk in self.chunks:
+            if chunk.start_ms < previous_end:
+                raise ValueError("chunks must be ordered and non-overlapping")
+            previous_end = chunk.end_ms
         return self
 
 
@@ -799,6 +924,12 @@ class VideoLibraryItem(BaseModel):
     metrics: dict[str, int] = {}
     title: str | None = None
     source_url: str | None = None
+    source_id: str | None = None
+    provider_id: str | None = None
+    external_id: str | None = None
+    media_id: str | None = None
+    part_index: int | None = None
+    creator_id: str | None = None
     platform: str | None = None
     duration: float | None = None
     downloaded: bool = False

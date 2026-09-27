@@ -15,6 +15,7 @@ from ...runtime import (
     PlaywrightBrowserHandle,
     RunContext,
 )
+from .dom_provider import _extract_card_cover, _extract_card_published_at
 from .provider import BilibiliVideo, BilibiliVideoPage
 from .targets import BilibiliTargetKind, parse_bilibili_target
 
@@ -24,6 +25,7 @@ _VIDEO_LINK = "a[href*='/video/']"
 _PAGE_ROOT = ".vui_pagenation.video-pagination"
 _PAGE_SIDE = ".vui_pagenation--btn-side"
 _PAGE_ACTIVE = ".vui_button--active.vui_pagenation--btn-num"
+_LOGIN_GATE = (".login-tip-content", ".login-tip-content-item")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,17 +186,40 @@ class BilibiliDomCreatorProvider:
 
     async def _wait_for_creator_layout(self) -> None:
         assert self._page is not None
-        for _ in range(80):
+        for attempt in range(80):
             if (
                 await self._page.locator(_CARD).count()
                 or await self._page.locator(_PAGE_ROOT).count()
             ):
                 return
+            if attempt % 4 == 0 and await self._login_gate_visible():
+                raise CrawlerFailure(
+                    CrawlerErrorCode.AUTH_REQUIRED,
+                    "Bilibili creator listing requires login in the visible browser profile.",
+                )
             await asyncio.sleep(0.25)
         raise CrawlerFailure(
             CrawlerErrorCode.PARSE_CHANGED,
             "Bilibili public creator video list did not hydrate.",
         )
+
+    async def _login_gate_visible(self) -> bool:
+        """Distinguish a login-gated profile from a changed creator layout."""
+        assert self._page is not None
+        for selector in _LOGIN_GATE:
+            nodes = self._page.locator(selector)
+            count = min(await nodes.count(), 5)
+            for index in range(count):
+                node = nodes.nth(index)
+                is_visible = getattr(node, "is_visible", None)
+                if callable(is_visible) and await is_visible():
+                    return True
+
+        body = self._page.locator("body")
+        if not await body.count():
+            return False
+        text = " ".join((await body.inner_text()).split())
+        return "登录后你可以" in text and "立即登录" in text
 
     async def _advance_to_page(
         self,
@@ -255,7 +280,15 @@ class BilibiliDomCreatorProvider:
             return None
         if target.kind is not BilibiliTargetKind.VIDEO or target.external_id is None:
             return None
-        return BilibiliVideo(target.external_id, target.canonical_url, title)
+        cover_url = await _extract_card_cover(card)
+        published_at = await _extract_card_published_at(card)
+        return BilibiliVideo(
+            target.external_id,
+            target.canonical_url,
+            title,
+            published_at=published_at,
+            media=({"kind": "cover", "url": cover_url},) if cover_url else (),
+        )
 
     async def _has_next_page(self) -> bool:
         assert self._page is not None

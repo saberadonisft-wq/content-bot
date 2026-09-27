@@ -24,7 +24,25 @@ export type VoiceClip = {
 export type VoiceDocument = {
   schema_version: 1 | 2; project_id: string; video_fingerprint: string; revision: number;
   profile: VoiceProfile; clips: VoiceClip[]; pronunciation: Record<string, string>;
-  mix: { enabled: boolean; muted: boolean; gain: number; original_gain: number; mode: 'voice' | 'mix' | 'duck' };
+  text_normalization?: 'off' | 'vi-context-v1';
+  mix: {
+    enabled: boolean; muted: boolean; gain: number; original_gain: number;
+    mode: 'voice' | 'mix' | 'duck'; background_stem_id?: string | null;
+    background_stem_checksum?: string | null; background_source_fingerprint?: string | null;
+    background_gain?: number;
+  };
+};
+export type SeparationStem = {
+  checksum: string; duration_ms: number; sample_rate: number; channels: number; url: string;
+};
+export type Separation = {
+  stem_id: string; method: 'demucs' | 'center_reduction'; model?: string | null; device?: string | null;
+  source_fingerprint: string; source_audio_checksum: string; warnings: string[];
+  stems: Record<string, SeparationStem>;
+};
+export type SeparationJob = {
+  id: string; kind: 'separation'; state: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
+  progress: number; phase: string; message: string; error?: string | null; result?: Separation | null;
 };
 export type VoiceJob = {
   phase?: string; sync_progress?: number;

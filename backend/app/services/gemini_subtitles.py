@@ -624,7 +624,7 @@ class GeminiSubtitleService:
 
     def _generate_content(
         self,
-        file_name: str,
+        file_name: str | None,
         prompt_text: str,
         *,
         cancel_event: threading.Event,
@@ -649,7 +649,7 @@ class GeminiSubtitleService:
             "contents": [
                 {
                     "parts": [
-                        {"file_data": {"mime_type": "video/mp4", "file_uri": file_uri}},
+                        *([{"file_data": {"mime_type": "video/mp4", "file_uri": file_uri}}] if file_name else []),
                         {"text": prompt_text},
                     ]
                 }
@@ -664,11 +664,14 @@ class GeminiSubtitleService:
             from .gemini_schema import response_schema as wire_schema
             payload["generationConfig"]["responseSchema"] = wire_schema(response_schema)
         deadline = min(chunk_deadline or float("inf"), time.monotonic() + self.settings.timeout_seconds)
+        previous_deadline = getattr(self._request_context, 'deadline', None)
+        self._request_context.deadline = min(deadline, previous_deadline or float('inf'))
+        deadline = self._request_context.deadline
         attempt = 0
         max_retries = self.settings.max_retries
         owned_client = client is None
-        client = client or self._client()
         try:
+            client = client or self._client()
             while True:
                 if cancel_event.is_set():
                     raise GeminiSubtitleCanceled("Da huy tao phu de bang Gemini")
@@ -689,10 +692,10 @@ class GeminiSubtitleService:
                         headers=self._api_headers(api_key or self._api_key()),
                         json=payload,
                         timeout=httpx.Timeout(
-                            connect=30,
+                            connect=min(30, remaining),
                             read=min(read_timeout_seconds, remaining),
-                            write=60,
-                            pool=10,
+                            write=min(60, remaining),
+                            pool=min(10, remaining),
                         ),
                     )
                 except httpx.TimeoutException as exc:
@@ -778,12 +781,27 @@ class GeminiSubtitleService:
                                           and isinstance(value, int) and not isinstance(value, bool)}
                 return text.strip()
         finally:
-            if owned_client:
+            self._request_context.deadline = previous_deadline
+            if owned_client and client is not None:
                 client.close()
 
     def _audit_content(self, file_name: str, prompt: str, **kwargs) -> str:
         """A separate media observation request, with the same dispatch/budget rules."""
         return self._generate_content(file_name, prompt, **kwargs)
+
+    def _generate_content_direct(
+        self, prompt_text: str, *, cancel_event: threading.Event,
+        client: httpx.Client | None = None, api_key: str | None = None, model: str | None = None,
+        response_schema: dict[str, Any] | None = None, execution: dict[str, Any] | None = None,
+        deadline: float | None = None, read_timeout_seconds: float = 120,
+        fallback: ModelFallback | None = None, quota_scope: str = 'unknown-project',
+        model_guard: Callable[[str], None] | None = None, status_callback: Any = None,
+    ) -> str:
+        """Text and video share dispatch, fallback, quota classification and request deadlines."""
+        return self._generate_content(None, prompt_text, cancel_event=cancel_event, client=client,
+            api_key=api_key, model=model, response_schema=response_schema, execution=execution,
+            chunk_deadline=deadline, read_timeout_seconds=read_timeout_seconds, fallback=fallback,
+            quota_scope=quota_scope, model_guard=model_guard, status_callback=status_callback, managed=True)
 
     @staticmethod
     def _build_prompt(

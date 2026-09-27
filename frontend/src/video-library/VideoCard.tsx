@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
-import { Download, ExternalLink, Film, LoaderCircle, Play, Trash2 } from "lucide-react";
+import { Download, ExternalLink, Film, LoaderCircle, Play, Sparkles, Trash2 } from "lucide-react";
 import type { VideoLibraryItem } from "../api";
 import { getAuthHeader } from "../transport/client";
 import { durationLabel, formatBytes, mediaUrl } from "./model";
 
-export function VideoCard({ video, selected, selectionDisabled, onToggleSelect, onDelete, onDownload, onPreview }: {
+export function VideoCard({ video, selected, selectionDisabled, onToggleSelect, onDelete, onDownload, onSelectThumbnail, onPreview }: {
   video: VideoLibraryItem;
   selected: boolean;
   selectionDisabled: boolean;
   onToggleSelect: () => void;
   onDelete: (video: VideoLibraryItem) => Promise<void>;
   onDownload: (video: VideoLibraryItem) => Promise<void>;
+  onSelectThumbnail: (video: VideoLibraryItem) => Promise<void>;
   onPreview: (video: VideoLibraryItem) => void;
 }) {
   const [thumbnail, setThumbnail] = useState("");
@@ -51,6 +52,7 @@ export function VideoCard({ video, selected, selectionDisabled, onToggleSelect, 
         <button className="vl-button vl-icon" type="button" disabled={busy} onClick={() => void act(() => onDownload(video))} aria-label={video.type === "scraped" ? `Tải về thư viện: ${title}` : `Lưu ra máy: ${title}`} title={video.type === "scraped" ? "Tải về thư viện" : "Lưu ra máy"}>
           {busy ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
         </button>
+        {video.type === "original" && <button className="vl-button vl-icon" type="button" disabled={busy} onClick={() => void act(() => onSelectThumbnail(video))} aria-label={`Chọn thumbnail: ${title}`} title="Chọn thumbnail tự động"><Sparkles size={16} /></button>}
         {video.source_url && <a className="vl-button vl-icon" href={mediaUrl(video.source_url)} target="_blank" rel="noreferrer" aria-label={`Mở nguồn: ${title}`} title="Mở link gốc"><ExternalLink size={16} /></a>}
         <button className="vl-button vl-icon vl-danger" type="button" disabled={busy || selectionDisabled} onClick={() => void act(() => onDelete(video))} aria-label={`Xóa ${title}`} title="Xóa video"><Trash2 size={16} /></button>
       </div>

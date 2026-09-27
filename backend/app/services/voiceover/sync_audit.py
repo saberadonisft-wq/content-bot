@@ -201,7 +201,7 @@ def run_sync_audit(store: VoiceStore, owner: str, identifier: str, video: Path, 
                         checkpoint()
                         check()
                         row['dubbed_audio'] = inspect_dubbed_speech(
-                            store.path(owner, 'assets', clip.asset_id, '.wav'), normalized_text(clip.spoken_text, voice.pronunciation),
+                            store.path(owner, 'assets', clip.asset_id, '.wav'), normalized_text(clip.spoken_text, voice.pronunciation, voice.text_normalization),
                             checksum=quiet['checksum'], model_dir=model_dir, whisper_model=dubbed_whisper_model,
                             cache_dir=store.owner_root(owner) / 'dubbed-speech', cancel=cancel)
                         row['issues'].extend(row['dubbed_audio']['issues'])

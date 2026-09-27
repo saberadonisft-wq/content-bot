@@ -4,10 +4,34 @@ import type {
   SubtitleCueV2,
   SubtitleDocumentV2,
   SubtitleMaskRegion,
+  SubtitleOcrRegion,
   SubtitleParseResultV2
 } from "../subtitles/types";
 import { API_BASE, getAuthHeader, request } from "../transport/client";
-import type { GeminiApiStatus, GeminiModelsResponse, GeminiSubtitleJob, GeminiSubtitleOptions, SubtitleAlignmentOptions, SubtitleAssPreviewResult, SubtitleBurnOptions, SubtitleBurnResult, SubtitleItem, SubtitleJob, SubtitleOverlayRenderOptions, SubtitleOverlayUploadResult, SubtitleParseResult, SubtitleRenderJob, SubtitleRenderOptionsV2, SubtitleUploadResult } from "./types";
+import type {
+  GeminiApiStatus,
+  GeminiModelsResponse,
+  GeminiSubtitleJob,
+  GeminiSubtitleOptions,
+  SubtitleAlignmentOptions,
+  SubtitleAsrOptions,
+  SubtitleAsrRuntimeStatus,
+  SubtitleAssPreviewResult,
+  SubtitleBurnOptions,
+  SubtitleBurnResult,
+  SubtitleItem,
+  SubtitleJob,
+  SubtitleOcrOptions,
+  SubtitleOverlayRenderOptions,
+  SubtitleOverlayUploadResult,
+  SubtitleParseResult,
+  SubtitleRenderJob,
+  SubtitleRenderOptionsV2,
+  SubtitleSceneJob,
+  SubtitleSceneChunk,
+  SubtitleTranslateOptions,
+  SubtitleUploadResult,
+} from "./types";
 export const uploadSubtitleVideo = async (file: File, signal?: AbortSignal) => {
   const formData = new FormData();
   formData.append("file", file);
@@ -105,32 +129,10 @@ export const geminiSubtitleJob = (jobId: string, signal?: AbortSignal) =>
 export const resumeGeminiSubtitleJob = (jobId: string, signal?: AbortSignal) =>
   request<GeminiSubtitleJob>(`/subtitles/gemini/jobs/${jobId}/resume`, { method: "POST", signal });
 
-export type GeminiReviewScope = { combined?: boolean; mode: "all" | "range" | "selected" | "long" | "timing"; start_ms?: number; end_ms?: number; cue_ids?: string[]; region_ids?: string[] };
-export type TimingReviewRegion = { id: string; start_ms: number; end_ms: number; cue_ids: string[]; locked_count: number; reasons: string[] };
-export const scanSubtitleTiming = (videoId: string, document: SubtitleDocumentV2) =>
-  request<{ regions: TimingReviewRegion[] }>("/subtitles/v2/review/timing-scan", { method: "POST", body: JSON.stringify({ video_id: videoId, document }) });
-export type GeminiReviewProposal = {
-  id: string; operation: string; issue: string; start_ms: number; end_ms: number;
-  before: SubtitleCueV2[]; after: SubtitleCueV2[]; cue_ids: string[];
-  reason: string; evidence: string; certainty: string; source_revision: number;
-  state: "pending" | "applied" | "skipped" | "conflict"; locked: boolean;
-};
-export type GeminiReview = { id: string; video_id: string; state: string; model: string; proposals: GeminiReviewProposal[]; snapshot: SubtitleDocumentV2; can_undo?: boolean; warnings: { code: string; message: string }[] };
-export type GeminiReviewJob = Omit<SubtitleJob, "result"> & { result?: GeminiReview | null };
-export const createGeminiReview = (videoId: string, document: SubtitleDocumentV2, scope: GeminiReviewScope, model?: string) =>
-  request<{ review: GeminiReview; job: GeminiReviewJob }>("/subtitles/v2/review/gemini", { method: "POST", body: JSON.stringify({ video_id: videoId, document, scope, model }) });
-export const getGeminiReview = (id: string, signal?: AbortSignal) => request<GeminiReview>(`/subtitles/gemini/reviews/${id}`, { signal });
-export const getGeminiReviewJob = (id: string, signal?: AbortSignal) => request<GeminiReviewJob>(`/subtitles/gemini/jobs/${id}`, { signal });
-export const resumeGeminiReview = (id: string) => request<GeminiReviewJob>(`/subtitles/gemini/reviews/${id}/resume`, { method: "POST" });
-export const applyGeminiReview = (id: string, document: SubtitleDocumentV2, proposalIds: string[], skip = false) =>
-  request<{ document: SubtitleDocumentV2; review: GeminiReview; applied_ids: string[]; can_undo: boolean }>(`/subtitles/gemini/reviews/${id}/apply`, { method: "POST", body: JSON.stringify({ document, proposal_ids: proposalIds, skip }) });
-export const undoGeminiReview = (id: string, document: SubtitleDocumentV2) =>
-  request<{ document: SubtitleDocumentV2; review: GeminiReview; can_undo: boolean }>(`/subtitles/gemini/reviews/${id}/undo`, { method: "POST", body: JSON.stringify({ document }) });
-
-export type SubtitleVersion = { id: string; name: string; source: string; model: string | null; created_at: string; cue_count: number; document: SubtitleDocumentV2 };
-export const listSubtitleVersions = (videoId: string, offset = 0, signal?: AbortSignal) => request<{ versions: Omit<SubtitleVersion, "document">[]; total: number }>(`/subtitles/videos/${videoId}/versions?offset=${offset}&limit=20`, { signal });
+export type SubtitleVersion = { id: string; name: string; source: string; model: string | null; created_at: string; cue_count: number; document: SubtitleDocumentV2; media_fingerprint?: string | null; media_binding?: 'match' | 'mismatch' | 'unverified' };
+export const listSubtitleVersions = (videoId: string, offset = 0, signal?: AbortSignal) => request<{ versions: Omit<SubtitleVersion, "document">[]; total: number; unreadable_count?: number }>(`/subtitles/videos/${videoId}/versions?offset=${offset}&limit=20`, { signal });
 export const getSubtitleVersion = (videoId: string, id: string) => request<SubtitleVersion>(`/subtitles/videos/${videoId}/versions/${id}`);
-export const saveSubtitleVersion = (videoId: string, document: SubtitleDocumentV2, name = "Bản đang chỉnh") => request<SubtitleVersion>(`/subtitles/videos/${videoId}/versions`, { method: "POST", body: JSON.stringify({ document, name }) });
+export const saveSubtitleVersion = (videoId: string, document: SubtitleDocumentV2, name = "Bản đang chỉnh", signal?: AbortSignal, preserveSource = false) => request<SubtitleVersion>(`/subtitles/videos/${videoId}/versions`, { method: "POST", body: JSON.stringify({ document, name, preserve_source: preserveSource }), signal });
 
 export const cancelGeminiSubtitleJob = (jobId: string, signal?: AbortSignal) =>
   request<GeminiSubtitleJob>(`/subtitles/gemini/jobs/${jobId}/cancel`, {
@@ -184,6 +186,43 @@ export const previewSubtitleDocument = (
 export const subtitleRenderJob = (jobId: string, signal?: AbortSignal) =>
   request<SubtitleRenderJob>(`/subtitles/jobs/${jobId}`, { signal });
 
+export type SubtitleSceneDetectOptions = {
+  threshold?: number;
+  min_scene_len_s?: number;
+  target_duration_s?: number;
+  min_duration_s?: number;
+  max_duration_s?: number;
+};
+
+export const detectSubtitleScenes = (
+  videoId: string,
+  options: SubtitleSceneDetectOptions = {},
+  signal?: AbortSignal,
+) =>
+  request<SubtitleSceneJob>("/subtitles/v2/scene-detect", {
+    method: "POST",
+    body: JSON.stringify({ video_id: videoId, ...options }),
+    signal,
+  });
+
+export const exportSubtitleScenes = (
+  videoId: string,
+  sourceFingerprint: string,
+  chunks: SubtitleSceneChunk[],
+  document?: SubtitleDocumentV2 | null,
+  signal?: AbortSignal,
+) =>
+  request<SubtitleSceneJob>("/subtitles/v2/scene-export", {
+    method: "POST",
+    body: JSON.stringify({
+      video_id: videoId,
+      source_fingerprint: sourceFingerprint,
+      chunks: chunks.map(({ id, start_ms, end_ms }) => ({ id, start_ms, end_ms })),
+      ...(document ? { document } : {}),
+    }),
+    signal,
+  });
+
 export const cancelSubtitleRenderJob = (jobId: string, signal?: AbortSignal) =>
   request<SubtitleRenderJob>(`/subtitles/jobs/${jobId}/cancel`, {
     method: "POST",
@@ -204,4 +243,81 @@ export const burnSubtitleVideo = (
       ),
       options,
     }),
+  });
+
+export const extractSubtitlesOcr = (
+  videoId: string,
+  region?: SubtitleOcrRegion | null,
+  options?: SubtitleOcrOptions,
+  signal?: AbortSignal,
+) =>
+  request<SubtitleJob>("/subtitles/v2/extract/ocr", {
+    method: "POST",
+    body: JSON.stringify({
+      video_id: videoId,
+      ...(region ? { region } : {}),
+      ...(options?.source_language ? { source_language: options.source_language } : {}),
+      ...(options?.sample_fps != null ? { sample_fps: options.sample_fps } : {}),
+      ...(options?.min_duration_ms != null ? { min_duration_ms: options.min_duration_ms } : {}),
+      ...(options?.max_gap_ms != null ? { max_gap_ms: options.max_gap_ms } : {}),
+      ...(options?.auto_probe != null ? { auto_probe: options.auto_probe } : {}),
+    }),
+    signal,
+  });
+
+export const subtitleAsrRuntimeStatus = (signal?: AbortSignal) =>
+  request<SubtitleAsrRuntimeStatus>('/subtitles/v2/extract/asr/status', { signal });
+
+export const extractSubtitlesAsr = (
+  videoId: string,
+  options?: SubtitleAsrOptions,
+  signal?: AbortSignal,
+) =>
+  request<SubtitleJob>("/subtitles/v2/extract/asr", {
+    method: "POST",
+    body: JSON.stringify({
+      video_id: videoId,
+      ...(options?.source_language ? { source_language: options.source_language } : {}),
+      ...(options?.model ? { model: options.model } : {}),
+      ...(options?.device ? { device: options.device } : {}),
+      ...(options?.compute_type ? { compute_type: options.compute_type } : {}),
+    }),
+    signal,
+  });
+
+export const translateSubtitlesWithGemini = (
+  videoId: string,
+  document: SubtitleDocumentV2,
+  options?: SubtitleTranslateOptions,
+  cueIds?: string[] | null,
+  signal?: AbortSignal,
+) =>
+  request<SubtitleJob>("/subtitles/v2/translate/gemini", {
+    method: "POST",
+    body: JSON.stringify({
+      video_id: videoId,
+      document,
+      ...(options?.target_language ? { target_language: options.target_language } : {}),
+      ...(options?.bilingual != null ? { bilingual: options.bilingual } : {}),
+      ...(options?.model ? { model: options.model } : {}),
+      ...(options?.batch_size != null ? { batch_size: options.batch_size } : {}),
+      ...(cueIds ? { cue_ids: cueIds } : {}),
+    }),
+    signal,
+  });
+
+export const exportSourceSrt = (
+  document: SubtitleDocumentV2,
+  videoId?: string,
+  filename?: string,
+  signal?: AbortSignal,
+) =>
+  request<{ srt: string; count: number }>("/subtitles/v2/export/source-srt", {
+    method: "POST",
+    body: JSON.stringify({
+      document,
+      video_id: videoId,
+      filename,
+    }),
+    signal,
   });

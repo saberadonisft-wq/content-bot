@@ -1,6 +1,8 @@
 import {
   ChevronLeft,
   ChevronRight,
+  Eye,
+  EyeOff,
   Magnet,
   Maximize2,
   Pause,
@@ -34,6 +36,7 @@ import {
   type PreviewMode,
   type SubtitleCueV2,
   type SubtitleMaskRegion,
+  type SubtitleOcrRegion,
   type VideoClip,
 } from "./types";
 import {
@@ -254,6 +257,10 @@ type SubtitleWorkspaceProps = {
   overlayLayout: OverlayLayout;
   subtitleMasks: readonly SubtitleMaskRegion[];
   selectedMaskId: string | null;
+  ocrRegion?: SubtitleOcrRegion | null;
+  onOcrRegionChange?: (region: SubtitleOcrRegion) => void;
+  showOcrBox?: boolean;
+  ocrDisabled?: boolean;
   videoClips: readonly VideoClip[];
   selectedVideoClipId: string | null;
   canRestoreVideoClip: boolean;
@@ -303,6 +310,10 @@ export const SubtitleWorkspace = forwardRef<
   overlayLayout,
   subtitleMasks,
   selectedMaskId,
+  ocrRegion,
+  onOcrRegionChange,
+  showOcrBox,
+  ocrDisabled,
   videoClips,
   selectedVideoClipId,
   canRestoreVideoClip,
@@ -332,6 +343,7 @@ export const SubtitleWorkspace = forwardRef<
   const [libassReady, setLibassReady] = useState(false);
   const [pixelsPerSecond, setPixelsPerSecond] = useState(42);
   const [snapEnabled, setSnapEnabled] = useState(true);
+  const [ocrBoxVisible, setOcrBoxVisible] = useState(true);
   const durationMs = usePlaybackDuration(clock);
   const effectiveDurationMs = media?.duration_ms ?? durationMs;
   const frameTiming = media ?? DEFAULT_FRAME_TIMING;
@@ -461,6 +473,10 @@ export const SubtitleWorkspace = forwardRef<
         overlayLayout={overlayLayout}
         subtitleMasks={subtitleMasks}
         selectedMaskId={selectedMaskId}
+        ocrRegion={ocrRegion}
+        onOcrRegionChange={onOcrRegionChange}
+        showOcrBox={showOcrBox && ocrBoxVisible}
+        ocrDisabled={ocrDisabled}
         clock={clock}
         onVideoElementChange={handleVideoElementChange}
         onTogglePlay={handleTogglePlay}
@@ -513,6 +529,19 @@ export const SubtitleWorkspace = forwardRef<
           >
             <Undo2 size={17} /> <span>Khôi phục</span>
           </button>
+          {showOcrBox && ocrRegion && onOcrRegionChange && effectivePreviewMode === "live" && (
+            <button
+              type="button"
+              aria-label="Hiển thị vùng OCR"
+              aria-pressed={ocrBoxVisible}
+              disabled={!originalVideoUrl}
+              title="Ẩn hoặc hiện khung chọn; vùng dùng để trích xuất OCR vẫn được giữ nguyên"
+              onClick={() => setOcrBoxVisible((visible) => !visible)}
+            >
+              {ocrBoxVisible ? <EyeOff size={17} aria-hidden="true" /> : <Eye size={17} aria-hidden="true" />}
+              <span>{ocrBoxVisible ? "Ẩn vùng OCR" : "Hiện vùng OCR"}</span>
+            </button>
+          )}
         </div>
         <span className="video-edit-summary" aria-live="polite">
           {videoClips.length} đoạn · video xuất {formatCompactTimecode(keptVideoDurationMs(videoClips))}

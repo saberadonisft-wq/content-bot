@@ -97,6 +97,18 @@ class MixOptions(Model):
     gain: float = Field(default=1, ge=0, le=2)
     original_gain: float = Field(default=0.25, ge=0, le=2)
     mode: Literal["voice", "mix", "duck"] = "duck"
+    background_stem_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    background_stem_checksum: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    background_source_fingerprint: str | None = Field(default=None, max_length=128)
+    background_gain: float = Field(default=1, ge=0, le=2)
+
+    @model_validator(mode="after")
+    def background_binding(self):
+        values = (self.background_stem_id, self.background_stem_checksum,
+                  self.background_source_fingerprint)
+        if any(value is not None for value in values) and not all(values):
+            raise ValueError("Stem âm nền phải có đủ ID, checksum và fingerprint nguồn.")
+        return self
 
 
 class VoiceDocument(Model):
@@ -109,6 +121,7 @@ class VoiceDocument(Model):
     clips: list[VoiceClip] = Field(default_factory=list, max_length=20000)
     mix: MixOptions = Field(default_factory=MixOptions)
     pronunciation: dict[str, str] = Field(default_factory=dict, max_length=500)
+    text_normalization: Literal['off', 'vi-context-v1'] = 'off'
 
     @model_validator(mode="wrap")
     @classmethod
@@ -144,6 +157,26 @@ class PreviewRequest(Model):
     profile: VoiceProfile
     text: str = Field(min_length=1, max_length=3000)
     device: Literal["cpu", "cuda"] = "cpu"
+    pronunciation: dict[str, str] = Field(default_factory=dict, max_length=500)
+    text_normalization: Literal['off', 'vi-context-v1'] = 'off'
+
+    @model_validator(mode='after')
+    def dictionary_bounds(self):
+        if any(not k.strip() or len(k)>100 or len(v)>200 for k,v in self.pronunciation.items()):
+            raise ValueError('Từ điển phát âm không hợp lệ.')
+        return self
+
+
+class TextPreviewRequest(Model):
+    text: str = Field(max_length=8000)
+    pronunciation: dict[str, str] = Field(default_factory=dict, max_length=500)
+    text_normalization: Literal['off', 'vi-context-v1'] = 'off'
+
+    @model_validator(mode='after')
+    def dictionary_bounds(self):
+        if any(not k.strip() or len(k)>100 or len(v)>200 for k,v in self.pronunciation.items()):
+            raise ValueError('Từ điển phát âm không hợp lệ.')
+        return self
 
 
 class AudioSegment(Model):
